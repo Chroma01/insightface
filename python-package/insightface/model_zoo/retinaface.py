@@ -14,6 +14,8 @@ import os.path as osp
 import cv2
 import sys
 
+from .onnxruntime_utils import get_default_providers
+
 def softmax(z):
     assert len(z.shape) == 2
     s = np.max(z, axis=1)
@@ -78,7 +80,10 @@ class RetinaFace:
         if self.session is None:
             assert self.model_file is not None
             assert osp.exists(self.model_file)
-            self.session = onnxruntime.InferenceSession(self.model_file, None)
+            self.session = onnxruntime.InferenceSession(
+                self.model_file,
+                providers=get_default_providers(),
+            )
         self.center_cache = {}
         self.nms_thresh = 0.4
         self.det_thresh = 0.5

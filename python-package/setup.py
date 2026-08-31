@@ -60,12 +60,19 @@ requirements = [
     'scikit-image',
 ]
 
-gui_requirements = [
+privateframe_requirements = [
+    'av>=12',
+    'PyYAML>=6.0',
+]
+
+gui_only_requirements = [
     'PySide6-Essentials>=6.5',
     'Pillow',
     'reportlab',
     'scikit-learn',
 ]
+
+gui_requirements = gui_only_requirements + privateframe_requirements
 
 face3d_requirements = [
     'cython',
@@ -77,6 +84,7 @@ package_data = {
     "insightface.data.images": ["*.jpg", "*.jpeg", "*.png"],
     "insightface.data.objects": ["*.pkl"],
     "insightface.gui.assets": ["*.png", "*.ico", "*.icns"],
+    "insightface.app.privateframe": ["configs/*.yaml"],
 }
 
 packages = find_namespace_packages(
@@ -171,9 +179,14 @@ setup(
             "insightface-gui=insightface.gui.__main__:main",
             "insightface-eval-studio=insightface.gui.__main__:main",
             "insightface-desktop=insightface.gui.__main__:main",
+            "insightface-privateframe=insightface.app.privateframe.cli:main",
         ]
     },
-    extras_require={"gui": gui_requirements, "face3d": face3d_requirements},
+    extras_require={
+        "gui": gui_requirements,
+        "privateframe": privateframe_requirements,
+        "face3d": face3d_requirements,
+    },
     install_requires=requirements,
     headers=headers,
     ext_modules=ext_modules,

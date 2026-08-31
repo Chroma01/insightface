@@ -7,6 +7,7 @@ from enum import Enum
 
 
 class AppMode(str, Enum):
+    PRIVATE_FRAME = "private_frame"
     FACE_VERIFICATION = "face_verification"
     ALBUM_MANAGEMENT = "album_management"
     FACE_SWAP = "face_swap"
@@ -33,6 +34,19 @@ class NavigationMode:
 
 
 NAVIGATION_MODES: dict[AppMode, NavigationMode] = {
+    AppMode.PRIVATE_FRAME: NavigationMode(
+        id=AppMode.PRIVATE_FRAME,
+        title="PrivateFrame",
+        description="Redact faces in a local video and save the privacy-protected result.",
+        items=(
+            NavigationItem(
+                "private_frame",
+                "PrivateFrame Video Privacy",
+                "private_frame",
+                "Upload a video, choose privacy options, and create a redacted video locally.",
+            ),
+        ),
+    ),
     AppMode.FACE_VERIFICATION: NavigationMode(
         id=AppMode.FACE_VERIFICATION,
         title="Face Recognition",
@@ -84,7 +98,7 @@ def mode_from_value(value: str | AppMode | None) -> AppMode:
         for mode in NAVIGATION_MODES.values():
             if value == mode.title:
                 return mode.id
-    return AppMode.FACE_VERIFICATION
+    return AppMode.PRIVATE_FRAME
 
 
 def last_page_attr(mode: AppMode) -> str:

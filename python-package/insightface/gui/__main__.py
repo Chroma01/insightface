@@ -25,9 +25,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             import insightface
 
-            insightface_version = getattr(insightface, "__version__", "1.0.1")
+            insightface_version = getattr(insightface, "__version__", __version__)
         except Exception:
-            insightface_version = "1.0.1"
+            insightface_version = __version__
         print(f"InsightFace Evaluation Studio {__version__}")
         print(f"insightface {insightface_version}")
         return 0

@@ -1,6 +1,6 @@
 # InsightFace Evaluation Studio GUI
 
-InsightFace Evaluation Studio is a local desktop GUI for InsightFace 1.0.1. It is
+InsightFace Evaluation Studio is a local desktop GUI for InsightFace 2.0. It is
 designed for no-code face recognition testing, local People Library management,
 album organization, enterprise model evaluation, report export, and basic face
 swap trials.
@@ -19,6 +19,21 @@ PyPI users can install:
 pip install "insightface[gui]"
 insightface-gui
 ```
+
+These commands install `onnxruntime` by default for CPU and supported macOS
+CoreML systems. The `gui` extra also installs PrivateFrame, PyAV, and PyYAML.
+PrivateFrame can instead be installed without the GUI with
+`pip install "insightface[privateframe]"`. For NVIDIA CUDA, replace the default
+runtime after installing the GUI:
+
+```bash
+python -m pip uninstall -y onnxruntime
+python -m pip install onnxruntime-gpu
+```
+
+Do not keep `onnxruntime` and `onnxruntime-gpu` in the same environment.
+Installing or upgrading `insightface[gui]` may install the default runtime
+again, so repeat this replacement afterward on NVIDIA systems.
 
 Aliases:
 
@@ -59,7 +74,7 @@ clickable drag-and-drop selectors with hover and drag-over color feedback.
 
 ## Mode-based navigation
 
-InsightFace Evaluation Studio uses four workflow modes. The mode selector is a
+InsightFace Evaluation Studio uses five workflow modes. The mode selector is a
 persistent **Workflows** rail on the left side of the window so the current
 workspace is always visible. Face Recognition, Album Management, and Face Swap
 use a single full-width workspace; modes with several workflows show a compact
@@ -69,13 +84,24 @@ The Workflows rail also keeps the local-processing notice visible in every
 mode: **All processing is local. No images, embeddings, or reports are uploaded
 automatically.**
 
-1. **Face Recognition**: one Query & Gallery workspace. One gallery image runs
+1. **PrivateFrame**: upload or drop a video, select `raccoon_s` or `raccoon_l`,
+   choose Normal / Fast / Ultra Fast, a privacy policy, and Gaussian / Mosaic,
+   then process it directly through the PrivateFrame Python API on a background
+   worker. The page always writes `<video>_privateframe.json` to the selected
+   output directory. Choose **JSON only** to stop after analysis for later
+   editing, or **JSON + redacted video** to also write the paired
+   `<video>_privateframe.mp4`. **More Options** contains manual stride and
+   between-scan control, face coverage, encoding preset (Medium by default),
+   CRF quality, AAC audio, and selective-recognition Gallery
+   settings. Gallery people are selected from first-level person folders;
+   uncertain identities remain blurred.
+2. **Face Recognition**: one Query & Gallery workspace. One gallery image runs
    1:1 compare; multiple gallery images or a folder run 1:N gallery search.
-2. **Album Management**: one **Album** workspace for local folder import,
+3. **Album Management**: one **Album** workspace for local folder import,
    refresh, DBSCAN face clustering, and photo review.
-3. **Face Swap**: one Source + Target = Result workspace. Target can be an
+4. **Face Swap**: one Source + Target = Result workspace. Target can be an
    image or video.
-4. **Enterprise Evaluation**: a single local 1:1 / 1:N evaluation workspace
+5. **Enterprise Evaluation**: a single local 1:1 / 1:N evaluation workspace
    with identity-folder import, Auto Split, metrics, and report export.
 
 Global utilities are always available from the top app bar:
@@ -119,8 +145,9 @@ configured GFPGAN ONNX model using a 512x512 restore pass.
 The GUI opens even when a model is missing. In that case, pages show
 `Model is not loaded. Please open Models.`
 
-The GUI does not download models automatically. Open **Models > Downloads** and
-click **Refresh Download URLs** to fetch the latest release assets from:
+The general face-recognition and face-swap GUI does not download models
+automatically. Open **Models > Downloads** and click **Refresh Download URLs**
+to fetch the latest release assets from:
 
 ```text
 https://github.com/deepinsight/insightface/releases
@@ -142,6 +169,9 @@ Downloaded archives are cached in:
 ```text
 ~/.insightface/gui/cache/models
 ```
+
+PrivateFrame is the exception: `raccoon_s` and `raccoon_l` use the standard
+InsightFace ModelZoo directory and may be downloaded there on first use.
 
 Zip model packages are extracted to:
 

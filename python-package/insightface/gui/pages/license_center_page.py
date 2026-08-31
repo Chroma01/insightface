@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QLabel, QTableWidget, QTableWidgetItem
 
+from ..core.face_engine import provider_runtime_display
 from ..core.i18n import tr
 from ..core.links import open_insightface_url
 from ..core.licensing import allowed_usage_summary
@@ -36,6 +37,7 @@ class LicenseCenterPage(BasePage):
 
     def refresh(self) -> None:
         cfg = self.context.config
+        provider_name, provider_tooltip = provider_runtime_display(cfg.provider)
         self.summary.setText(
             " ".join(
                 [
@@ -49,11 +51,12 @@ class LicenseCenterPage(BasePage):
                     ),
                     f"{tr('Current package', cfg.ui_language)}: insightface {APP_VERSION}, GUI {APP_VERSION}, "
                     f"{tr('Model', cfg.ui_language).lower()} {cfg.model_name}, "
-                    f"{tr('Provider', cfg.ui_language).lower()} {cfg.provider}, "
+                    f"{tr('Provider', cfg.ui_language).lower()} {provider_name}, "
                     f"{tr('License', cfg.ui_language).lower()} {tr(cfg.license_status, cfg.ui_language)}.",
                 ]
             )
         )
+        self.summary.setToolTip(provider_tooltip)
         summary = allowed_usage_summary()
         self.table.setRowCount(len(summary))
         for row, (usage, status) in enumerate(summary.items()):

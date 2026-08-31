@@ -27,7 +27,7 @@ def test_main_window_smoke(tmp_path):
     assert app.applicationName() == "InsightFace Evaluation Studio"
     assert app.organizationName() == "InsightFace"
     assert app.organizationDomain() == "insightface.ai"
-    assert app.applicationVersion() == "1.0.1"
+    assert app.applicationVersion() == "2.0"
     assert APP_ID == "ai.insightface.evaluationstudio"
     assert APP_PROCESS_NAME == "InsightFace Evaluation Studio"
     assert app_icon_path().exists()
@@ -47,7 +47,7 @@ def test_main_window_smoke(tmp_path):
     assert window.mode_rail.isVisible()
     assert window.mode_rail.width() >= 220
     assert window.mode_list.count() == len(AppMode)
-    assert window.mode_list.currentItem().data(Qt.UserRole) == AppMode.FACE_VERIFICATION.value
+    assert window.mode_list.currentItem().data(Qt.UserRole) == AppMode.PRIVATE_FRAME.value
     enterprise_help_button = window.findChild(QPushButton, "enterpriseHelpButton")
     assert enterprise_help_button is not None
     assert enterprise_help_button.text() == "Enterprise Help"
@@ -56,6 +56,13 @@ def test_main_window_smoke(tmp_path):
     assert local_notice is not None
     assert "All processing is local" in local_notice.text()
     assert "No images, embeddings, or reports are uploaded automatically" in local_notice.text()
+    privateframe_page = window.page_registry.get("private_frame")
+    assert window.stack.currentWidget() is privateframe_page
+    assert privateframe_page.objectName() == "privateFramePage"
+    assert privateframe_page.progress_bar.value() == 0
+    assert privateframe_page.start_button.isEnabled()
+    assert not privateframe_page.cancel_button.isEnabled()
+    window.change_mode(AppMode.FACE_VERIFICATION)
     window.open_page("verification")
     verification_page = window.page_registry.get("verification")
     assert abs(window.context.config.recognition_threshold - 0.4) < 1e-9

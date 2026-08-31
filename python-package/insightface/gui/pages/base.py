@@ -98,17 +98,41 @@ class BasePage(QWidget):
         self.set_status(message)
         QMessageBox.warning(self, tr(self.title, self.context.config.ui_language), tr(message, self.context.config.ui_language))
 
-    def run_task(self, title: str, fn: Callable, on_result: Callable | None = None, show_dialog: bool = True) -> None:
+    def run_task(
+        self,
+        title: str,
+        fn: Callable,
+        on_result: Callable | None = None,
+        show_dialog: bool = True,
+        on_progress: Callable | None = None,
+        on_error: Callable | None = None,
+        on_finished: Callable | None = None,
+    ):
         main = self.window()
         if hasattr(main, "run_task"):
-            main.run_task(title, fn, on_result, show_dialog=show_dialog)
+            return main.run_task(
+                title,
+                fn,
+                on_result,
+                show_dialog=show_dialog,
+                on_progress=on_progress,
+                on_error=on_error,
+                on_finished=on_finished,
+            )
         else:
             try:
                 result = fn()
                 if on_result:
                     on_result(result)
             except Exception as exc:
-                self.show_error(str(exc))
+                if on_error:
+                    on_error(str(exc))
+                else:
+                    self.show_error(str(exc))
+            finally:
+                if on_finished:
+                    on_finished()
+        return None
 
     def refresh(self) -> None:
         pass

@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
+from ...model_zoo.onnxruntime_utils import get_default_providers
 from .constants import AUTO_DET_SIZES, DEFAULT_DET_SIZE, DEFAULT_MODEL_NAME, DEFAULT_THRESHOLD
 from .logging import get_logger
 from .models import CompareResult, FaceRecord
@@ -37,7 +38,10 @@ class FaceEngine:
         self.model_name = model_name
         self.root = Path(os.path.expanduser(str(root or "~/.insightface")))
         self.custom_model_dir = Path(os.path.expanduser(str(custom_model_dir))) if custom_model_dir else None
-        self.requested_providers = list(providers or ["CPUExecutionProvider"])
+        requested_providers = list(providers) if providers is not None else []
+        self.requested_providers = (
+            requested_providers or get_default_providers()
+        )
         self.det_size = det_size
         self.det_sizes = self._resolve_det_sizes(det_size)
         self.auto_det_size = len(self.det_sizes) > 1
@@ -102,7 +106,11 @@ class FaceEngine:
                     self.last_error = f"No detection model found in {model_dir}."
                     return
                 self.det_model = self.models["detection"]
-                ctx_id = 0 if any("CUDA" in provider for provider in self.requested_providers) else -1
+                ctx_id = (
+                    -1
+                    if self.requested_providers[0] == "CPUExecutionProvider"
+                    else 0
+                )
                 self.ctx_id = ctx_id
                 for taskname, model in self.models.items():
                     if taskname == "detection":
@@ -410,11 +418,57 @@ def providers_from_choice(choice: str) -> List[str]:
     if normalized == "cpu":
         return ["CPUExecutionProvider"]
     if normalized == "cuda":
-        if is_cuda_provider_available():
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        available = available_execution_providers()
+        if "CUDAExecutionProvider" in available:
+            providers = ["CUDAExecutionProvider"]
+            if "CPUExecutionProvider" in available:
+                providers.append("CPUExecutionProvider")
+            return providers
         LOGGER.warning("CUDA provider was requested but CUDAExecutionProvider is not available; using CPU.")
         return ["CPUExecutionProvider"]
     available = available_execution_providers()
-    if "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]
+    return get_default_providers(available)
+
+
+def provider_runtime_display(choice: str) -> tuple[str, str]:
+    """Describe the provider chain the GUI can use for a saved choice.
+
+    ``Auto`` is a configuration policy, not an execution provider.  Display
+    surfaces should show the resolved primary provider while keeping the full
+    fallback chain in the tooltip.  The settings control itself still shows
+    ``Auto`` so users can retain automatic selection.
+    """
+
+    configured = str(choice or "Auto").strip() or "Auto"
+    available = available_execution_providers()
+    if not available:
+        return (
+            "Unavailable",
+            "ONNX Runtime reports no available execution providers.",
+        )
+    try:
+        selected = [
+            provider
+            for provider in providers_from_choice(configured)
+            if provider in available
+        ]
+    except Exception as exc:
+        LOGGER.debug("Unable to resolve GUI execution provider: %s", exc)
+        selected = []
+    if not selected:
+        return (
+            "Unavailable",
+            f"Configured selection: {configured}. No matching ONNX Runtime "
+            "execution provider is currently available.",
+        )
+    primary, *fallbacks = selected
+    if fallbacks:
+        chain = primary + "".join(
+            f" → {provider} (fallback)" for provider in fallbacks
+        )
+    else:
+        chain = primary
+    return (
+        primary,
+        f"Configured selection: {configured}. Resolved provider chain: {chain}.",
+    )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QGridLayout, QPushButton, QWidget
 
 from ..core.constants import LOCAL_PROCESSING_NOTICE, SUBTITLE
+from ..core.face_engine import provider_runtime_display
 from ..core.tooltips import set_button_tooltip
 from ..widgets.metric_card import MetricCard
 from .base import BasePage
@@ -13,13 +14,16 @@ from .base import BasePage
 class DashboardPage(BasePage):
     def __init__(self, context, parent=None):
         super().__init__(context, "Dashboard", "Welcome to InsightFace Evaluation Studio.\n" + SUBTITLE, parent)
+        provider_name, provider_tooltip = provider_runtime_display(
+            context.config.provider
+        )
         self.content.addWidget(self.notice(LOCAL_PROCESSING_NOTICE))
         grid_widget = QWidget()
         self.grid = QGridLayout(grid_widget)
         self.cards = {
             "workspace": MetricCard("Workspace", context.config.workspace_path),
             "model": MetricCard("Model", context.config.model_name),
-            "provider": MetricCard("Provider", context.config.provider),
+            "provider": MetricCard("Provider", provider_name),
             "license": MetricCard("License", context.config.license_status),
             "people": MetricCard("People", "0"),
             "samples": MetricCard("Face samples", "0"),
@@ -28,6 +32,7 @@ class DashboardPage(BasePage):
         }
         for index, card in enumerate(self.cards.values()):
             self.grid.addWidget(card, index // 2, index % 2)
+        self.cards["provider"].setToolTip(provider_tooltip)
         self.content.addWidget(grid_widget)
         shortcuts = QWidget()
         shortcut_layout = QGridLayout(shortcuts)
@@ -49,9 +54,13 @@ class DashboardPage(BasePage):
 
     def refresh(self) -> None:
         counts = self.context.storage.counts()
+        provider_name, provider_tooltip = provider_runtime_display(
+            self.context.config.provider
+        )
         self.cards["workspace"].set_value(self.context.config.workspace_path)
         self.cards["model"].set_value(self.context.config.model_name)
-        self.cards["provider"].set_value(self.context.config.provider)
+        self.cards["provider"].set_value(provider_name)
+        self.cards["provider"].setToolTip(provider_tooltip)
         self.cards["license"].set_value(self.context.config.license_status)
         self.cards["people"].set_value(counts["people"])
         self.cards["samples"].set_value(counts["face_samples"])

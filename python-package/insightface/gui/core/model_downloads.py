@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
+from .. import __version__
+
 from .utils import safe_json_dumps, utc_now_iso
 
 GITHUB_RELEASES_URL = "https://github.com/deepinsight/insightface/releases"
@@ -156,7 +158,7 @@ def refresh_model_assets(gui_cache_dir: str | os.PathLike[str], timeout: int = 2
         GITHUB_LATEST_RELEASE_API,
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "InsightFace-Evaluation-Studio/1.0.1",
+            "User-Agent": f"InsightFace-Evaluation-Studio/{__version__}",
         },
     )
     try:
@@ -265,7 +267,7 @@ def _download_with_retries(
         existing = partial.stat().st_size if partial.exists() else 0
         headers = {
             "Accept": "application/octet-stream,*/*",
-            "User-Agent": "Mozilla/5.0 InsightFace-Evaluation-Studio/1.0.1",
+            "User-Agent": f"Mozilla/5.0 InsightFace-Evaluation-Studio/{__version__}",
         }
         if existing:
             headers["Range"] = f"bytes={existing}-"

@@ -21,6 +21,7 @@ from .pages.mode_dashboards import (
 from .pages.multiface_photo_page import MultiFacePhotoPage
 from .pages.people_library_page import PeopleLibraryPage
 from .pages.placeholder_page import CommercialNextStepsPage, PlaceholderPage
+from .pages.privateframe_page import PrivateFramePage
 from .pages.reports_page import ReportsPage
 from .pages.verification_page import VerificationPage
 from .pages.video_search_page import VideoSearchPage
@@ -42,6 +43,7 @@ class PageRegistry:
 
     def _create_page(self, page_key: str) -> QWidget:
         factories = {
+            "private_frame": PrivateFramePage,
             "verification": VerificationPage,
             "face_dashboard": FaceDashboardPage,
             "album_dashboard": AlbumDashboardPage,
@@ -79,7 +81,7 @@ class PageRegistry:
             "batch_image_swap": (
                 "Batch Image Swap",
                 "Swap faces across a folder of images using the configured swap model.",
-                "Batch image swap is coming soon. Use Image Face Swap for single-image trials in v1.0.1.",
+                "Batch image swap is coming soon. Use Image Face Swap for single-image trials.",
             ),
             "video_face_swap": (
                 "Video Face Swap",

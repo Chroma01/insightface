@@ -7,13 +7,16 @@ from typing import Optional
 
 import numpy as np
 
+from ...model_zoo.onnxruntime_utils import get_default_providers
+
 
 class GFPGANRestorer:
     """Small ONNXRuntime wrapper for GFPGAN 512x512 face restoration."""
 
     def __init__(self, model_path: str = "", providers: Optional[list[str]] = None):
         self.model_path = model_path
-        self.providers = providers or ["CPUExecutionProvider"]
+        requested_providers = list(providers) if providers is not None else []
+        self.providers = requested_providers or get_default_providers()
         self.session = None
         self.input_name = ""
         self.output_name = ""
@@ -74,7 +77,8 @@ class FaceSwapEngine:
         enable_gfpgan: bool = False,
     ):
         self.model_path = model_path
-        self.providers = providers or ["CPUExecutionProvider"]
+        requested_providers = list(providers) if providers is not None else []
+        self.providers = requested_providers or get_default_providers()
         self.model = None
         self.enable_gfpgan = enable_gfpgan
         self.restorer = GFPGANRestorer(gfpgan_model_path, self.providers) if enable_gfpgan else None

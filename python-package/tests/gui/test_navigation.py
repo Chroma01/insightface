@@ -16,6 +16,16 @@ def test_navigation_modes_do_not_include_global_sidebar_items():
     assert len(all_page_keys) >= len(set(all_page_keys))
 
 
+def test_privateframe_is_the_first_workflow():
+    first_mode = next(iter(NAVIGATION_MODES))
+    items = NAVIGATION_MODES[AppMode.PRIVATE_FRAME].items
+
+    assert first_mode == AppMode.PRIVATE_FRAME
+    assert NAVIGATION_MODES[first_mode].title == "PrivateFrame"
+    assert len(items) == 1
+    assert items[0].page_key == "private_frame"
+
+
 def test_face_verification_mode_is_focused():
     titles = [item.title for item in NAVIGATION_MODES[AppMode.FACE_VERIFICATION].items]
     keys = [item.page_key for item in NAVIGATION_MODES[AppMode.FACE_VERIFICATION].items]
@@ -60,6 +70,14 @@ def test_mode_persistence(tmp_path):
     assert exists is True
     assert loaded.ui_last_mode == AppMode.FACE_SWAP.value
     assert loaded.ui_last_page_face_swap == "image_face_swap"
+
+
+def test_new_config_starts_with_privateframe(tmp_path):
+    cfg = AppConfig(workspace_path=str(tmp_path))
+
+    assert cfg.ui_default_mode == AppMode.PRIVATE_FRAME.value
+    assert cfg.ui_last_mode == AppMode.PRIVATE_FRAME.value
+    assert cfg.ui_last_page_private_frame == "private_frame"
 
 
 def test_default_detection_size_is_auto(tmp_path):

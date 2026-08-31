@@ -11,6 +11,22 @@ pip install -e ".[gui]"
 insightface-gui
 ```
 
+The `gui` extra intentionally includes the `privateframe` dependency set
+(`av` and `PyYAML`). A command-line/API-only installation can use
+`pip install -e ".[privateframe]"` without installing PySide6.
+
+This installs `onnxruntime` by default for CPU and supported macOS CoreML
+systems. For an NVIDIA CUDA build, replace it after installing the GUI:
+
+```bash
+python -m pip uninstall -y onnxruntime
+python -m pip install onnxruntime-gpu
+```
+
+Do not package both runtime distributions. Installing or upgrading the
+InsightFace package may install `onnxruntime` again, so repeat this replacement
+before building an NVIDIA artifact.
+
 ## Build Python Package
 
 ```bash
@@ -22,7 +38,7 @@ python -m twine check dist/*
 
 ## Optional face3d Extension
 
-The default 1.0.1 package does not compile the optional `face3d` Cython/C++
+The default package does not compile the optional `face3d` Cython/C++
 extension. This avoids requiring a C++ compiler for normal inference and GUI
 users.
 
@@ -87,7 +103,7 @@ python -m twine upload dist/*
 Only project maintainers or CI configured with PyPI Trusted Publisher should
 upload official PyPI releases. Codex should not attempt to upload PyPI.
 
-Before releasing 1.0.1, confirm model licenses, README content, version numbers,
+Before releasing 2.0, confirm model licenses, README content, version numbers,
 wheel contents, third-party notices, and that the package name is `insightface`.
 PyPI versions are immutable, so a released version cannot be overwritten.
 
@@ -133,13 +149,17 @@ Output:
 - The GUI extra uses `PySide6-Essentials` for Qt Widgets and includes
   `reportlab` for PDF reports without installing the much larger
   `PySide6_Addons` wheel.
-- onnxruntime and onnxruntime-gpu may require additional dynamic library work.
+- `onnxruntime` and `onnxruntime-gpu` may require additional dynamic library
+  work and must not coexist in one build environment.
 - CUDA builds are not recommended for default community installers.
 - A CPU provider build is the safest default.
 - GPU/CUDA builds can be distributed as separate enterprise builds.
 - Do not package user workspaces, SQLite databases, reports, images, videos, or
   embeddings.
 - Do not package commercial model files by default.
+- Desktop builds bundle `insightface/app/privateframe/configs/base.yaml` at the
+  same package-relative path so the frozen GUI can load its single built-in
+  PrivateFrame configuration without a source checkout.
 - The GUI workspace/cache defaults to `~/.insightface/gui/`; model packages are
   manually downloaded into `~/.insightface/gui/cache/models` and extracted to
   `~/.insightface/models/<model_name>/`.

@@ -9,12 +9,19 @@ from __future__ import division
 
 import glob
 import os.path as osp
+from pathlib import Path
 
 import numpy as np
 import onnxruntime
-from numpy.linalg import norm
 
 from ..model_zoo import model_zoo
+from ..model_zoo.onnxruntime_utils import get_default_providers
+from ..model_zoo.package_manifest import (
+    MODEL_PACKAGE_TASKS,
+    ModelPackageDescriptor,
+    has_model_package_manifest,
+    load_model_package,
+)
 from ..utils import DEFAULT_MP_NAME, ensure_available
 from .common import Face
 
@@ -22,6 +29,18 @@ __all__ = ['FaceAnalysis']
 
 DEFAULT_DET_SIZES = [(128, 128), (640, 640)]
 
+
+def _provider_name(provider):
+    if isinstance(provider, (list, tuple)) and provider:
+        return str(provider[0])
+    return str(provider)
+
+
+def _default_coreml_detector_input_size():
+    return max(
+        DEFAULT_DET_SIZES,
+        key=lambda value: int(value[0]) * int(value[1]),
+    )
 
 def _is_auto_det_size(det_size):
     if det_size is None:
@@ -41,8 +60,48 @@ def _is_auto_det_size(det_size):
 class FaceAnalysis:
     def __init__(self, name=DEFAULT_MP_NAME, root='~/.insightface', allowed_modules=None, **kwargs):
         onnxruntime.set_default_logger_severity(3)
+        if kwargs.get('providers') is None:
+            kwargs['providers'] = get_default_providers()
+        providers = kwargs.get('providers') or ()
+        if (
+            providers
+            and _provider_name(providers[0]) == 'CoreMLExecutionProvider'
+        ):
+            # CoreML cannot safely construct the dynamic SCRFD Session with
+            # the default ALL compute-unit policy on some ORT/macOS versions.
+            # Keep the public constructor unchanged and pass an internal fixed
+            # main resolution to both manifest and legacy model loading.
+            if kwargs.get('static_shape_sessions', True) is not False:
+                kwargs.setdefault(
+                    '_coreml_detector_input_size',
+                    _default_coreml_detector_input_size(),
+                )
         self.models = {}
-        self.model_dir = ensure_available('models', name, root=root)
+        self.det_model = None
+        self.model_package = None
+
+        if isinstance(name, ModelPackageDescriptor):
+            self.model_package = name
+            self.model_dir = str(name.path)
+        else:
+            direct = Path(str(name)).expanduser()
+            if direct.is_dir():
+                self.model_dir = str(direct.resolve())
+            else:
+                self.model_dir = ensure_available('models', name, root=root)
+
+        if (
+            self.model_package is not None
+            or has_model_package_manifest(self.model_dir)
+        ):
+            self._load_manifest_package(
+                allowed_modules,
+                kwargs,
+            )
+            assert 'detection' in self.models
+            self.det_model = self.models['detection']
+            return
+
         onnx_files = glob.glob(osp.join(self.model_dir, '*.onnx'))
         onnx_files = sorted(onnx_files)
         for onnx_file in onnx_files:
@@ -61,8 +120,47 @@ class FaceAnalysis:
         assert 'detection' in self.models
         self.det_model = self.models['detection']
 
+    def _load_manifest_package(
+        self,
+        allowed_modules,
+        kwargs,
+    ):
+        # Parse once before any Session construction. Invalid manifests must
+        # never fall back to filename/shape heuristics.
+        if self.model_package is None:
+            self.model_package = load_model_package(self.model_dir)
+        requested = None if allowed_modules is None else set(allowed_modules)
 
-    def prepare(self, ctx_id, det_thresh=0.5, det_size=None):
+        model_kwargs = dict(kwargs)
+
+        for task in MODEL_PACKAGE_TASKS:
+            if requested is not None and task not in requested:
+                continue
+            descriptor = self.model_package.task(task)
+            model = model_zoo.get_model(
+                self.model_dir,
+                model_task=task,
+                model_descriptor=descriptor,
+                **model_kwargs,
+            )
+            if model.taskname != task:
+                raise RuntimeError(
+                    f'manifest {task} model reported task {model.taskname}, '
+                    f'expected {task}'
+                )
+            if task in self.models:
+                raise RuntimeError(f'duplicated manifest model task: {task}')
+            print(
+                'find manifest model:',
+                descriptor.path,
+                model.taskname,
+                getattr(model, 'input_shape', None),
+                getattr(model, 'input_mean', None),
+                getattr(model, 'input_std', None),
+            )
+            self.models[task] = model
+
+    def prepare(self, ctx_id=0, det_thresh=0.5, det_size=None):
         self.det_thresh = det_thresh
         if _is_auto_det_size(det_size):
             det_size = list(DEFAULT_DET_SIZES)

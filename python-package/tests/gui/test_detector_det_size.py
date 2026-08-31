@@ -72,16 +72,19 @@ def test_face_analysis_prepare_defaults_to_auto_det_size():
         taskname = "detection"
 
         def __init__(self):
+            self.ctx_id = None
             self.kwargs = None
 
         def prepare(self, ctx_id, **kwargs):
+            self.ctx_id = ctx_id
             self.kwargs = kwargs
 
     detector = FakeDetectionModel()
     app = FaceAnalysis.__new__(FaceAnalysis)
     app.models = {"detection": detector}
 
-    app.prepare(ctx_id=0)
+    app.prepare()
 
+    assert detector.ctx_id == 0
     assert app.det_size == DEFAULT_DET_SIZES
     assert detector.kwargs["input_size"] == DEFAULT_DET_SIZES

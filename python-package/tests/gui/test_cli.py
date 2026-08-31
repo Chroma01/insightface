@@ -7,12 +7,12 @@ def test_cli_import_and_version(capsys):
     import insightface
     import insightface.gui
 
-    assert insightface.__version__ == "1.0.1"
-    assert insightface.gui.__version__ == "1.0.1"
+    assert insightface.__version__ == "2.0"
+    assert insightface.gui.__version__ == "2.0"
     assert main(["--version"]) == 0
     out = capsys.readouterr().out
-    assert "InsightFace Evaluation Studio 1.0.1" in out
-    assert "insightface 1.0.1" in out
+    assert "InsightFace Evaluation Studio 2.0" in out
+    assert "insightface 2.0" in out
 
 
 def test_insightface_cli_import_does_not_require_mxnet():

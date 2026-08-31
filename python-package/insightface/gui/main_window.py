@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from .core.config import save_config
 from .core.constants import APP_VERSION, LOCAL_PROCESSING_NOTICE, RESPONSIBLE_USE_NOTICE, WINDOW_TITLE
-from .core.face_engine import is_cuda_provider_available
+from .core.face_engine import is_cuda_provider_available, provider_runtime_display
 from .core.i18n import apply_translations, tr
 from .core.links import open_insightface_url
 from .core.navigation import (
@@ -150,7 +150,7 @@ class FirstLaunchWizard(QDialog):
         self.config.ui_last_mode = (
             AppMode.ENTERPRISE_EVALUATION.value
             if self.config.mode == "Enterprise Evaluation"
-            else AppMode.FACE_VERIFICATION.value
+            else AppMode.PRIVATE_FRAME.value
         )
         selected_model = self.model.currentText()
         self.config.model_name = selected_model if selected_model != "custom model directory" else self.config.model_name
@@ -172,11 +172,16 @@ class FirstLaunchWizard(QDialog):
                     if cuda_available
                     else "CUDAExecutionProvider is not available. Install a matching onnxruntime-gpu, CUDA runtime, and GPU driver first."
                 )
-        self.provider.setToolTip("Auto uses CUDA when CUDAExecutionProvider is available, otherwise CPU.")
+        self.provider.setToolTip(
+            "Auto chooses the best available ONNX Runtime provider in this "
+            "order: CoreML, CUDA, CPU."
+        )
 
 
 class MainWindow(QMainWindow):
     LEGACY_PAGE_MAP = {
+        "PrivateFrame": "private_frame",
+        "PrivateFrame Video Privacy": "private_frame",
         "Dashboard": "face_dashboard",
         "Face Recognition": "verification",
         "Verification": "verification",
@@ -210,6 +215,9 @@ class MainWindow(QMainWindow):
         self.resize(int(context.config.ui_window_width), int(context.config.ui_window_height))
         self.thread_pool = QThreadPool.globalInstance()
         self.active_workers: set[Worker] = set()
+        self._model_autoload_running = False
+        self._closing_after_workers = False
+        self._initializing = True
         self.page_registry = PageRegistry(context)
         self.pages = self.page_registry.pages
         self.current_mode = mode_from_value(context.config.ui_last_mode)
@@ -260,12 +268,12 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         apply_button_tooltips(self)
         self.change_mode(self.current_mode, restore_last=True, save=False)
+        self._initializing = False
         self.apply_language()
         self.refresh_statusbar()
         if not self.context.config_exists:
             QTimer.singleShot(100, self.show_first_launch)
-        if self.context.config.auto_load_model and not self.context.runtime_safe_mode:
-            QTimer.singleShot(250, self.auto_load_model)
+        QTimer.singleShot(250, self._auto_load_model_if_needed)
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
@@ -333,6 +341,7 @@ class MainWindow(QMainWindow):
 
     def _mode_subtitle(self, mode: AppMode) -> str:
         subtitles = {
+            AppMode.PRIVATE_FRAME: "Local video face redaction",
             AppMode.FACE_VERIFICATION: "Query and gallery recognition",
             AppMode.ALBUM_MANAGEMENT: "Photo clustering and review",
             AppMode.FACE_SWAP: "Source + Target = Result",
@@ -415,6 +424,8 @@ class MainWindow(QMainWindow):
             self.context.config.ui_last_mode = self.current_mode.value
             save_config(self.context.config)
         self.open_page(page_key, from_mode_change=True)
+        if not self._initializing:
+            QTimer.singleShot(0, self._auto_load_model_if_needed)
 
     def _sync_mode_list_selection(self) -> None:
         for row in range(self.mode_list.count()):
@@ -491,7 +502,26 @@ class MainWindow(QMainWindow):
             self.change_mode(mode_from_value(self.context.config.ui_last_mode), restore_last=False)
             self.refresh_statusbar()
 
+    def _auto_load_model_if_needed(self) -> None:
+        if (
+            self._closing_after_workers
+            or self.current_mode == AppMode.PRIVATE_FRAME
+            or not self.context.config.auto_load_model
+            or self.context.runtime_safe_mode
+            or self.context.engine.is_loaded()
+            or self._model_autoload_running
+        ):
+            return
+        if self.active_workers:
+            QTimer.singleShot(250, self._auto_load_model_if_needed)
+            return
+        self.auto_load_model()
+
     def auto_load_model(self) -> None:
+        if self._model_autoload_running or self.context.engine.is_loaded():
+            return
+        self._model_autoload_running = True
+
         def task():
             self.context.engine.load()
             return self.context.engine
@@ -503,7 +533,16 @@ class MainWindow(QMainWindow):
             elif engine.last_error:
                 self.set_status(engine.last_error)
 
-        self.run_task("Loading model", task, done, show_dialog=False)
+        self.run_task(
+            "Loading model",
+            task,
+            done,
+            show_dialog=False,
+            on_finished=self._model_autoload_finished,
+        )
+
+    def _model_autoload_finished(self) -> None:
+        self._model_autoload_running = False
 
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.context, self)
@@ -564,22 +603,40 @@ class MainWindow(QMainWindow):
 
     def refresh_statusbar(self) -> None:
         cfg = self.context.config
+        provider_name, provider_tooltip = provider_runtime_display(cfg.provider)
         self.model_chip.setVisible(cfg.ui_show_status_chips)
         self.provider_chip.setVisible(cfg.ui_show_status_chips)
         self.license_chip.setVisible(cfg.ui_show_status_chips)
         self.model_chip.setText(self._elide(f"{tr('Model', cfg.ui_language)}: {cfg.model_name}", 150))
-        self.provider_chip.setText(self._elide(f"{tr('Provider', cfg.ui_language)}: {cfg.provider}", 130))
+        self.provider_chip.setText(
+            self._elide(
+                f"{tr('Provider', cfg.ui_language)}: {provider_name}",
+                230,
+            )
+        )
         self.license_chip.setText(self._elide(tr(cfg.license_status, cfg.ui_language), 180))
         self.model_chip.setToolTip(cfg.model_name)
-        self.provider_chip.setToolTip(cfg.provider)
+        self.provider_chip.setToolTip(provider_tooltip)
         self.license_chip.setToolTip(cfg.license_status)
         self.status_labels["model"].setText(self._elide(f"{tr('Model', cfg.ui_language)}: {cfg.model_name}", 160))
-        self.status_labels["provider"].setText(f"{tr('Provider', cfg.ui_language)}: {cfg.provider}")
+        self.status_labels["provider"].setText(
+            f"{tr('Provider', cfg.ui_language)}: {provider_name}"
+        )
+        self.status_labels["provider"].setToolTip(provider_tooltip)
         self.status_labels["database"].setText(self._elide(f"{tr('DB', cfg.ui_language)}: {cfg.database_path}", 280))
         self.status_labels["database"].setToolTip(cfg.database_path)
         self.status_labels["license"].setText(self._elide(f"{tr('License', cfg.ui_language)}: {tr(cfg.license_status, cfg.ui_language)}", 220))
 
-    def run_task(self, title: str, fn: Callable, on_result: Callable | None = None, show_dialog: bool = True) -> None:
+    def run_task(
+        self,
+        title: str,
+        fn: Callable,
+        on_result: Callable | None = None,
+        show_dialog: bool = True,
+        on_progress: Callable | None = None,
+        on_error: Callable | None = None,
+        on_finished: Callable | None = None,
+    ) -> Worker:
         worker = Worker(fn)
         worker.setAutoDelete(False)
         self.active_workers.add(worker)
@@ -588,28 +645,66 @@ class MainWindow(QMainWindow):
             dialog.canceled.connect(worker.cancel)
             worker.signals.progress.connect(dialog.update_progress)
             dialog.show()
+        if on_progress:
+            worker.signals.progress.connect(on_progress)
         worker.signals.result.connect(lambda result: on_result(result) if on_result else None)
-        worker.signals.error.connect(
-            lambda message: QMessageBox.warning(
-                self,
-                tr(title, self.context.config.ui_language),
-                tr(message, self.context.config.ui_language),
+        if on_error:
+            worker.signals.error.connect(on_error)
+        else:
+            worker.signals.error.connect(
+                lambda message: QMessageBox.warning(
+                    self,
+                    tr(title, self.context.config.ui_language),
+                    tr(message, self.context.config.ui_language),
+                )
             )
-        )
-        worker.signals.error.connect(self.set_status)
+            worker.signals.error.connect(self.set_status)
         worker.signals.finished.connect(lambda: dialog.close() if dialog else None)
+        if on_finished:
+            worker.signals.finished.connect(on_finished)
         worker.signals.finished.connect(self.refresh_statusbar)
         worker.signals.finished.connect(lambda: self.active_workers.discard(worker))
         worker.signals.finished.connect(worker.signals.deleteLater)
         self.set_status(title)
         self.thread_pool.start(worker)
+        return worker
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self.active_workers:
+            if not self._closing_after_workers:
+                answer = QMessageBox.question(
+                    self,
+                    tr("Processing Is Still Running", self.context.config.ui_language),
+                    tr(
+                        "Cancel the running task and close the application?",
+                        self.context.config.ui_language,
+                    ),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    event.ignore()
+                    return
+                self._closing_after_workers = True
+                self.setEnabled(False)
+                self.set_status("Cancelling running task before exit…")
+                for worker in tuple(self.active_workers):
+                    worker.cancel()
+                QTimer.singleShot(50, self._close_when_workers_finish)
+            event.ignore()
+            return
+        self._closing_after_workers = True
         self.context.config.ui_window_width = max(800, self.width())
         self.context.config.ui_window_height = max(600, self.height())
         self.context.config.ui_sidebar_width = max(200, self.sidebar.width())
         save_config(self.context.config)
         super().closeEvent(event)
+
+    def _close_when_workers_finish(self) -> None:
+        if self.active_workers:
+            QTimer.singleShot(50, self._close_when_workers_finish)
+            return
+        self.close()
 
     def _elide(self, text: str, width: int) -> str:
         metrics = QFontMetrics(self.font())

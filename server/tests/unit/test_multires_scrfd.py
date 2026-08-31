@@ -19,7 +19,11 @@ def test_multires_candidates_are_merged_before_one_global_nms() -> None:
     detector.use_kps = True
     nms_inputs: list[np.ndarray] = []
 
-    def candidates(_image: np.ndarray, size: tuple[int, int]):
+    def candidates(
+        _image: np.ndarray,
+        size: tuple[int, int],
+        _threshold: float,
+    ):
         offset = 0.0 if size == (96, 96) else 1.0
         score = 0.90 if size == (96, 96) else 0.80
         boxes = np.asarray(

@@ -137,9 +137,15 @@ class ModelSettingsPage(BasePage):
                 )
         if self.provider_combo.currentText() == "CUDA" and not cuda_available:
             self.provider_combo.setCurrentText("Auto")
-            self.provider_combo.setToolTip("CUDA is unavailable on this machine, so Auto will use CPU.")
+            self.provider_combo.setToolTip(
+                "CUDA is unavailable on this machine, so Auto will choose "
+                "the best available provider."
+            )
         else:
-            self.provider_combo.setToolTip("Auto uses CUDA when CUDAExecutionProvider is available, otherwise CPU.")
+            self.provider_combo.setToolTip(
+                "Auto chooses the best available ONNX Runtime provider in "
+                "this order: CoreML, CUDA, CPU."
+            )
 
     def _update_model_availability(self) -> None:
         model = self.model_combo.model()
