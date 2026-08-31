@@ -234,6 +234,64 @@ def test_onnx_engine_startup_is_once_per_process(
     assert calls == 1
 
 
+def test_onnx_engine_keeps_one_dynamic_detector_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from insightface.model_zoo import arcface_onnx, scrfd
+    from insightface_server.inference import onnx_engine
+
+    _write_manifest(tmp_path)
+    engine = onnx_engine.OnnxInsightFaceEngine(
+        SimpleNamespace(
+            models_dir=tmp_path,
+            execution_provider="CPUExecutionProvider",
+            detector_threshold=0.5,
+            device_id=0,
+        )
+    )
+    detector_options: dict[str, object] = {}
+
+    class FakeSession:
+        def get_providers(self) -> list[str]:
+            return ["CPUExecutionProvider"]
+
+    class FakeDetector:
+        static_input_size = None
+
+        def __init__(self, **kwargs: object) -> None:
+            detector_options.update(kwargs)
+
+        def prepare(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class FakeRecognizer:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+    session_paths: list[Path] = []
+
+    def new_session(path: Path) -> FakeSession:
+        session_paths.append(path)
+        return FakeSession()
+
+    monkeypatch.setattr(scrfd, "SCRFD", FakeDetector)
+    monkeypatch.setattr(arcface_onnx, "ArcFaceONNX", FakeRecognizer)
+    monkeypatch.setattr(engine, "_new_session", new_session)
+    monkeypatch.setattr(engine, "_warm_up", lambda: None)
+    monkeypatch.setattr(onnx_engine, "_cuda_runtime_version", lambda: None)
+    monkeypatch.setattr(onnx_engine, "_cudnn_version", lambda: None)
+    monkeypatch.setattr(onnx_engine, "_gpu_details", lambda: [])
+
+    engine._startup_once()
+
+    assert session_paths == [
+        engine.bundle.detector.path,
+        engine.bundle.recognizer.path,
+    ]
+    assert detector_options["session"] is engine._detector_session
+    assert detector_options["static_shape_sessions"] is False
+
+
 def test_onnx_engine_refuses_tampered_model_license(tmp_path: Path) -> None:
     from insightface_server.inference.onnx_engine import OnnxInsightFaceEngine
 

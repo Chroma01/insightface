@@ -10,7 +10,7 @@ import subprocess
 import threading
 from collections import Counter
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 
@@ -221,12 +221,7 @@ def validate_gpu_requirements(gpus: list[dict[str, str]], cuda: str | None) -> N
 
 
 class OnnxInsightFaceEngine:
-    """Shared SCRFD + ArcFace implementation with provider-audited Sessions.
-
-    ArcFace keeps one process-wide Session. SCRFD retains its primary Session
-    as runtime configuration state while inference uses one fixed-input-shape
-    Session per initialized resolution, shared by request-local detector copies.
-    """
+    """Shared SCRFD + ArcFace implementation with exactly one Session per model."""
 
     def __init__(self, settings: object) -> None:
         self._settings = settings
@@ -303,35 +298,18 @@ class OnnxInsightFaceEngine:
         self._recognizer: Any = None
         self._detector_session: Any = None
         self._recognizer_session: Any = None
-        self._detector_profile_audits: dict[int, dict[str, object]] = {}
-        self._detector_profile_failures: dict[int, str] = {}
         self._runtime: dict[str, object] = {}
 
-    def _new_session(
-        self,
-        model_source: str | Path | bytes,
-        *,
-        profile_context: str | None = "primary",
-        profile_identity: str | Path | None = None,
-    ) -> Any:
+    def _new_session(self, path: Path) -> Any:
         import onnxruntime as ort
 
         options = ort.SessionOptions()
         options.log_severity_level = 3
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         if self._provider == "CUDAExecutionProvider":
-            if profile_context is not None:
-                options.enable_profiling = True
-                identity = (
-                    str(profile_identity)
-                    if profile_identity is not None
-                    else str(model_source)
-                )
-                profile_value = f"{identity}:{profile_context}"
-                profile_id = hashlib.sha256(profile_value.encode()).hexdigest()[:12]
-                options.profile_file_prefix = (
-                    f"/tmp/insightface-ort-{os.getpid()}-{profile_id}"
-                )
+            options.enable_profiling = True
+            profile_id = hashlib.sha256(str(path).encode()).hexdigest()[:12]
+            options.profile_file_prefix = f"/tmp/insightface-ort-{profile_id}"
             providers: list[Any] = [
                 (
                     "CUDAExecutionProvider",
@@ -340,19 +318,14 @@ class OnnxInsightFaceEngine:
                         "do_copy_in_default_stream": True,
                     },
                 ),
-                # SCRFD graphs contain a few shape-only nodes which ORT may
-                # assign to CPU. Warm-up profiling audits every assignment.
+                # Dynamic SCRFD graphs contain a few shape-only nodes which ORT assigns
+                # to CPU. The warm-up profile below audits every such assignment.
                 "CPUExecutionProvider",
             ]
         else:
             providers = ["CPUExecutionProvider"]
-        source = (
-            model_source
-            if isinstance(model_source, bytes)
-            else str(model_source)
-        )
         session = ort.InferenceSession(
-            source, sess_options=options, providers=providers
+            str(path), sess_options=options, providers=providers
         )
         actual = session.get_providers()
         if not actual or actual[0] != self._provider:
@@ -361,51 +334,6 @@ class OnnxInsightFaceEngine:
                 f"Session providers are {actual}"
             )
         return session
-
-    def _new_detector_resolution_session(
-        self,
-        model_file: str | Path,
-        input_size: tuple[int, int],
-        reference_session: Any,
-    ) -> Any:
-        """Build one exact-shape detector Session for a resolution."""
-
-        from insightface.model_zoo.scrfd import _static_scrfd_model
-
-        width, height = (int(value) for value in input_size)
-        inputs = reference_session.get_inputs()
-        if not inputs:
-            raise RuntimeError("SCRFD reference Session has no input")
-        model_source = _static_scrfd_model(
-            str(model_file),
-            (width, height),
-            inputs[0].name,
-        )
-        return self._new_session(
-            model_source,
-            profile_context=f"detector-{width}x{height}",
-            profile_identity=model_file,
-        )
-
-    def _new_detector_main_session(self) -> Any:
-        """Keep a reference Session, profiling it only when it serves inference."""
-
-        from insightface.model_zoo.scrfd import _native_model_input_size
-
-        model_path = self.bundle.detector.path
-        profile_context = None
-        if self._provider == "CUDAExecutionProvider":
-            fixed_size = _native_model_input_size(model_path)
-            if isinstance(fixed_size, tuple):
-                width, height = fixed_size
-                # A natively fixed SCRFD reuses the main Session as its only
-                # resolution Session, so CUDA startup auditing must profile it.
-                profile_context = f"detector-{width}x{height}"
-        return self._new_session(
-            model_path,
-            profile_context=profile_context,
-            profile_identity=model_path,
-        )
 
     @staticmethod
     def _finish_cuda_profile(session: Any, *, model_name: str) -> dict[str, object]:
@@ -422,138 +350,6 @@ class OnnxInsightFaceEngine:
             ) from exc
         finally:
             profile_path.unlink(missing_ok=True)
-
-    def _detector_sessions_with_sizes(
-        self,
-    ) -> list[tuple[Any, tuple[tuple[int, int], ...]]]:
-        """Return initialized detector Sessions once each, with their resolutions."""
-
-        sessions_by_identity: dict[int, tuple[Any, list[tuple[int, int]]]] = {}
-        detector = self._detector
-        resolution_sessions = (
-            getattr(detector, "resolution_sessions", {})
-            if detector is not None
-            else {}
-        )
-        for raw_size, session in dict(resolution_sessions).items():
-            size = tuple(int(value) for value in raw_size)
-            if len(size) != 2:
-                continue
-            record = sessions_by_identity.setdefault(id(session), (session, []))
-            if size not in record[1]:
-                record[1].append(size)
-
-        records = [
-            (session, tuple(sorted(sizes)))
-            for session, sizes in sessions_by_identity.values()
-        ]
-        return sorted(
-            records,
-            key=lambda record: (
-                not record[1],
-                record[1] or ((2**31 - 1, 2**31 - 1),),
-            ),
-        )
-
-    def _detector_runtime_metadata(self) -> dict[str, object]:
-        """Describe the live SCRFD pool while keeping the legacy provider key."""
-
-        primary_providers = (
-            []
-            if self._detector_session is None
-            else list(self._detector_session.get_providers())
-        )
-        resolution_providers: dict[str, list[str]] = {}
-        detector = self._detector
-        resolution_sessions = (
-            getattr(detector, "resolution_sessions", {})
-            if detector is not None
-            else {}
-        )
-        for raw_size, session in sorted(
-            dict(resolution_sessions).items(),
-            key=lambda item: tuple(int(value) for value in item[0]),
-        ):
-            width, height = (int(value) for value in raw_size)
-            resolution_providers[f"{width}x{height}"] = list(
-                session.get_providers()
-            )
-        return {
-            # Backward-compatible summary of the primary detector Session.
-            "detector_session_providers": primary_providers,
-            "detector_resolution_session_count": len(
-                self._detector_sessions_with_sizes()
-            ),
-            "detector_resolution_session_providers": resolution_providers,
-            "detector_static_shape_sessions": bool(
-                getattr(detector, "static_shape_sessions", True)
-            ),
-        }
-
-    def _audit_detector_sessions(self) -> dict[str, object]:
-        """End and audit CUDA profiling exactly once per detector Session."""
-
-        records = self._detector_sessions_with_sizes()
-        for session, sizes in records:
-            session_id = id(session)
-            failure = self._detector_profile_failures.get(session_id)
-            if failure is not None:
-                raise RuntimeError(
-                    "A detector resolution Session previously failed CUDA audit: "
-                    f"{failure}"
-                )
-            if session_id in self._detector_profile_audits:
-                continue
-            labels = ",".join(f"{width}x{height}" for width, height in sizes)
-            model_name = f"detector[{labels or 'primary'}]"
-            try:
-                self._detector_profile_audits[session_id] = (
-                    self._finish_cuda_profile(session, model_name=model_name)
-                )
-            except BaseException as exc:
-                # ``end_profiling`` is destructive.  Remember the failure so a
-                # later request cannot call it a second time on this Session.
-                # Store text, not the exception traceback, because traceback
-                # frames could otherwise keep the failed ORT Session alive.
-                self._detector_profile_failures[session_id] = (
-                    f"{type(exc).__name__}: {exc}"
-                )
-                raise
-
-        cuda_kernel_count = 0
-        cpu_shape_kernel_count = 0
-        cpu_shape_operators: Counter[str] = Counter()
-        session_audits: list[dict[str, object]] = []
-        policy = "CUDA compute required; CPU limited to small integer shape metadata"
-        for session, sizes in records:
-            audit = self._detector_profile_audits[id(session)]
-            cuda_kernel_count += cast(int, audit["cuda_kernel_count"])
-            cpu_shape_kernel_count += cast(int, audit["cpu_shape_kernel_count"])
-            operator_counts = cast(
-                dict[str, int], audit.get("cpu_shape_operators", {})
-            )
-            cpu_shape_operators.update(
-                {
-                    str(name): int(count)
-                    for name, count in operator_counts.items()
-                }
-            )
-            policy = str(audit.get("policy", policy))
-            session_audits.append(
-                {
-                    "input_sizes": [list(size) for size in sizes],
-                    **audit,
-                }
-            )
-        return {
-            "accepted": bool(records),
-            "cuda_kernel_count": cuda_kernel_count,
-            "cpu_shape_kernel_count": cpu_shape_kernel_count,
-            "cpu_shape_operators": dict(sorted(cpu_shape_operators.items())),
-            "policy": policy,
-            "session_count": len(records),
-            "sessions": session_audits,
-        }
 
     def startup(self) -> None:
         with self._lifecycle_lock:
@@ -587,20 +383,13 @@ class OnnxInsightFaceEngine:
                 f"Required {self._provider} is unavailable; ONNX Runtime reports {available}"
             )
 
-        # ArcFace has one Session. SCRFD retains a primary Session as provider
-        # and configuration state, then lazily creates one profiled fixed-shape
-        # Session per dynamic-model resolution. A natively fixed primary is
-        # itself the profiled resolution Session.
-        self._detector_session = self._new_detector_main_session()
-        self._recognizer_session = self._new_session(
-            self.bundle.recognizer.path,
-            profile_context="recognizer",
-        )
+        # These are the only two Session constructions in the engine lifecycle.
+        self._detector_session = self._new_session(self.bundle.detector.path)
+        self._recognizer_session = self._new_session(self.bundle.recognizer.path)
         self._detector = SCRFD(
             model_file=str(self.bundle.detector.path),
             session=self._detector_session,
-            resolution_session_factory=self._new_detector_resolution_session,
-            static_shape_sessions=True,
+            static_shape_sessions=False,
         )
         self._detector.input_mean = self.bundle.detector.input_mean
         self._detector.input_std = self.bundle.detector.input_std
@@ -622,7 +411,9 @@ class OnnxInsightFaceEngine:
         provider_audit: dict[str, object] = {}
         if self._provider == "CUDAExecutionProvider":
             provider_audit = {
-                "detector": self._audit_detector_sessions(),
+                "detector": self._finish_cuda_profile(
+                    self._detector_session, model_name="detector"
+                ),
                 "recognizer": self._finish_cuda_profile(
                     self._recognizer_session, model_name="recognizer"
                 ),
@@ -648,6 +439,7 @@ class OnnxInsightFaceEngine:
             "available_execution_providers": available,
             "execution_provider": self._provider,
             "detector_input_sizes": [list(size) for size in self._detector_input_sizes],
+            "detector_session_providers": self._detector_session.get_providers(),
             "recognizer_session_providers": self._recognizer_session.get_providers(),
             "strict_provider_audit": provider_audit,
             "cuda_runtime_version": cuda,
@@ -655,7 +447,6 @@ class OnnxInsightFaceEngine:
             "cudnn_version": cudnn,
             "gpus": gpus,
             "models": [dict(model) for model in self.summary.models],
-            **self._detector_runtime_metadata(),
         }
 
     def _warm_up(self) -> None:
@@ -687,15 +478,12 @@ class OnnxInsightFaceEngine:
             )
 
     def _warm_up_detector_sizes(self, sizes: tuple[tuple[int, int], ...]) -> None:
+        detector_input = self._detector_session.get_inputs()[0]
         for detector_width, detector_height in sizes:
-            detector_session = self._detector._session_for_input_size(
-                (detector_width, detector_height)
-            )
-            detector_input = detector_session.get_inputs()[0]
             detector_data = np.zeros(
                 (1, 3, detector_height, detector_width), dtype=np.float32
             )
-            detector_outputs = detector_session.run(
+            detector_outputs = self._detector_session.run(
                 None, {detector_input.name: detector_data}
             )
             if not detector_outputs:
@@ -703,29 +491,6 @@ class OnnxInsightFaceEngine:
                     "Detection model warm-up returned no outputs for input size "
                     f"{detector_width}x{detector_height}"
                 )
-
-    def _ensure_detector_sizes_ready(
-        self, sizes: tuple[tuple[int, int], ...]
-    ) -> None:
-        """Warm and audit CUDA Sessions introduced by a runtime profile."""
-
-        if self._provider != "CUDAExecutionProvider":
-            # CPU sessions can be created by the actual inference call.  A
-            # synthetic first run would only add latency and is not needed for
-            # provider auditing; runtime_summary reads the live pool later.
-            return
-        initialized = set(self._detector.resolution_sessions)
-        missing = tuple(size for size in sizes if tuple(size) not in initialized)
-        if missing:
-            self._warm_up_detector_sizes(missing)
-        detector_audit = self._audit_detector_sessions()
-        current_audit = self._runtime.get("strict_provider_audit", {})
-        strict_audit = (
-            dict(current_audit) if isinstance(current_audit, dict) else {}
-        )
-        strict_audit["detector"] = detector_audit
-        self._runtime["strict_provider_audit"] = strict_audit
-        self._runtime.update(self._detector_runtime_metadata())
 
     def analyze(
         self,
@@ -752,11 +517,10 @@ class OnnxInsightFaceEngine:
                 recognizer = self._recognizer
                 profile = detection_profile or self._default_detection_profile
                 self.validate_detection_profile(profile)
-                self._ensure_detector_sizes_ready(profile.input_sizes)
 
             # SCRFD's policy and anchor cache live on its Python wrapper. Each
             # request gets independent mutable wrapper state while all copies
-            # share the process-wide, thread-safe resolution Session pool.
+            # share the one process-wide, thread-safe ORT Session.
             request_detector = copy.copy(detector)
             request_detector.center_cache = dict(detector.center_cache)
             request_detector.det_thresh = profile.threshold
@@ -812,8 +576,6 @@ class OnnxInsightFaceEngine:
     def runtime_summary(self) -> dict[str, object]:
         with self._lifecycle_lock:
             summary = dict(self._runtime)
-            if self._detector is not None:
-                summary.update(self._detector_runtime_metadata())
             summary["detector_input_sizes"] = [
                 list(size) for size in self._detector_input_sizes
             ]
