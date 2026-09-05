@@ -15,7 +15,6 @@ from .geometry import (
     inverse_cardinal_points,
     iou,
     median,
-    mutually_covers,
     normalized_center_distance,
 )
 from .model_catalog import DETECTION_TASK, VERIFICATION_TASK
@@ -665,65 +664,27 @@ def _finalize(
     scan: dict[str, Any],
     tracking: dict[str, Any],
     evidence: list[dict[str, Any]],
-    config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    selective_recognition = (
-        str(config.get("recognition", {}).get("mode", "all")) != "all"
-    )
+    """Publish one admitted observation per track and frame.
+
+    This is intentionally only a same-track selection step.  Different tracks
+    remain independent until their final stabilized boxes are available.
+    """
+
     track_map = {track["track_id"]: track for track in tracks}
     evidence_map = {(item["track_id"], int(item["frame_idx"])): item for item in evidence}
     published = [
         item
-        for item in tracking["observations"]
-        if track_map[item["track_id"]].get("accepted")
-        and _inside(track_map[item["track_id"]], int(item["frame_idx"]))
+        for item in tracking.get("observations", [])
+        if track_map[item["track_id"]].get("accepted") and _inside(track_map[item["track_id"]], int(item["frame_idx"]))
     ]
-    surviving_boxes: dict[tuple[str, int], list[list[float]]] = {}
-    for item in published:
-        surviving_boxes.setdefault(
-            (str(item["track_id"]), int(item["frame_idx"])),
-            [],
-        ).append(list(item.get("motion_box", item["box"])))
-    for detection in scan["detections"]:
-        track = track_map[detection["track_id"]]
-        if track.get("accepted") and _inside(track, int(detection["frame_idx"])):
-            surviving_boxes.setdefault(
-                (str(detection["track_id"]), int(detection["frame_idx"])),
-                [],
-            ).append(list(detection["box"]))
-    for shadow in tracking["shadows"]:
-        track = track_map[shadow["track_id"]]
-        if not track.get("accepted") or not _inside(track, int(shadow["frame_idx"])):
-            continue
-        suppressor_boxes = [
-            box
-            for suppressor in shadow["suppressor_tracks"]
-            for box in surviving_boxes.get(
-                (str(suppressor), int(shadow["frame_idx"])),
-                [],
-            )
-        ]
-        shadow_box = shadow.get("motion_box", shadow["box"])
-        # Recognition decisions are track-specific, so another accepted track
-        # cannot stand in for this track's geometry in a selective policy.
-        if selective_recognition or not any(
-            mutually_covers(
-                shadow_box,
-                suppressor_box,
-                min_coverage=0.80,
-                max_area_ratio=2.50,
-            )
-            for suppressor_box in suppressor_boxes
-        ):
-            published.append(shadow)
-
-    by_frame: dict[int, list[dict[str, Any]]] = {}
+    by_track_frame: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for detection in scan["detections"]:
         track = track_map[detection["track_id"]]
         if not track.get("accepted") or not _inside(track, int(detection["frame_idx"])):
             continue
         review = evidence_map.get((detection["track_id"], int(detection["frame_idx"])), {})
-        by_frame.setdefault(int(detection["frame_idx"]), []).append(
+        by_track_frame.setdefault((str(detection["track_id"]), int(detection["frame_idx"])), []).append(
             {
                 "frame_idx": int(detection["frame_idx"]),
                 "track_id": detection["track_id"],
@@ -746,44 +707,19 @@ def _finalize(
         final_item["local_confidence"] = review.get("local_confidence")
         final_item["local_review_reason"] = review.get("local_review_reason")
         final_item["verifier_face_probability"] = review.get("verifier_face_probability")
-        by_frame.setdefault(int(item["frame_idx"]), []).append(final_item)
-    output = []
-    for values in by_frame.values():
-        kept = []
-        ordered = sorted(
-            values,
-            key=lambda item: (
-                0 if item["source"] == "detector" else 1,
-                -float(item.get("confidence", 0.0)),
-                item["track_id"],
-            ),
+        by_track_frame.setdefault((str(item["track_id"]), int(item["frame_idx"])), []).append(final_item)
+    output: list[dict[str, Any]] = []
+    for values in by_track_frame.values():
+        output.append(
+            min(
+                values,
+                key=lambda item: (
+                    0 if item["source"] == "detector" else 1,
+                    -float(item.get("confidence", 0.0)),
+                    str(item.get("geometry_source", "")),
+                ),
+            )
         )
-        for item in ordered:
-            if any(
-                (
-                    str(item["track_id"]) == str(prior["track_id"])
-                    and (
-                        iou(item["box"], prior["box"])
-                        >= float(config["scan"]["global_nms_iou"])
-                        or containment(item["box"], prior["box"])
-                        >= float(config["scan"]["containment_threshold"])
-                    )
-                )
-                or (
-                    not selective_recognition
-                    and str(item["track_id"]) != str(prior["track_id"])
-                    and mutually_covers(
-                        item["box"],
-                        prior["box"],
-                        min_coverage=0.80,
-                        max_area_ratio=2.50,
-                    )
-                )
-                for prior in kept
-            ):
-                continue
-            kept.append(item)
-        output.extend(kept)
     return sorted(output, key=lambda item: (int(item["frame_idx"]), item["track_id"]))
 
 
@@ -793,6 +729,8 @@ def finalize_precomputed(
     tracking: dict[str, Any],
     evidence: list[dict[str, Any]],
     config: dict[str, Any],
+    *,
+    detector_frame_stride: int,
 ) -> dict[str, Any]:
     """Apply unchanged admission/finalization rules to already-reviewed evidence."""
 
@@ -801,9 +739,9 @@ def finalize_precomputed(
     for item in evidence:
         evidence_by_track.setdefault(str(item["track_id"]), []).append(item)
     policy = config["revalidation"]["policy"]
-    detector_frame_stride = int(config.get("scan", {}).get("frame_stride", 1))
-    # Detector-anchor review follows the actual scan cadence for every sampled
-    # stride, including the expert stride=3 setting.  The scan-rank map below
+    detector_frame_stride = max(1, int(detector_frame_stride))
+    # Detector-anchor review follows the actual runtime scan cadence for every
+    # derived stride. The scan-rank map below
     # still distinguishes skipped frames (neutral) from performed scans that
     # missed the target (a continuity break).
     local_review_stride = max(1, detector_frame_stride)
@@ -876,21 +814,21 @@ def finalize_precomputed(
                         )
             if (
                 not track["accepted_intervals"]
-                and values
                 and track["admission_decision"].get("admission_path")
                 not in {"short_track", "video_start_short_track"}
             ):
-                track["accepted_intervals"] = [[int(values[0]["frame_idx"]), int(values[-1]["frame_idx"])]]
-            stitching = config["tracking"].get("fragment_stitching", {})
-            maximum_gap = int(stitching.get("max_interval_gap_frames", 0))
-            if len(track.get("stitched_track_ids", [])) > 1 and maximum_gap > 0:
-                merged_intervals: list[list[int]] = []
-                for first, last in track["accepted_intervals"]:
-                    if merged_intervals and int(first) - merged_intervals[-1][1] - 1 <= maximum_gap:
-                        merged_intervals[-1][1] = max(merged_intervals[-1][1], int(last))
-                    else:
-                        merged_intervals.append([int(first), int(last)])
-                track["accepted_intervals"] = merged_intervals
+                # Aggregate evidence admitted the track even though no one
+                # continuity segment independently met the standard gate.
+                # Preserve that privacy-safe admission without manufacturing
+                # geometry across an unobserved gap.
+                track["accepted_intervals"] = [
+                    [
+                        int(segment[0]["frame_idx"]),
+                        int(segment[-1]["frame_idx"]),
+                    ]
+                    for segment in segments
+                    if segment
+                ]
         print(
             f"[admission/onnx] {track['track_id']} "
             f"detector={summary['detector_source_frames']} "
@@ -901,7 +839,7 @@ def finalize_precomputed(
             file=sys.stderr,
             flush=True,
         )
-    observations = _finalize(tracks, scan, tracking, evidence, config)
+    observations = _finalize(tracks, scan, tracking, evidence)
     return {
         "evidence": evidence,
         "observations": observations,

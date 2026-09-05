@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,6 +95,31 @@ def test_manifest_tasks_bypass_router_and_apply_metadata(
     assert recognizer.input_std == 44.0
 
 
+def test_manifest_sha256_mismatch_fails_before_session_construction(
+    manifest_package_factory,
+    explicit_adapters,
+    monkeypatch,
+):
+    package, manifest = manifest_package_factory()
+    manifest["tasks"]["detection"]["sha256"] = "0" * 64
+    (package / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    session_calls = []
+
+    class UnexpectedSession:
+        def __init__(self, *args, **kwargs):
+            session_calls.append((args, kwargs))
+
+    monkeypatch.setattr(model_zoo, "PickableInferenceSession", UnexpectedSession)
+
+    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+        model_zoo.get_model(package, model_task="detection")
+
+    assert session_calls == []
+
+
 def test_manifest_coreml_cache_signatures_isolate_task_sha_and_input_contract(
     manifest_package_factory,
     explicit_adapters,
@@ -134,9 +160,7 @@ def test_manifest_coreml_cache_signatures_isolate_task_sha_and_input_contract(
             self.path = str(path)
             self.kwargs = kwargs
             self.run_calls = []
-            cache_directory = Path(
-                kwargs["provider_options"][0]["ModelCacheDirectory"]
-            )
+            cache_directory = Path(kwargs["provider_options"][0]["ModelCacheDirectory"])
             (cache_directory / "compiled_model.mlmodelc").mkdir(
                 parents=True,
                 exist_ok=True,
@@ -157,9 +181,7 @@ def test_manifest_coreml_cache_signatures_isolate_task_sha_and_input_contract(
     monkeypatch.setattr(
         model_zoo,
         "_detector_dimension_overrides",
-        lambda _path, size: (
-            {"height": size[1], "width": size[0]}
-        ),
+        lambda _path, size: ({"height": size[1], "width": size[0]}),
     )
     monkeypatch.setattr(
         model_zoo,
@@ -201,35 +223,28 @@ def test_manifest_coreml_cache_signatures_isolate_task_sha_and_input_contract(
     ]
     assert len(sessions) == 3
     assert all(len(session.run_calls) == 1 for session in sessions)
-    assert sessions[0].kwargs["provider_options"][0][
-        "RequireStaticInputShapes"
-    ] == "1"
-    assert sessions[1].kwargs["provider_options"][0][
-        "RequireStaticInputShapes"
-    ] == "0"
-    assert sessions[2].kwargs["provider_options"][0][
-        "RequireStaticInputShapes"
-    ] == "0"
+    assert sessions[0].kwargs["provider_options"][0]["RequireStaticInputShapes"] == "1"
+    assert sessions[1].kwargs["provider_options"][0]["RequireStaticInputShapes"] == "0"
+    assert sessions[2].kwargs["provider_options"][0]["RequireStaticInputShapes"] == "0"
 
     cache_directories = {
         task: Path(model.session.coreml_cache_directory)
         for task, model in models.items()
     }
     assert len(set(cache_directories.values())) == 3
-    assert all(
-        path.is_relative_to(cache_root)
-        for path in cache_directories.values()
-    )
+    assert all(path.is_relative_to(cache_root) for path in cache_directories.values())
     for task, cache_directory in cache_directories.items():
         signature_document = json.loads(
             (cache_directory / "signature.json").read_text(encoding="utf-8")
         )
         signature = signature_document["signature"]
         assert signature["task"] == task
-        assert signature["model_sha256"] == descriptor_package.task(task).sha256
-        assert signature["inputs"] == [
-            contracts[Path(models[task].model_file).name]
-        ]
+        model_path = Path(models[task].model_file)
+        assert (
+            signature["model_sha256"]
+            == hashlib.sha256(model_path.read_bytes()).hexdigest()
+        )
+        assert signature["inputs"] == [contracts[Path(models[task].model_file).name]]
         assert signature["coreml_options"]["MLComputeUnits"] == "ALL"
 
 
@@ -464,12 +479,13 @@ def test_legacy_coreml_dynamic_opt_out_forces_cpu_and_gpu_without_cache(
     assert len(sessions) == 1
     assert detector.kwargs["static_shape_sessions"] is False
     assert detector.session.kwargs["sess_options"] is session_options
-    assert detector.session.kwargs["provider_options"][0][
-        "MLComputeUnits"
-    ] == "CPUAndGPU"
-    assert detector.session.kwargs["provider_options"][0][
-        "RequireStaticInputShapes"
-    ] == "0"
+    assert (
+        detector.session.kwargs["provider_options"][0]["MLComputeUnits"] == "CPUAndGPU"
+    )
+    assert (
+        detector.session.kwargs["provider_options"][0]["RequireStaticInputShapes"]
+        == "0"
+    )
     assert original_coreml_options == {
         "ModelFormat": "MLProgram",
         "MLComputeUnits": "ALL",
@@ -511,12 +527,13 @@ def test_manifest_coreml_dynamic_opt_out_avoids_cache_manager(
         "CoreMLExecutionProvider",
         "CPUExecutionProvider",
     ]
-    assert detector.session.kwargs["provider_options"][0][
-        "MLComputeUnits"
-    ] == "CPUAndGPU"
-    assert detector.session.kwargs["provider_options"][0][
-        "RequireStaticInputShapes"
-    ] == "0"
+    assert (
+        detector.session.kwargs["provider_options"][0]["MLComputeUnits"] == "CPUAndGPU"
+    )
+    assert (
+        detector.session.kwargs["provider_options"][0]["RequireStaticInputShapes"]
+        == "0"
+    )
 
 
 def test_manifest_non_detector_preserves_coreml_provider_tuple_options(
@@ -661,7 +678,7 @@ def test_detection_and_recognition_apply_both_preprocessing_modes(
     expected_std,
 ):
     package, manifest = manifest_package_factory()
-    manifest[task]["preprocessing"] = preprocessing
+    manifest["tasks"][task]["preprocessing"] = preprocessing
     (package / "manifest.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
@@ -686,7 +703,7 @@ def test_verification_receives_both_preprocessing_modes(
     preprocessing,
 ):
     package, manifest = manifest_package_factory()
-    manifest["verification"]["preprocessing"] = preprocessing
+    manifest["tasks"]["verification"]["preprocessing"] = preprocessing
     (package / "manifest.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
@@ -871,7 +888,7 @@ def test_direct_verification_supports_both_preprocessing_modes(
     assert verifier.kwargs["expansion"] == 1.2
 
 
-def test_only_selected_manifest_task_is_verified_before_session(
+def test_manifest_task_resolution_does_not_hash_model_content(
     manifest_package_factory,
     explicit_adapters,
 ):
@@ -882,8 +899,10 @@ def test_only_selected_manifest_task_is_verified_before_session(
         model_zoo.get_model(package, model_task="detection"),
         _Detector,
     )
-    with pytest.raises(RuntimeError, match="SHA256 mismatch"):
-        model_zoo.get_model(package, model_task="verification")
+    assert isinstance(
+        model_zoo.get_model(package, model_task="verification"),
+        _Verifier,
+    )
 
 
 def test_descriptor_route_does_not_reparse_manifest(

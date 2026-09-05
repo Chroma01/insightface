@@ -120,29 +120,37 @@ def test_coreml_face_engine_does_not_force_cpu(monkeypatch, tmp_path):
     model_file = tmp_path / "detector.onnx"
     model_file.write_bytes(b"fake")
     prepare_calls = []
+    constructor_calls = []
 
     class Detector:
         taskname = "detection"
 
+    detector = Detector()
+
+    class Analysis:
+        models = {"detection": detector}
+        det_model = detector
+
         def prepare(self, ctx_id, **kwargs):
             prepare_calls.append((ctx_id, kwargs))
 
-    detector = Detector()
+    def make_analysis(**kwargs):
+        constructor_calls.append(kwargs)
+        return Analysis()
+
     engine = face_engine.FaceEngine(
         custom_model_dir=tmp_path,
         providers=["CoreMLExecutionProvider", "CPUExecutionProvider"],
     )
-    monkeypatch.setattr(
-        engine,
-        "_load_model_from_onnx",
-        lambda _path: detector,
-    )
+    monkeypatch.setattr(face_engine, "FaceAnalysis", make_analysis)
 
     engine.load()
 
     assert engine.is_loaded() is True
     assert engine.ctx_id == 0
     assert prepare_calls[0][0] == 0
+    assert constructor_calls[0]["static_shape_sessions"] is True
+    assert constructor_calls[0]["_coreml_detector_input_size"] == (640, 640)
 
 
 def test_main_window_and_dashboard_show_resolved_provider(

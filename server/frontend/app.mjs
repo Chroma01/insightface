@@ -1,6 +1,6 @@
-import { ApiClient, ApiError } from "./api.mjs?v=0.2.0-r13";
-import { initializeI18n, locale, t, translateTree } from "./i18n.mjs?v=0.2.0-r13";
-import { renderMarkdown } from "./markdown.mjs?v=0.2.0-r13";
+import { ApiClient, ApiError } from "./api.mjs?v=0.2.0-r14";
+import { initializeI18n, locale, t, translateTree } from "./i18n.mjs?v=0.2.0-r14";
+import { renderMarkdown } from "./markdown.mjs?v=0.2.0-r14";
 import {
   applySearchProfileAvailability,
   authenticationEnabledFromHealth,
@@ -14,7 +14,7 @@ import {
   parseExternalEmbeddings,
   parseMetadata,
   searchProfilesFromSystem,
-} from "./core.mjs?v=0.2.0-r13";
+} from "./core.mjs?v=0.2.0-r14";
 
 const client = new ApiClient(window.location.origin);
 const state = {
@@ -25,6 +25,7 @@ const state = {
   selectedPerson: null,
   system: null,
   models: [],
+  modelLicense: null,
   errors: [],
   serverErrors: [],
   monitors: [],
@@ -1082,11 +1083,13 @@ async function loadSystem() {
     return {
       system: unwrap(systemPayload, "system"),
       models: listItems(modelsPayload, ["models"]),
+      license: modelsPayload?.license ?? readAny(systemPayload, "model.license") ?? null,
     };
   }, "Could not load system diagnostics", "Refreshing…");
   if (!result) return;
   state.system = result.system;
   state.models = result.models;
+  state.modelLicense = result.license;
   updateCreateCollectionProfiles();
   renderSystem();
 }
@@ -1170,6 +1173,29 @@ function renderSystem() {
     modelGrid.append(card);
   }
   if (!modelGrid.children.length) modelGrid.append(element("p", { className: "muted", text: "No loaded models were reported." }));
+
+  const license = state.modelLicense ?? readAny(system, "model.license");
+  const licenseNotice = $("#system-license-notice");
+  const licenseHeading = $("#system-license-heading");
+  const licenseSummary = $("#system-license-summary");
+  const commercialRow = $("#system-license-commercial-row");
+  if (license && typeof license === "object") {
+    const values = [
+      license.license_id,
+      license.grant,
+      license.valid_from,
+      license.valid_until,
+      license.customer,
+      license.reference,
+    ]
+      .filter((value) => value !== undefined && value !== null && value !== "");
+    if (licenseNotice) licenseNotice.hidden = false;
+    if (licenseHeading) licenseHeading.textContent = firstValue(license.model_id, t("Model"));
+    if (licenseSummary && values.length) licenseSummary.textContent = values.join(" · ");
+    if (commercialRow) commercialRow.hidden = license.commercial_use_permitted === true;
+  } else {
+    if (licenseNotice) licenseNotice.hidden = true;
+  }
 }
 
 function selectedMonitor() {

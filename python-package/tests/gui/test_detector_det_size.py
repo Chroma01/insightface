@@ -24,14 +24,6 @@ def test_retinaface_accepts_multi_det_size_config():
     assert RetinaFace._normalize_input_sizes([1024, 1024]) == [(1024, 1024)]
 
 
-def test_gui_routes_detection_outputs_to_scrfd():
-    assert FaceEngine._is_scrfd_detection_outputs([object()] * 6) is True
-    assert FaceEngine._is_scrfd_detection_outputs([object()] * 9) is True
-    assert FaceEngine._is_scrfd_detection_outputs([object()] * 10) is True
-    assert FaceEngine._is_scrfd_detection_outputs([object()] * 15) is True
-    assert FaceEngine._is_scrfd_detection_outputs([object()]) is False
-
-
 def test_model_zoo_routes_detection_models_to_scrfd(monkeypatch):
     class FakeInput:
         name = "input"

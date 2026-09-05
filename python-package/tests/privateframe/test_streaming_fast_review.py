@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from insightface.app.privateframe.streaming import StreamingEngine
 
 
@@ -91,6 +92,26 @@ def test_stride_four_uses_complementary_local_phase_and_verifies_every_frame() -
     assert {value["verifier_face_probability"] for value in reviews} == {0.8}
 
 
+@pytest.mark.parametrize("stride", [8, 16])
+def test_large_strides_keep_the_complementary_local_review_phase(
+    stride: int,
+) -> None:
+    engine = _engine(stride=stride)
+    frame = np.zeros((40, 40, 3), dtype=np.uint8)
+
+    reviews = [
+        engine._measure_review(frame, _item(index))
+        for index in range(stride * 2)
+    ]
+
+    assert engine.local_review_phase == stride // 2
+    assert engine.reviewer.local_frames == [stride // 2, stride + stride // 2]
+    assert engine.local_review_attempts == 2
+    assert engine.local_review_sampled_out == stride * 2 - 2
+    assert engine.verifier_review_calls == stride * 2
+    assert sum(value["local_match_count"] == 1 for value in reviews) == 2
+
+
 def test_fast_review_can_force_local_without_skipping_verifier() -> None:
     engine = _engine(stride=4)
     frame = np.zeros((12, 12, 3), dtype=np.uint8)
@@ -140,7 +161,7 @@ def test_forced_detector_upgrade_reuses_verifier_and_replaces_skip_audit() -> No
     assert len(engine.reviewer.verifier_boxes) == 1
 
 
-def test_manual_stride_uses_the_same_sampled_review_policy() -> None:
+def test_derived_stride_uses_the_same_sampled_review_policy() -> None:
     engine = _engine(stride=3)
     frame = np.zeros((12, 12, 3), dtype=np.uint8)
 

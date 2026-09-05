@@ -96,8 +96,11 @@ test("repository README and bundled help sources exist for every supported local
     "models install buffalo_l",
     "--accept-license",
     "buffalo_m",
+    "buffalo_s",
     "buffalo_sc",
     "antelopev2",
+    "raccoon_s",
+    "raccoon_l",
     "MODEL.LICENSE",
     "LICENSING.md",
     "external_trusted",
@@ -239,19 +242,25 @@ test("frontend assets use the server's /assets mount and no external CDN", async
   const index = await source("index.html");
   const docs = await source("openapi.html");
   assert.doesNotMatch(`${index}\n${docs}`, /\/static\//);
-  assert.match(index, /href="\/assets\/styles\.css\?v=0\.2\.0-r13"/);
-  assert.match(index, /src="\/assets\/app\.mjs\?v=0\.2\.0-r13"/);
+  assert.match(index, /href="\/assets\/styles\.css\?v=0\.2\.0-r14"/);
+  assert.match(index, /src="\/assets\/app\.mjs\?v=0\.2\.0-r14"/);
   assert.match(docs, /href="\/assets\/openapi\.css"/);
-  assert.match(docs, /src="\/assets\/openapi\.js\?v=0\.2\.0-r13"/);
+  assert.match(docs, /src="\/assets\/openapi\.js\?v=0\.2\.0-r14"/);
   const externalReferences = [...`${index}\n${docs}`.matchAll(/(?:src|href)="(https?:\/\/[^\"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(externalReferences, ["https://www.insightface.ai"]);
 });
 
-test("System page shows the open-source model license and commercial link", async () => {
+test("System page renders the runtime model license and keeps the commercial link", async () => {
   const html = await source("index.html");
-  assert.match(html, /non-commercial research use only/);
+  const app = await source("app.mjs");
   assert.match(html, /Commercial use requires a separate license/);
   assert.match(html, /href="https:\/\/www\.insightface\.ai"/);
+  assert.match(html, /id="system-license-notice"[^>]*hidden/);
+  assert.match(html, /id="system-license-summary"/);
+  assert.match(app, /modelsPayload\?\.license/);
+  assert.match(app, /licenseNotice\.hidden = false/);
+  assert.match(app, /license\.commercial_use_permitted === true/);
+  assert.doesNotMatch(app, /license\.status/);
 });
 
 test("console and API reference use the InsightFace.ai brand system", async () => {

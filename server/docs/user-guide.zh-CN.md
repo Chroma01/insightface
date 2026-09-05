@@ -132,9 +132,10 @@ matches = client.search("employees", "query.jpg", limit=5)
 - 停止写入后备份 SQLite 和裁剪图目录，或使用 SQLite 安全快照方式。
 - API Key 只以 hash 保存。后续启动同一数据卷时传入不同 `INSIGHTFACE_API_KEY`，会主动轮换当前 Key。
 - 不要记录图片、embedding 或 Key；除非确有需要，不要开启宽泛 CORS。
-- 公开镜像不包含模型。InsightFace提供的开源预训练模型（包括 `buffalo_l`）仅限
-  非商业研究使用；商业使用需要单独许可，请访问 <https://www.insightface.ai>。
-  **系统** 页面也会显示相同提示。
+- 公开镜像不包含模型。**系统** 页面会读取当前模型包的`MODEL.LICENSE`并显示
+  实际授权；文件缺失时默认显示为非商业。若文件存在但签名无效、模型不匹配、
+  尚未生效或已经过期，Server仍会拒绝启动。商业使用需要单独许可，请访问
+  <https://www.insightface.ai>。
 
 ## 10. 故障定位
 
@@ -154,10 +155,14 @@ docker compose -f server/deploy/compose.cpu.yml \
 
 公开包包括：`buffalo_l`（`det_10g.onnx` + `w600k_r50.onnx`）、
 `buffalo_m`（`det_2.5g.onnx` + `w600k_r50.onnx`）、
-`buffalo_sc`（`det_500m.onnx` + `w600k_mbf.onnx`）和`antelopev2`
-（`scrfd_10g_bnkps.onnx` + `glintr100.onnx`）。安装会生成`manifest.json`
+`buffalo_s`和`buffalo_sc`（`det_500m.onnx` + `w600k_mbf.onnx`）、
+`antelopev2`（`scrfd_10g_bnkps.onnx` + `glintr100.onnx`）、`raccoon_s`
+（`det_10g_wo.onnx` + `w600k_mbf.onnx`）以及`raccoon_l`
+（`det_10g_wo.onnx` + `w600k_r50.onnx`）。Server只安装各包中的检测和识别
+模型，不安装或加载Raccoon中供PrivateFrame使用的verifier。安装会生成`manifest.json`
 与签名的`MODEL.LICENSE`。不带`--accept-license`时，工具只显示许可并退出，不会
-下载。`models verify`会核验包身份、签名、有效期和当前授权状态。
+下载。`models verify`会核验包身份、签名、有效期和当前授权状态；与运行时的缺失
+文件显示回退不同，这个显式核验命令仍要求存在有效的签名许可文件。
 
 InsightFace公开预训练模型默认仅限非商业研究；商业使用需另行获取授权。私有模型也
 可以使用同样的manifest和离线签名许可。许可按`model_id`表达授权，是合规凭证，

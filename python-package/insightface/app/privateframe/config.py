@@ -9,16 +9,46 @@ from typing import Any
 import yaml
 
 from .base_config import (
+    DEFAULT_CONFIG_PATH,
     _load_base_config,
     validate_config_keys,
     validate_current_config_contract,
 )
 
 
+_MAX_KEYFRAME_INTERVAL = 2_147_483_647
+_MAX_BITRATE_BPS = 9_223_372_036_854_775_807
+
+
 def _reject_unknown_keys(settings: dict[str, Any], allowed: set[str], field: str) -> None:
     unknown = sorted(set(settings) - allowed)
     if unknown:
         raise ValueError(f"unknown {field} setting: {unknown[0]}")
+
+
+def _validate_bitrate(value: Any, field: str) -> None:
+    if isinstance(value, bool):
+        raise TypeError(f"{field} must be a positive bitrate")
+    try:
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            text = value.strip().lower()
+            if text and text[-1] in {"k", "m", "g"}:
+                multiplier = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}[text[-1]]
+                parsed = round(float(text[:-1]) * multiplier)
+            else:
+                parsed = int(text)
+        else:
+            raise TypeError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(
+            f"{field} must be a positive integer optionally suffixed by k, m, or g"
+        ) from exc
+    if parsed <= 0:
+        raise ValueError(f"{field} must be positive")
+    if parsed > _MAX_BITRATE_BPS:
+        raise ValueError(f"{field} must not exceed {_MAX_BITRATE_BPS} bits/s")
 
 
 def validate_video_output(settings: dict[str, Any]) -> None:
@@ -69,8 +99,22 @@ def validate_video_output(settings: dict[str, Any]) -> None:
             raise ValueError(f"{mode} rate control has invalid settings")
         if not str(rate.get("bitrate", "")):
             raise ValueError(f"{mode} rate control requires bitrate")
+        for key in ("bitrate", "max_bitrate", "buffer_size"):
+            if key in rate:
+                _validate_bitrate(
+                    rate[key],
+                    f"render.video_output.rate_control.{key}",
+                )
     else:
         raise ValueError("rate_control.mode must be crf, cq, vbr, or cbr")
+    keyframe_interval = settings.get("keyframe_interval", 0)
+    if isinstance(keyframe_interval, bool) or not isinstance(keyframe_interval, int):
+        raise TypeError("render.video_output.keyframe_interval must be an integer")
+    if not 0 <= keyframe_interval <= _MAX_KEYFRAME_INTERVAL:
+        raise ValueError(
+            "render.video_output.keyframe_interval must be in "
+            f"[0, {_MAX_KEYFRAME_INTERVAL}]"
+        )
     audio = settings.get("audio", {})
     if not isinstance(audio, dict):
         raise TypeError("render.video_output.audio must be a mapping")
@@ -82,6 +126,11 @@ def validate_video_output(settings: dict[str, Any]) -> None:
     for key in ("debug", "redacted"):
         if audio.get(key, "none") not in {"none", "copy", "aac"}:
             raise ValueError(f"render.video_output.audio.{key} is invalid")
+    if "bitrate" in audio:
+        _validate_bitrate(
+            audio["bitrate"],
+            "render.video_output.audio.bitrate",
+        )
 
 
 def validate_redaction(settings: dict[str, Any]) -> None:
@@ -155,9 +204,20 @@ def load_config(
     *,
     config_overrides: Mapping[str, Any] | None = None,
     config_override_root: str | Path | None = None,
+    materialize_models: bool = True,
 ) -> dict[str, Any]:
+    """Load Base plus an optional overlay and validate the effective settings.
+
+    ``materialize_models=False`` is the read-only diagnostics path.  It keeps
+    the public ``models.name`` selector intact and never invokes ModelZoo's
+    download resolver; normal analysis continues to materialize the manifest
+    and task descriptors before any inference Session is constructed.
+    """
+
     source = Path(path).expanduser().resolve()
     raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    if not isinstance(materialize_models, bool):
+        raise TypeError("materialize_models must be boolean")
     if config_overrides is not None and not isinstance(config_overrides, Mapping):
         raise TypeError("config_overrides must be a dotted-path mapping")
     if config_overrides is None and config_override_root is not None:
@@ -167,12 +227,32 @@ def load_config(
         if config_override_root is not None
         else Path.cwd().resolve()
     )
-    if isinstance(raw, dict) and raw.get("base_config"):
-        if type(raw.get("schema_version")) is not int or raw["schema_version"] != 1:
-            raise ValueError("derived ONNX config must be a schema_version: 1 mapping")
+    if source == DEFAULT_CONFIG_PATH.resolve():
+        config = _load_base_config(
+            source,
+            dotted_overrides=config_overrides,
+            dotted_override_root=dotted_root,
+            materialize_models=materialize_models,
+        )
+    else:
+        if (
+            not isinstance(raw, dict)
+            or type(raw.get("schema_version")) is not int
+            or raw["schema_version"] != 1
+        ):
+            raise ValueError("custom ONNX config must be a schema_version: 1 mapping")
         validate_current_config_contract(raw)
         validate_config_keys(raw, allow_base_config=True)
-        base = (source.parent / str(raw["base_config"])).resolve()
+        if "base_config" in raw:
+            base_value = raw["base_config"]
+            if not isinstance(base_value, str) or not base_value.strip():
+                raise TypeError("base_config must be a non-empty path string")
+            base_candidate = Path(base_value).expanduser()
+            if not base_candidate.is_absolute():
+                base_candidate = source.parent / base_candidate
+            base = base_candidate.resolve()
+        else:
+            base = DEFAULT_CONFIG_PATH.resolve()
         file_overrides = {
             key: value
             for key, value in raw.items()
@@ -184,12 +264,7 @@ def load_config(
             derived_override_root=source.parent,
             dotted_overrides=config_overrides,
             dotted_override_root=dotted_root,
-        )
-    else:
-        config = _load_base_config(
-            source,
-            dotted_overrides=config_overrides,
-            dotted_override_root=dotted_root,
+            materialize_models=materialize_models,
         )
     output = config.setdefault("output", {})
     if not isinstance(output, dict):
@@ -201,6 +276,21 @@ def load_config(
     }:
         raise ValueError("output.artifacts_level must be final, audit, or debug")
     output.setdefault("artifacts_level", "final")
+    scan = config.get("scan")
+    if not isinstance(scan, dict):
+        raise TypeError("scan settings are required")
+    session_sharing = scan.get("session_sharing", "single_session_parallel")
+    if not isinstance(session_sharing, str):
+        raise TypeError("scan.session_sharing must be a string")
+    if session_sharing not in {
+        "single_session_parallel",
+        "single_session_serial",
+    }:
+        raise ValueError(
+            "scan.session_sharing must be single_session_parallel or "
+            "single_session_serial"
+        )
+    scan.setdefault("session_sharing", "single_session_parallel")
     streaming = config.get("streaming")
     if not isinstance(streaming, dict):
         raise TypeError("streaming settings are required")
@@ -210,11 +300,20 @@ def load_config(
         raise ValueError("max_retroactive_seconds must cover max_missed_seconds")
     if int(streaming.get("max_corridor_side_pixels", 0)) < 384:
         raise ValueError("streaming.max_corridor_side_pixels must be at least 384")
-    streaming.setdefault("recent_frame_cache_frames", 16)
+    streaming.setdefault("recent_frame_cache_frames", None)
     streaming.setdefault("recent_frame_cache_max_bytes", 256 * 1024 * 1024)
     streaming.setdefault("pre_roll_decode_chunk_frames", 32)
-    if int(streaming["recent_frame_cache_frames"]) < 0:
-        raise ValueError("streaming.recent_frame_cache_frames cannot be negative")
+    recent_frame_target = streaming["recent_frame_cache_frames"]
+    if recent_frame_target is not None:
+        if isinstance(recent_frame_target, bool) or not isinstance(
+            recent_frame_target,
+            int,
+        ):
+            raise TypeError(
+                "streaming.recent_frame_cache_frames must be an integer or null"
+            )
+        if recent_frame_target < 0:
+            raise ValueError("streaming.recent_frame_cache_frames cannot be negative")
     if int(streaming["recent_frame_cache_max_bytes"]) < 0:
         raise ValueError("streaming.recent_frame_cache_max_bytes cannot be negative")
     if int(streaming["pre_roll_decode_chunk_frames"]) < 1:

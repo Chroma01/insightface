@@ -13,16 +13,22 @@ from ..licensing import LICENSE_FILENAME
 DETECTION_TASK = "face_detection"
 RECOGNITION_TASK = "face_recognition"
 MANIFEST_VERSION = 1
+MANIFEST_VERSION_V2 = 2
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_EMBEDDED_PREPROCESSING = "embedded"
+_MEAN_STD_PREPROCESSING = "mean_std"
+_MISSING = object()
 
 
 @dataclass(frozen=True, slots=True)
 class ModelSpec:
     """One ONNX component described by ``/models/manifest.json``.
 
-    ``sha256`` is calculated from the active artifact for diagnostics and the
-    Collection embedding contract. It is not compared with the manifest and is
-    never part of model-license authorization.
+    ``sha256`` is always calculated from the active artifact for diagnostics
+    and the Collection embedding contract. A V2 task may additionally declare
+    the digest, in which case loading verifies it against the artifact. The
+    digest is never part of model-license authorization.
     """
 
     model_id: str
@@ -35,6 +41,7 @@ class ModelSpec:
     sha256: str
     input_mean: float
     input_std: float
+    preprocessing: str = _MEAN_STD_PREPROCESSING
 
     def public_summary(self) -> dict[str, object]:
         return {
@@ -61,6 +68,8 @@ class ModelBundle:
 
     @property
     def models(self) -> tuple[ModelSpec, ModelSpec]:
+        """Models used by the Server inference and Collection contract."""
+
         return (self.detector, self.recognizer)
 
 
@@ -107,7 +116,52 @@ def _positive_integer(value: object, *, field: str) -> int:
     return value
 
 
-def _new_manifest(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
+def _finite_number(value: object, *, field: str, positive: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise RuntimeError(f"{field} must be a number")
+    result = float(value)
+    if not math.isfinite(result) or (positive and result <= 0.0):
+        requirement = "a finite positive number" if positive else "a finite number"
+        raise RuntimeError(f"{field} must be {requirement}")
+    return result
+
+
+def _task_preprocessing(
+    value: object,
+    *,
+    field: str,
+    default: tuple[float, float],
+) -> tuple[str, float, float]:
+    if value is _MISSING:
+        return _MEAN_STD_PREPROCESSING, default[0], default[1]
+    if isinstance(value, str):
+        if value != _EMBEDDED_PREPROCESSING:
+            raise RuntimeError(f'{field} must be "embedded" or an exact mean/std object')
+        return _EMBEDDED_PREPROCESSING, 0.0, 1.0
+    if not isinstance(value, dict) or set(value) != {"mean", "std"}:
+        raise RuntimeError(f'{field} must be "embedded" or an exact mean/std object')
+    return (
+        _MEAN_STD_PREPROCESSING,
+        _finite_number(value.get("mean"), field=f"{field}.mean"),
+        _finite_number(value.get("std"), field=f"{field}.std", positive=True),
+    )
+
+
+def _license_path(raw: dict[str, Any], models_dir: Path) -> Path:
+    license_name = _required_string(raw, "license", context="manifest.json")
+    if Path(license_name).name != LICENSE_FILENAME:
+        raise RuntimeError(f"The model license filename must be {LICENSE_FILENAME}")
+    return _safe_file(models_dir, license_name, suffix=".license", must_exist=False)
+
+
+def _display_name(raw: dict[str, Any], model_id: str) -> str:
+    display = raw.get("display_name", model_id)
+    if not isinstance(display, str) or not display.strip():
+        raise RuntimeError("display_name must be a non-empty string when provided")
+    return display.strip()
+
+
+def _manifest_v1(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     allowed = {
         "manifest_version",
         "model_id",
@@ -120,7 +174,10 @@ def _new_manifest(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise RuntimeError(f"manifest.json contains unsupported fields: {', '.join(unknown)}")
-    if raw.get("manifest_version") != MANIFEST_VERSION:
+    if (
+        type(raw.get("manifest_version")) is not int
+        or raw.get("manifest_version") != MANIFEST_VERSION
+    ):
         raise RuntimeError(
             f"manifest_version must be {MANIFEST_VERSION}; found {raw.get('manifest_version')!r}"
         )
@@ -128,9 +185,7 @@ def _new_manifest(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     if not _MODEL_ID.fullmatch(model_id):
         raise RuntimeError("manifest model_id has an invalid format")
     model_version = _required_string(raw, "model_version", context="manifest.json")
-    display = raw.get("display_name", model_id)
-    if not isinstance(display, str) or not display.strip():
-        raise RuntimeError("display_name must be a non-empty string when provided")
+    display = _display_name(raw, model_id)
 
     files = raw.get("files")
     if not isinstance(files, dict) or set(files) != {"detector", "recognizer"}:
@@ -155,15 +210,8 @@ def _new_manifest(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     dimension = _positive_integer(
         recognition.get("embedding_dimension"), field="recognition.embedding_dimension"
     )
-    preprocessing = _required_string(
+    preprocessing_version = _required_string(
         recognition, "preprocessing", context="recognition"
-    )
-
-    license_name = _required_string(raw, "license", context="manifest.json")
-    if Path(license_name).name != LICENSE_FILENAME:
-        raise RuntimeError(f"The model license filename must be {LICENSE_FILENAME}")
-    license_path = _safe_file(
-        models_dir, license_name, suffix=".license", must_exist=False
     )
 
     detector = ModelSpec(
@@ -186,7 +234,7 @@ def _new_manifest(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
         path=recognizer_path,
         input_size=recognition_size,
         embedding_dimension=dimension,
-        preprocessing_version=preprocessing,
+        preprocessing_version=preprocessing_version,
         sha256=sha256_file(recognizer_path),
         input_mean=127.5,
         input_std=127.5,
@@ -194,8 +242,149 @@ def _new_manifest(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     return ModelBundle(
         model_id=model_id,
         model_version=model_version,
-        display_name=display.strip(),
-        license_path=license_path,
+        display_name=display,
+        license_path=_license_path(raw, models_dir),
+        detector=detector,
+        recognizer=recognizer,
+    )
+
+
+def _active_v2_task(tasks: dict[str, Any], task: str) -> dict[str, Any]:
+    value = tasks.get(task)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"tasks.{task} must be an object")
+    return value
+
+
+def _optional_string(raw: dict[str, Any], key: str, *, default: str, context: str) -> str:
+    if key not in raw:
+        return default
+    return _required_string(raw, key, context=context)
+
+
+def _v2_task_sha256(raw: dict[str, Any], path: Path, *, field: str) -> str:
+    """Calculate an active V2 artifact digest and verify it when declared."""
+
+    actual = sha256_file(path)
+    if "sha256" not in raw:
+        return actual
+    declared = raw.get("sha256")
+    if not isinstance(declared, str) or not _SHA256.fullmatch(declared):
+        raise RuntimeError(f"{field} must be 64 lowercase hexadecimal characters")
+    if declared != actual:
+        raise RuntimeError(f"{field} does not match model package file: {path.name}")
+    return actual
+
+
+def _manifest_v2(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
+    if (
+        type(raw.get("manifest_version")) is not int
+        or raw.get("manifest_version") != MANIFEST_VERSION_V2
+    ):
+        raise RuntimeError(
+            f"manifest_version must be {MANIFEST_VERSION_V2}; found {raw.get('manifest_version')!r}"
+        )
+    model_id = _required_string(raw, "model_id", context="manifest.json")
+    if not _MODEL_ID.fullmatch(model_id):
+        raise RuntimeError("manifest model_id has an invalid format")
+    display = _display_name(raw, model_id)
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, dict):
+        raise RuntimeError("tasks must be an object")
+    detection = _active_v2_task(tasks, "detection")
+    recognition = _active_v2_task(tasks, "recognition")
+
+    detector_path = _safe_file(
+        models_dir,
+        _required_string(detection, "file", context="tasks.detection"),
+        suffix=".onnx",
+    )
+    recognizer_path = _safe_file(
+        models_dir,
+        _required_string(recognition, "file", context="tasks.recognition"),
+        suffix=".onnx",
+    )
+    if detector_path == recognizer_path:
+        raise RuntimeError("detection and recognition must reference distinct ONNX paths")
+
+    detector_sha256 = _v2_task_sha256(
+        detection,
+        detector_path,
+        field="tasks.detection.sha256",
+    )
+    recognizer_sha256 = _v2_task_sha256(
+        recognition,
+        recognizer_path,
+        field="tasks.recognition.sha256",
+    )
+
+    detector_preprocessing, detector_mean, detector_std = _task_preprocessing(
+        detection.get("preprocessing", _MISSING),
+        field="tasks.detection.preprocessing",
+        default=(127.5, 128.0),
+    )
+    recognition_preprocessing, recognition_mean, recognition_std = _task_preprocessing(
+        recognition.get("preprocessing", _MISSING),
+        field="tasks.recognition.preprocessing",
+        default=(127.5, 127.5),
+    )
+    recognition_size = (
+        (112, 112)
+        if "input_size" not in recognition
+        else _positive_pair(recognition.get("input_size"), field="tasks.recognition.input_size")
+    )
+    if recognition_size[0] != recognition_size[1]:
+        raise RuntimeError("tasks.recognition.input_size must be square")
+    dimension = (
+        512
+        if "embedding_dimension" not in recognition
+        else _positive_integer(
+            recognition.get("embedding_dimension"),
+            field="tasks.recognition.embedding_dimension",
+        )
+    )
+
+    detector = ModelSpec(
+        model_id=model_id,
+        model_version=model_id,
+        task=DETECTION_TASK,
+        path=detector_path,
+        input_size=(640, 640),
+        embedding_dimension=None,
+        preprocessing_version=_optional_string(
+            detection,
+            "preprocessing_version",
+            default="insightface-scrfd-1",
+            context="tasks.detection",
+        ),
+        sha256=detector_sha256,
+        input_mean=detector_mean,
+        input_std=detector_std,
+        preprocessing=detector_preprocessing,
+    )
+    recognizer = ModelSpec(
+        model_id=model_id,
+        model_version=model_id,
+        task=RECOGNITION_TASK,
+        path=recognizer_path,
+        input_size=recognition_size,
+        embedding_dimension=dimension,
+        preprocessing_version=_optional_string(
+            recognition,
+            "preprocessing_version",
+            default="insightface-arcface-1",
+            context="tasks.recognition",
+        ),
+        sha256=recognizer_sha256,
+        input_mean=recognition_mean,
+        input_std=recognition_std,
+        preprocessing=recognition_preprocessing,
+    )
+    return ModelBundle(
+        model_id=model_id,
+        model_version=model_id,
+        display_name=display,
+        license_path=_license_path(raw, models_dir),
         detector=detector,
         recognizer=recognizer,
     )
@@ -295,6 +484,13 @@ def load_manifest(models_dir: str | Path) -> ModelBundle:
         raise RuntimeError(f"Invalid model manifest: {exc}") from exc
     if not isinstance(raw, dict):
         raise RuntimeError("Model manifest root must be an object")
-    if "manifest_version" in raw:
-        return _new_manifest(raw, root)
-    return _legacy_manifest(raw, root)
+    if "manifest_version" not in raw:
+        return _legacy_manifest(raw, root)
+    version = raw.get("manifest_version")
+    if type(version) is not int:
+        raise RuntimeError(f"manifest_version must be an integer; found {version!r}")
+    if version == MANIFEST_VERSION:
+        return _manifest_v1(raw, root)
+    if version == MANIFEST_VERSION_V2:
+        return _manifest_v2(raw, root)
+    raise RuntimeError(f"Unsupported manifest_version: {version!r}")

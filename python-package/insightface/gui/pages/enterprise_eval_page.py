@@ -30,6 +30,7 @@ from ..core.evaluation import (
     validate_enterprise_dataset,
 )
 from ..core.i18n import apply_translations, effective_language, tr
+from ..core.licensing import current_model_license_display
 from ..core.reporting import write_reports
 from ..widgets.drop_input import DropInput
 from .base import BasePage
@@ -1151,6 +1152,7 @@ class EnterpriseEvalPage(BasePage):
         mode = self._eval_mode()
         auto_split = self.auto_split.isChecked()
         multi_face_policy = self._multi_face_policy()
+        license_status = current_model_license_display(self.context).status_text
 
         def task(progress=None, is_cancelled=None):
             if mode.startswith("1:1"):
@@ -1159,7 +1161,7 @@ class EnterpriseEvalPage(BasePage):
                     self.context.engine,
                     auto_split=auto_split,
                     multi_face_policy=multi_face_policy,
-                    license_status=self.context.config.license_status,
+                    license_status=license_status,
                     progress_callback=progress,
                     cancel_callback=is_cancelled,
                 )
@@ -1168,7 +1170,7 @@ class EnterpriseEvalPage(BasePage):
                 self.context.engine,
                 auto_split=auto_split,
                 multi_face_policy=multi_face_policy,
-                license_status=self.context.config.license_status,
+                license_status=license_status,
                 progress_callback=progress,
                 cancel_callback=is_cancelled,
             )

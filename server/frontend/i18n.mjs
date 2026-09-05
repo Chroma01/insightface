@@ -1,4 +1,4 @@
-import { SHARED_UI_MESSAGES, UI_CATALOGS } from "./ui-translations.mjs?v=0.2.0-r13";
+import { SHARED_UI_MESSAGES, UI_CATALOGS } from "./ui-translations.mjs?v=0.2.0-r14";
 
 export const LANGUAGES = Object.freeze([
   { code: "en", label: "English", htmlLang: "en" },

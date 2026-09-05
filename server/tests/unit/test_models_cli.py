@@ -51,25 +51,48 @@ def test_successful_install_prints_license_after_result(
 def test_info_reports_pinned_source_and_hashes(capsys) -> None:
     assert models_cli.main(["info", "buffalo_l"]) == 0
     output = capsys.readouterr().out
-    assert "/releases/download/v0.7/buffalo_l.zip" in output
+    assert "/releases/download/model-zoo/buffalo_l.zip" in output
     assert "80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f" in output
     assert "det_10g.onnx SHA-256" in output
     assert "w600k_r50.onnx SHA-256" in output
 
 
-def test_list_reports_every_supported_package(tmp_path: Path, capsys) -> None:
+def test_list_reports_every_supported_package(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    calls = 0
+
+    def installed_package(_models_dir: Path) -> str | None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    monkeypatch.setattr(models_cli, "installed_package_name", installed_package)
     assert models_cli.main(["--models-dir", str(tmp_path), "list"]) == 0
+    assert calls == 1
     output = capsys.readouterr().out
-    for name in ("buffalo_l", "buffalo_m", "buffalo_sc", "antelopev2"):
-        assert f"{name}\tv0.7\tnot installed" in output
+    expected_releases = {
+        "buffalo_l": "v0.7",
+        "buffalo_m": "v0.7",
+        "buffalo_s": "v0.7",
+        "buffalo_sc": "v0.7",
+        "antelopev2": "v0.7",
+        "raccoon_s": "model-zoo",
+        "raccoon_l": "model-zoo",
+    }
+    for name, release in expected_releases.items():
+        assert f"{name}\t{release}\tnot installed" in output
 
 
 @pytest.mark.parametrize(
     ("name", "detector", "recognizer"),
     (
         ("buffalo_m", "det_2.5g.onnx", "w600k_r50.onnx"),
+        ("buffalo_s", "det_500m.onnx", "w600k_mbf.onnx"),
         ("buffalo_sc", "det_500m.onnx", "w600k_mbf.onnx"),
         ("antelopev2", "scrfd_10g_bnkps.onnx", "glintr100.onnx"),
+        ("raccoon_s", "det_10g_wo.onnx", "w600k_mbf.onnx"),
+        ("raccoon_l", "det_10g_wo.onnx", "w600k_r50.onnx"),
     ),
 )
 def test_info_reports_new_catalog_packages(
@@ -77,7 +100,7 @@ def test_info_reports_new_catalog_packages(
 ) -> None:
     assert models_cli.main(["info", name]) == 0
     output = capsys.readouterr().out
-    assert f"/releases/download/v0.7/{name}.zip" in output
+    assert f"/releases/download/model-zoo/{name}.zip" in output
     assert f"{detector} SHA-256" in output
     assert f"{recognizer} SHA-256" in output
     assert "Commercial use requires a separate license" in output

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from insightface.app.privateframe.geometry import mutually_covers
 from insightface.app.privateframe.revalidation import (
     _admission_decision,
     _summary,
@@ -12,8 +13,10 @@ from insightface.app.privateframe.revalidation import (
 from insightface.app.privateframe.streaming import (
     StreamingEngine,
     _accepted_interval_coverage,
+    _deduplicate_final_cross_tracks,
     _detector_pipeline_depth,
     _detector_scan_burst_frames,
+    resolve_analysis_stride,
 )
 
 
@@ -24,6 +27,31 @@ def _engine(*, frame_stride: int = 2, frame_count: int = 12) -> StreamingEngine:
     engine.forced_detector_scan_reasons = {}
     engine.metadata = SimpleNamespace(frame_count=frame_count)
     return engine
+
+
+@pytest.mark.parametrize(
+    ("source_fps", "max_analysis_fps", "expected_stride"),
+    [
+        (29.97, 30.0, 1),
+        (30.02, 30.0, 1),
+        (31.5, 30.0, 1),
+        (31.5001, 30.0, 2),
+        (60.0, 30.0, 2),
+        (120.0, 30.0, 4),
+        (120.0, 120.0, 1),
+        (30.0, 15.0, 2),
+        (60.0, 15.0, 4),
+        (120.0, 15.0, 8),
+        (240.0, 15.0, 16),
+        (25.0, 15.0, 2),
+    ],
+)
+def test_analysis_stride_uses_a_five_percent_soft_ceiling(
+    source_fps: float,
+    max_analysis_fps: float,
+    expected_stride: int,
+) -> None:
+    assert resolve_analysis_stride(source_fps, max_analysis_fps) == expected_stride
 
 
 def test_every_frame_mode_never_samples_out_a_frame() -> None:
@@ -167,7 +195,7 @@ def test_missing_a_forced_scan_breaks_detector_and_local_anchor_continuity() -> 
     assert summary["leading_consecutive_detector_frames"] == 1
 
 
-@pytest.mark.parametrize("detector_stride", [3, 4])
+@pytest.mark.parametrize("detector_stride", [3, 4, 8, 16])
 def test_unscanned_frames_are_neutral_for_any_detector_stride(
     detector_stride: int,
 ) -> None:
@@ -205,8 +233,8 @@ def test_unscanned_frames_are_neutral_for_any_detector_stride(
     assert summary["joint_strong_anchor"] == 1.0
 
 
-@pytest.mark.parametrize("detector_stride", [3, 4])
-def test_finalization_uses_every_configured_detector_stride_as_review_cadence(
+@pytest.mark.parametrize("detector_stride", [3, 4, 8, 16])
+def test_finalization_uses_runtime_detector_stride_as_review_cadence(
     detector_stride: int,
 ) -> None:
     config_path = (
@@ -214,7 +242,6 @@ def test_finalization_uses_every_configured_detector_stride_as_review_cadence(
         / "insightface/app/privateframe/configs/base.yaml"
     )
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    config["scan"]["frame_stride"] = detector_stride
     hit_frames = tuple(index * detector_stride for index in range(6))
     values = [
         {
@@ -243,6 +270,7 @@ def test_finalization_uses_every_configured_detector_stride_as_review_cadence(
         {"observations": [], "shadows": []},
         values,
         config,
+        detector_frame_stride=detector_stride,
     )
 
     assert track["revalidation_summary"]["local_review_stride"] == detector_stride
@@ -250,8 +278,8 @@ def test_finalization_uses_every_configured_detector_stride_as_review_cadence(
     assert track["accepted"] is True
 
 
-@pytest.mark.parametrize("detector_stride", [3, 4])
-def test_real_scan_miss_breaks_stride_three_and_four_strong_windows(
+@pytest.mark.parametrize("detector_stride", [3, 4, 8, 16])
+def test_real_scan_miss_breaks_sampled_strong_windows(
     detector_stride: int,
 ) -> None:
     config_path = (
@@ -486,6 +514,132 @@ def test_all_mode_accepts_geometric_coverage_from_a_deduplicating_track() -> Non
         evidence,
         allow_cross_track_coverage=True,
     ) == (1, 0, 1)
+
+
+def test_final_cross_track_dedup_uses_the_stabilized_stadium_geometry() -> None:
+    """The real frame-2645 suppressor moved below safe coverage when smoothed."""
+
+    reference_box = [
+        263.53942385536544,
+        847.934008744694,
+        374.68342185793216,
+        994.3868835892906,
+    ]
+    raw_detector_box = [
+        249.72206878662112,
+        855.9078140258789,
+        359.420654296875,
+        997.3791961669922,
+    ]
+    stabilized_detector_box = [
+        245.22773938549395,
+        860.1194372732741,
+        356.8281995684341,
+        999.9084206786799,
+    ]
+    assert mutually_covers(
+        reference_box,
+        raw_detector_box,
+        min_coverage=0.80,
+        max_area_ratio=2.50,
+    )
+    assert not mutually_covers(
+        reference_box,
+        stabilized_detector_box,
+        min_coverage=0.80,
+        max_area_ratio=2.50,
+    )
+
+    def observations(detector_box: list[float]) -> list[dict[str, object]]:
+        return [
+            {
+                "track_id": "t00109",
+                "frame_idx": 2645,
+                "source": "kalman_optical_flow",
+                "box": reference_box,
+            },
+            {
+                "track_id": "t00112",
+                "frame_idx": 2645,
+                "source": "detector",
+                "confidence": 0.5601000785827637,
+                "box": detector_box,
+            },
+        ]
+
+    evidence = [
+        {
+            "track_id": "t00109",
+            "frame_idx": 2645,
+            "box": reference_box,
+        },
+        {
+            "track_id": "t00112",
+            "frame_idx": 2645,
+            "box": raw_detector_box,
+        },
+    ]
+    # This proves why final cross-track suppression must not see raw boxes.
+    assert {
+        item["track_id"]
+        for item in _deduplicate_final_cross_tracks(
+            observations(raw_detector_box),
+            evidence,
+            recognition_mode="all",
+        )
+    } == {"t00112"}
+
+    final = _deduplicate_final_cross_tracks(
+        observations(stabilized_detector_box),
+        evidence,
+        recognition_mode="all",
+    )
+    assert {item["track_id"] for item in final} == {"t00109", "t00112"}
+    assert _accepted_interval_coverage(
+        [
+            {
+                "track_id": track_id,
+                "accepted": True,
+                "accepted_intervals": [[2645, 2645]],
+            }
+            for track_id in ("t00109", "t00112")
+        ],
+        final,
+        evidence,
+        allow_cross_track_coverage=True,
+    ) == (2, 0, 0)
+
+
+@pytest.mark.parametrize("recognition_mode", ["exempt", "blur_only"])
+def test_selective_recognition_never_deduplicates_across_tracks(
+    recognition_mode: str,
+) -> None:
+    observations = [
+        {
+            "track_id": track_id,
+            "frame_idx": 8,
+            "source": "detector",
+            "confidence": confidence,
+            "box": [10.0, 10.0, 30.0, 30.0],
+        }
+        for track_id, confidence in (("first", 0.9), ("second", 0.8))
+    ]
+    evidence = [
+        {
+            "track_id": item["track_id"],
+            "frame_idx": item["frame_idx"],
+            "box": item["box"],
+        }
+        for item in observations
+    ]
+
+    result = _deduplicate_final_cross_tracks(
+        observations,
+        evidence,
+        recognition_mode=recognition_mode,
+    )
+
+    assert {item["track_id"] for item in result} == {"first", "second"}
 
 
 def test_sampling_pipeline_depth_is_capped_by_the_frame_byte_budget() -> None:

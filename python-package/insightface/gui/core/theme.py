@@ -339,6 +339,23 @@ def application_stylesheet(theme: str | None) -> str:
         color: {palette["text"]};
         padding: 9px 10px;
     }}
+    QFrame#privateFrameCompatibilityBanner {{
+        background: {palette["notice_bg"]};
+        border: 1px solid {palette["notice_border"]};
+        border-radius: 8px;
+    }}
+    QLabel#privateFrameCompatibilityTitle {{
+        color: {palette["text"]};
+        font-weight: 700;
+    }}
+    QLabel#privateFrameCompatibilityMessage,
+    QLabel#privateFrameCompatibilityCurrentModelCaption {{
+        color: {palette["text"]};
+    }}
+    QLabel#privateFrameCompatibilityCurrentModelValue {{
+        color: {palette["text"]};
+        font-weight: 650;
+    }}
     QLabel#localProcessingNotice {{
         background: {palette["notice_bg"]};
         border: 1px solid {palette["notice_border"]};
@@ -499,35 +516,40 @@ def application_stylesheet(theme: str | None) -> str:
     QLabel#enterpriseCardTitle {{
         color: {palette["text"]};
     }}
-    QFrame#uploadPreview, QFrame#dropInput, QFrame#galleryUpload,
+    QFrame#uploadPreview, QFrame#privateFrameVideoInput, QFrame#dropInput, QFrame#galleryUpload,
     QFrame#imageOrFolderImport, QListWidget#albumDirectoryList {{
         border: 1px dashed {palette["border_strong"]};
         border-radius: 6px;
         background: {palette["upload_bg"]};
         padding: 8px;
     }}
-    QFrame#uploadPreview[hoverActive="true"], QFrame#dropInput[hoverActive="true"],
+    QFrame#uploadPreview[hoverActive="true"], QFrame#privateFrameVideoInput[hoverActive="true"],
+    QFrame#dropInput[hoverActive="true"],
     QFrame#galleryUpload[hoverActive="true"], QFrame#imageOrFolderImport[hoverActive="true"],
     QListWidget#albumDirectoryList[hoverActive="true"] {{
         border-color: {palette["accent"]};
         background: {palette["upload_hover"]};
     }}
-    QFrame#uploadPreview[dragActive="true"], QFrame#dropInput[dragActive="true"],
+    QFrame#uploadPreview[dragActive="true"], QFrame#privateFrameVideoInput[dragActive="true"],
+    QFrame#dropInput[dragActive="true"],
     QFrame#galleryUpload[dragActive="true"], QFrame#imageOrFolderImport[dragActive="true"],
     QListWidget#albumDirectoryList[dragActive="true"] {{
         border-color: {palette["success"]};
         background: {palette["upload_drag"]};
     }}
-    QFrame#uploadPreview[hasFile="true"], QFrame#dropInput[hasFiles="true"],
+    QFrame#uploadPreview[hasFile="true"], QFrame#privateFrameVideoInput[hasFile="true"],
+    QFrame#dropInput[hasFiles="true"],
     QFrame#galleryUpload[hasFiles="true"] {{
         border: 1px solid {palette["border"]};
         background: {palette["upload_file"]};
     }}
-    QFrame#uploadPreview QLabel, QFrame#dropInput QLabel, QFrame#galleryUpload QLabel,
+    QFrame#uploadPreview QLabel, QFrame#privateFrameVideoInput QLabel,
+    QFrame#dropInput QLabel, QFrame#galleryUpload QLabel,
     QFrame#imageOrFolderImport QLabel {{
         background: transparent;
     }}
-    QFrame#uploadPreview QGraphicsView, QFrame#galleryUpload QListWidget {{
+    QFrame#uploadPreview QGraphicsView, QFrame#privateFrameVideoInput QGraphicsView,
+    QFrame#galleryUpload QListWidget {{
         background: transparent;
         border: 0;
     }}

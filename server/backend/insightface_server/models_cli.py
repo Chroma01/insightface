@@ -38,8 +38,8 @@ def _confirm_license(package: ModelPackage, accepted: bool) -> None:
         raise ModelPackageError("Model installation cancelled; license was not accepted.")
 
 
-def _print_package(package: ModelPackage, models_dir: Path) -> None:
-    status = "installed" if installed_package_name(models_dir) == package.name else "not installed"
+def _print_package(package: ModelPackage, installed: str | None) -> None:
+    status = "installed" if installed == package.name else "not installed"
     print(f"{package.name}\t{package.release}\t{status}")
 
 
@@ -74,7 +74,7 @@ def _build_parser() -> argparse.ArgumentParser:
     install = commands.add_parser("install", help="Download and install a verified package")
     install.add_argument(
         "model",
-        help="Package name: buffalo_l, buffalo_m, buffalo_sc, or antelopev2",
+        help=f"Package name: {', '.join(PACKAGES)}",
     )
     install.add_argument(
         "--accept-license",
@@ -97,8 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "list":
             print("NAME\tRELEASE\tSTATUS")
+            installed = installed_package_name(models_dir)
             for package in PACKAGES.values():
-                _print_package(package, models_dir)
+                _print_package(package, installed)
             return 0
         if args.command == "info":
             package = package_for_name(args.model)

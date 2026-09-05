@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -56,22 +55,24 @@ def _config(tmp_path: Path, runtime: dict[str, Any]) -> dict[str, Any]:
         "recognition": ("recognizer.onnx", b"recognizer"),
     }
     manifest = {
-        "detection": {
-            "file": "detector.onnx",
-            "sha256": hashlib.sha256(contents["detection"][1]).hexdigest(),
-            "preprocessing": {"mean": 127.5, "std": 128.0},
+        "manifest_version": 2,
+        "model_id": "raccoon_s",
+        "tasks": {
+            "detection": {
+                "file": "detector.onnx",
+                "preprocessing": {"mean": 127.5, "std": 128.0},
+            },
+            "verification": {
+                "file": "verifier.onnx",
+                "expansion": 1.3,
+                "preprocessing": "embedded",
+            },
+            "recognition": {
+                "file": "recognizer.onnx",
+                "preprocessing": {"mean": 127.5, "std": 127.5},
+            },
         },
-        "verification": {
-            "file": "verifier.onnx",
-            "sha256": hashlib.sha256(contents["verification"][1]).hexdigest(),
-            "expansion": 1.3,
-            "preprocessing": "embedded",
-        },
-        "recognition": {
-            "file": "recognizer.onnx",
-            "sha256": hashlib.sha256(contents["recognition"][1]).hexdigest(),
-            "preprocessing": {"mean": 127.5, "std": 127.5},
-        },
+        "license": "MODEL.LICENSE",
     }
     for filename, content in contents.values():
         (package_path / filename).write_bytes(content)
@@ -81,9 +82,6 @@ def _config(tmp_path: Path, runtime: dict[str, Any]) -> dict[str, Any]:
         "models": {
             "name": "raccoon_s",
             "manifest_path": str(manifest_path),
-            "manifest_sha256": hashlib.sha256(
-                manifest_path.read_bytes()
-            ).hexdigest(),
             "detection": {
                 "nms_iou_threshold": 0.42,
                 "max_detections": 5,

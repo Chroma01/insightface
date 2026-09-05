@@ -25,6 +25,12 @@ Primary code lives under `server/`. It may import selected existing modules from
 training, or package behavior unless a separate upstream change explicitly
 requires it.
 
+The supported Server runtime is built from the complete repository: its Docker
+image places both `server/backend` and `python-package` on `PYTHONPATH`. The
+backend-only wheel produced during release checks is not a standalone inference
+distribution; the independently installable client is the SDK wheel under
+`server/sdk/python`.
+
 Do not commit model binaries, signed customer licenses, issuer private keys,
 real face images, customer data, generated databases, or production
 configuration. `/models` is read-only runtime input; `/data` is mutable,
@@ -37,7 +43,7 @@ server/
 ├── backend/insightface_server/
 │   ├── api/          request and response schemas, authentication
 │   ├── inference/    provider-independent pipeline and ONNX implementation
-│   ├── licensing/    offline model-license verification and trusted keys
+│   ├── licensing/    compatibility facade for shared model-license handling
 │   ├── models/       manifest, packages, embedding contract
 │   ├── search/       Python facade, native ABI, reference implementation
 │   ├── services/     application workflows and RTSP tasks
@@ -114,7 +120,8 @@ Startup must fail unless all of these succeed:
 2. GPU, Compute Capability, and Driver discovery;
 3. `CUDAExecutionProvider` availability and primary Session placement;
 4. actual loaded CUDA and cuDNN library version inspection;
-5. manifest and signed model-license verification;
+5. manifest and model-license policy validation (a missing file defaults to
+   non-commercial, while an existing invalid license fails);
 6. real detector and recognizer Session creation;
 7. real warm-up through both graphs;
 8. recognition output-dimension verification;
@@ -134,20 +141,33 @@ consistency result.
 
 ## 5. Model bundle and offline license design
 
-A model bundle contains detector and recognizer ONNX files, `manifest.json`,
-and `MODEL.LICENSE`. Normal startup never downloads models. The `models`
-Compose tool supports install and verify for public packages; the manifest
-helper supports controlled private bundles.
+A managed public model bundle contains detector and recognizer ONNX files,
+`manifest.json`, and a signed `MODEL.LICENSE`. A custom runtime bundle may omit
+the license file; it is then explicitly reported as non-commercial by default.
+An existing invalid, mismatched, inactive, or expired signed license still
+fails startup. Normal startup never downloads models. The `models` Compose tool
+supports install and strict verification for public packages; the manifest
+helper supports controlled private bundles. Catalog downloads share the
+`MODEL_ZOO_RELEASE_BASE_URL` for the dedicated
+[`model-zoo` GitHub Release](https://github.com/deepinsight/insightface/releases/tag/model-zoo);
+each package's `release` value remains model-version metadata and does not select
+the download tag.
 
-The manifest is the runtime truth for:
+The strict V1 manifest is the runtime truth for its declared bundle metadata.
+The extensible V2 manifest instead names tasks and their input contracts and
+does not define a separate model-version field. A V2 task may declare an
+optional ONNX SHA-256; the Server verifies declared detector/recognizer digests
+and always calculates their actual digests. The Server uses `model_id` in the
+legacy `model_version` API/storage slot. Together, the manifest and runtime
+inspection determine:
 
 - detector and recognizer file names;
 - task and model identities;
-- model version;
 - input size and dynamic-input behavior;
 - embedding dimension;
 - normalization and preprocessing versions;
-- artifact SHA-256 used for diagnostics and Collection compatibility.
+- verified-when-declared and runtime-calculated artifact SHA-256 used for
+  diagnostics and Collection compatibility.
 
 The signed model license is an offline compliance credential, not DRM. It binds
 authorization to `model_id`, issuer, use, and optional validity interval. It
@@ -156,11 +176,12 @@ approved FP16 or other format conversion. Verification uses the bundled
 InsightFace Ed25519 public key. The issuer private key stays under an ignored
 private issuer directory and never enters a container or commit.
 
-The four public package licenses start at `2021-09-22T00:00:00Z`, have no end
-date, and state non-commercial use. A future private model can share a detector
-with a public bundle but needs a license whose `model_id` matches the private
-recognizer identity. A not-yet-effective or expired commercial license must
-fail startup clearly.
+The five Buffalo/Antelope public package licenses start at
+`2021-09-22T00:00:00Z`; the two Raccoon licenses start at
+`2026-08-29T00:00:00Z`. They have no end date and state non-commercial use. A
+future private model can share a detector with a public bundle but needs a
+license whose `model_id` matches the private recognizer identity. A
+not-yet-effective or expired commercial license must fail startup clearly.
 
 Changing detector or recognizer can change detection, alignment, preprocessing,
 or embedding semantics. The computed bundle contract therefore pins every

@@ -70,6 +70,8 @@ gui_only_requirements = [
     'Pillow',
     'reportlab',
     'scikit-learn',
+    'cryptography>=42.0.0',
+    'rfc8785>=0.1.4',
 ]
 
 gui_requirements = gui_only_requirements + privateframe_requirements
@@ -85,10 +87,15 @@ package_data = {
     "insightface.data.objects": ["*.pkl"],
     "insightface.gui.assets": ["*.png", "*.ico", "*.icns"],
     "insightface.app.privateframe": ["configs/*.yaml"],
+    "insightface.model_zoo": ["trusted_keys/*.pem"],
 }
 
 packages = find_namespace_packages(
-    include=("insightface", "insightface.*"),
+    include=(
+        "insightface",
+        "insightface.*",
+        "insightface_privateframe_bootstrap",
+    ),
     exclude=("docs", "docs.*", "tests", "tests.*", "scripts", "scripts.*"),
 )
 if not build_face3d:
@@ -179,7 +186,7 @@ setup(
             "insightface-gui=insightface.gui.__main__:main",
             "insightface-eval-studio=insightface.gui.__main__:main",
             "insightface-desktop=insightface.gui.__main__:main",
-            "insightface-privateframe=insightface.app.privateframe.cli:main",
+            "insightface-privateframe=insightface_privateframe_bootstrap:main",
         ]
     },
     extras_require={

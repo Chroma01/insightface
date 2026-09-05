@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+
 from insightface.app.privateframe import artifact_render, pipeline, streaming
 from insightface.app.privateframe.artifact_render import RenderTarget
 from insightface.app.privateframe.model_catalog import DETECTION_TASK
@@ -209,6 +210,11 @@ def test_render_reports_each_frame_and_aborts_temporary_output_on_cancel(
         "iter_oriented_frames",
         lambda _source: iter(frames),
     )
+    monkeypatch.setattr(
+        artifact_render,
+        "probe_video",
+        lambda _path: SimpleNamespace(width=2, height=2, fps=30.0),
+    )
     cancelled = False
     updates: list[tuple[int, int, str]] = []
 
@@ -225,7 +231,6 @@ def test_render_reports_each_frame_and_aborts_temporary_output_on_cancel(
             settings={"backend": "pyav", "audio": {}},
             analysis_result={
                 "source_video": {
-                    "sha256": "unused",
                     "metadata": {
                         "width": 2,
                         "height": 2,
@@ -235,7 +240,6 @@ def test_render_reports_each_frame_and_aborts_temporary_output_on_cancel(
                 },
                 "observations": [],
             },
-            verify_source=False,
             progress=report,
             is_cancelled=lambda: cancelled,
         )
@@ -279,7 +283,12 @@ def test_successful_pyav_render_collects_native_cycles_before_return(
     monkeypatch.setattr(
         artifact_render,
         "probe_video",
-        lambda _path: SimpleNamespace(to_dict=lambda: {"frame_count": 1}),
+        lambda _path: SimpleNamespace(
+            width=2,
+            height=2,
+            fps=30.0,
+            to_dict=lambda: {"frame_count": 1},
+        ),
     )
     monkeypatch.setattr(artifact_render, "sha256_file", lambda _path: "sha256")
     monkeypatch.setattr(
@@ -294,7 +303,6 @@ def test_successful_pyav_render_collects_native_cycles_before_return(
         settings={"backend": "pyav", "audio": {}},
         analysis_result={
             "source_video": {
-                "sha256": "unused",
                 "metadata": {
                     "width": 2,
                     "height": 2,
@@ -304,7 +312,6 @@ def test_successful_pyav_render_collects_native_cycles_before_return(
             },
             "observations": [],
         },
-        verify_source=False,
     )
 
     assert result["frame_count"] == 1

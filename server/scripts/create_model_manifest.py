@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Create the compact v1 manifest expected by InsightFace Server."""
+"""Create a legacy compact V1 manifest for Buffalo-style Server bundles.
+
+New task-aware packages use manifest V2 and intentionally have no
+``model_version`` field. This helper remains V1-only for existing bundles.
+"""
 
 from __future__ import annotations
 

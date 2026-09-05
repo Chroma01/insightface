@@ -19,6 +19,15 @@ privateframe_config_datas = [
     (str(config_path), "insightface/app/privateframe/configs")
     for config_path in sorted(privateframe_config_dir.glob("*.yaml"))
 ]
+trusted_key_dir = project_root / "insightface" / "model_zoo" / "trusted_keys"
+trusted_key_datas = [
+    (str(key_path), "insightface/model_zoo/trusted_keys")
+    for key_path in sorted(trusted_key_dir.glob("*.pem"))
+]
+if not trusted_key_datas:
+    raise FileNotFoundError(
+        f"Model-license trusted keys were not found in {trusted_key_dir}"
+    )
 if not privateframe_config_datas:
     raise FileNotFoundError(
         f"PrivateFrame configuration files were not found in {privateframe_config_dir}"
@@ -44,12 +53,15 @@ hiddenimports = [
     "PIL.Image",
     "sklearn.cluster",
     "reportlab.pdfgen.canvas",
+    "rfc8785",
+    "cryptography.hazmat.primitives.asymmetric.ed25519",
+    "insightface.model_zoo.model_license",
     "insightface.gui.__main__",
     "insightface.gui.app",
     "insightface.gui.main_window",
 ]
 
-datas = runtime_icon_datas + privateframe_config_datas
+datas = runtime_icon_datas + privateframe_config_datas + trusted_key_datas
 binaries = []
 
 a = Analysis(

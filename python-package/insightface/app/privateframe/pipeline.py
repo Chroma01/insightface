@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import time
 import unicodedata
 from collections.abc import Callable, Mapping
@@ -37,9 +38,11 @@ from .streaming import run_stream
 from .video import paths_are_distinct
 
 RESULT_FILENAME = "result.privateframe.json"
+DEVELOPMENT_REPORT_FILENAME = "result.privateframe.dev.json"
 ARTIFACT_LEVELS = {"final", "audit", "debug"}
 _GENERATED_FILENAMES = {
     RESULT_FILENAME,
+    DEVELOPMENT_REPORT_FILENAME,
     "detections.streaming-onnx.jsonl",
     "tracking.streaming-onnx.jsonl",
     "bidirectional-fusion.streaming-onnx.jsonl",
@@ -112,8 +115,8 @@ def _model_fingerprints(config: dict[str, Any]) -> dict[str, Any]:
         if "path" not in model:
             raise TypeError(f"active model {model_id} has no path mapping")
         path = verify_model_file(model)
-        values[str(model_id)] = {
-            "sha256": str(model["sha256"]),
+        declared_sha256 = model.get("sha256")
+        fingerprint = {
             "bytes": path.stat().st_size,
             "file": str(model["file"]),
             "preprocessing": (
@@ -122,6 +125,18 @@ def _model_fingerprints(config: dict[str, Any]) -> dict[str, Any]:
                 else str(model["preprocessing"])
             ),
         }
+        if declared_sha256 is not None:
+            fingerprint["sha256"] = declared_sha256
+        for key in (
+            "preprocessing_version",
+            "input_size",
+            "embedding_dimension",
+            "expansion",
+        ):
+            if key in model:
+                value = model[key]
+                fingerprint[key] = list(value) if isinstance(value, tuple) else value
+        values[str(model_id)] = fingerprint
     return values
 
 
@@ -130,18 +145,14 @@ def _model_package_fingerprint(
 ) -> dict[str, Any]:
     models = config["models"]
     manifest_path = Path(str(models["manifest_path"]))
-    expected_sha256 = str(models["manifest_sha256"])
-    actual_sha256 = sha256_file(manifest_path)
-    if actual_sha256 != expected_sha256:
-        raise RuntimeError(
-            f"Model package manifest SHA256 mismatch for {manifest_path}: "
-            f"{actual_sha256} != {expected_sha256}"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Model package manifest does not exist: {manifest_path}"
         )
     return {
         "name": str(models["name"]),
         "manifest": {
             "file": manifest_path.name,
-            "sha256": actual_sha256,
             "bytes": manifest_path.stat().st_size,
         },
     }
@@ -155,25 +166,237 @@ def _result_path(workdir: Path | None, result_path: str | Path | None) -> Path:
     return (workdir / RESULT_FILENAME).resolve()
 
 
+def _development_report_path(result_path: Path) -> Path:
+    """Return the developer-report path paired with a user result document."""
+
+    return result_path.with_name(f"{result_path.stem}.dev.json")
+
+
+def _owned_development_report_exists(path: Path, result_path: Path) -> bool:
+    """Validate a colliding report and return whether this pipeline owns it."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError) as error:
+        raise FileExistsError(
+            f"refusing to replace unrecognized development report: {path}"
+        ) from error
+    if (
+        not isinstance(value, dict)
+        or value.get("format") != "privateframe-development-report"
+        or value.get("result_file") != result_path.name
+    ):
+        raise FileExistsError(
+            f"refusing to replace unrecognized development report: {path}"
+        )
+    return True
+
+
+def _remove_owned_development_report(path: Path, result_path: Path) -> None:
+    """Remove only a report previously generated for this exact result name."""
+
+    if not _owned_development_report_exists(path, result_path):
+        return
+    path.unlink()
+
+
+def _public_observation_source(item: Mapping[str, Any]) -> str:
+    """Collapse internal geometry mechanisms into stable user-facing terms."""
+
+    raw_source = str(item.get("source", ""))
+    if raw_source == "detector":
+        return "detector"
+    if item.get("endpoint_repair") is not None or item.get(
+        "endpoint_repair_reason"
+    ) is not None:
+        return "repaired"
+    if (
+        item.get("geometry_source") == "detector_anchor_interpolation"
+        or item.get("local_review_reason") == "detector_anchor_interpolation"
+    ):
+        return "interpolated"
+    return "tracked"
+
+
 def _export_observations(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Export only the stable geometry and privacy semantics used by renderers."""
+
     output: list[dict[str, Any]] = []
     for item in values:
-        exported = dict(item)
-        if "box" in exported and "source_aabb" not in exported:
-            exported["source_aabb"] = exported["box"]
+        exported = {
+            "frame_idx": int(item["frame_idx"]),
+            "track_id": str(item["track_id"]),
+            "box": list(item["box"]),
+            "source": _public_observation_source(item),
+        }
+        if bool(item.get("reduced_assurance", False)):
+            exported["reduced_assurance"] = True
+        if bool(item.get("force_blur", False)) or (
+            item.get("endpoint_repair_reason")
+            == "interpolate_unanchored_endpoint"
+        ):
+            # The public renderer needs the privacy decision, not the internal
+            # endpoint-repair mechanism that led to it.
+            exported["force_blur"] = True
         output.append(exported)
     return output
 
 
+def _export_recognition(value: Any) -> dict[str, Any]:
+    """Keep only identity fields that can affect a later render."""
+
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return {"enabled": False}
+    raw_people = value.get("gallery_persons", [])
+    gallery_people = (
+        [str(person) for person in raw_people]
+        if isinstance(raw_people, list)
+        else []
+    )
+    raw_tracks = value.get("tracks", {})
+    tracks: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_tracks, dict):
+        for track_id, record in raw_tracks.items():
+            if not isinstance(record, dict):
+                continue
+            tracks[str(track_id)] = {
+                "status": str(record.get("status", "UNKNOWN")),
+                "person_id": (
+                    str(record["person_id"])
+                    if record.get("person_id") is not None
+                    else None
+                ),
+            }
+    return {
+        "enabled": True,
+        "gallery_persons": gallery_people,
+        "tracks": tracks,
+    }
+
+
+def validate_result_document(value: Any) -> dict[str, Any]:
+    """Validate the stable structure required to render a result document."""
+
+    if not isinstance(value, dict):
+        raise TypeError("PrivateFrame result root must be an object")
+    if value.get("format") != "privateframe-result":
+        raise ValueError("PrivateFrame result format must be privateframe-result")
+    schema_version = value.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise TypeError("PrivateFrame result schema_version must be an integer")
+    if schema_version != 1:
+        raise ValueError("PrivateFrame result schema_version must be 1")
+
+    source_video = value.get("source_video")
+    if not isinstance(source_video, dict):
+        raise TypeError("PrivateFrame result source_video must be an object")
+    file_name = source_video.get("file_name")
+    if file_name is not None and (
+        not isinstance(file_name, str) or not file_name.strip()
+    ):
+        raise TypeError("PrivateFrame result source_video.file_name must be a string")
+    for field, expected in (
+        ("coordinate_system", "pixel_xyxy"),
+        ("timing_contract", "cfr_frame_index"),
+        ("frame_index_origin", 0),
+    ):
+        if field in source_video and source_video[field] != expected:
+            raise ValueError(
+                f"PrivateFrame result source_video.{field} must be {expected!r}"
+            )
+    metadata = source_video.get("metadata")
+    if not isinstance(metadata, dict):
+        raise TypeError("PrivateFrame result source_video.metadata must be an object")
+    for field in ("width", "height", "frame_count"):
+        item = metadata.get(field)
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise TypeError(
+                f"PrivateFrame result source_video.metadata.{field} "
+                "must be a positive integer"
+            )
+        if item <= 0:
+            raise ValueError(
+                f"PrivateFrame result source_video.metadata.{field} must be positive"
+            )
+    fps = metadata.get("fps")
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not math.isfinite(float(fps))
+    ):
+        raise TypeError(
+            "PrivateFrame result source_video.metadata.fps must be a finite number"
+        )
+    if float(fps) <= 0.0:
+        raise ValueError(
+            "PrivateFrame result source_video.metadata.fps must be positive"
+        )
+    duration = metadata.get("duration")
+    if duration is not None and (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(float(duration))
+        or float(duration) <= 0.0
+    ):
+        raise ValueError(
+            "PrivateFrame result source_video.metadata.duration must be "
+            "positive and finite"
+        )
+
+    if not isinstance(value.get("render_defaults"), dict):
+        raise TypeError("PrivateFrame result render_defaults must be an object")
+    if not isinstance(value.get("recognition"), dict):
+        raise TypeError("PrivateFrame result recognition must be an object")
+    recognition_enabled = value["recognition"].get("enabled")
+    if not isinstance(recognition_enabled, bool):
+        raise TypeError("PrivateFrame result recognition.enabled must be boolean")
+
+    observations = value.get("observations")
+    if not isinstance(observations, list):
+        raise TypeError("PrivateFrame result observations must be an array")
+    for index, observation in enumerate(observations):
+        prefix = f"PrivateFrame result observations[{index}]"
+        if not isinstance(observation, dict):
+            raise TypeError(f"{prefix} must be an object")
+        frame_idx = observation.get("frame_idx")
+        if (
+            isinstance(frame_idx, bool)
+            or not isinstance(frame_idx, int)
+            or frame_idx < 0
+        ):
+            raise ValueError(f"{prefix}.frame_idx must be a non-negative integer")
+        if frame_idx >= int(metadata["frame_count"]):
+            raise ValueError(f"{prefix}.frame_idx exceeds the source frame count")
+        track_id = observation.get("track_id")
+        if not isinstance(track_id, str) or not track_id:
+            raise TypeError(f"{prefix}.track_id must be a non-empty string")
+        source = observation.get("source")
+        if not isinstance(source, str) or not source:
+            raise TypeError(f"{prefix}.source must be a non-empty string")
+        for flag in ("reduced_assurance", "force_blur"):
+            if flag in observation and not isinstance(observation[flag], bool):
+                raise TypeError(f"{prefix}.{flag} must be boolean")
+        box = observation.get("box")
+        if not isinstance(box, list) or len(box) != 4:
+            raise TypeError(f"{prefix}.box must be an array of four finite numbers")
+        if any(
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, (int, float))
+            or (isinstance(coordinate, float) and not math.isfinite(coordinate))
+            for coordinate in box
+        ):
+            raise ValueError(f"{prefix}.box must contain four finite numbers")
+        x1, y1, x2, y2 = box
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError(f"{prefix}.box must satisfy x2 > x1 and y2 > y1")
+    return value
+
+
 def _load_result(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("format") != "privateframe-result":
-        raise ValueError(f"unsupported PrivateFrame result format: {path}")
-    if int(value.get("schema_version", 0)) != 1:
-        raise ValueError(f"unsupported PrivateFrame result schema: {path}")
-    if not isinstance(value.get("observations"), list):
-        raise TypeError("PrivateFrame result observations must be an array")
-    return value
+    return validate_result_document(value)
 
 
 def _render_settings(
@@ -189,7 +412,9 @@ def _render_settings(
             raise TypeError("render config must be a mapping")
         if "render" in override:
             if set(override) != {"render"} or not isinstance(override["render"], dict):
-                raise ValueError("a nested render config must contain only the render mapping")
+                raise ValueError(
+                    "a nested render config must contain only the render mapping"
+                )
             override = override["render"]
         unknown = set(override) - set(settings)
         if unknown:
@@ -210,14 +435,11 @@ def _render_settings(
         if any(not isinstance(path, str) for path in config_overrides):
             raise TypeError("configuration override paths must be strings")
         invalid = sorted(
-            path
-            for path in config_overrides
-            if not path.startswith("render.")
+            path for path in config_overrides if not path.startswith("render.")
         )
         if invalid:
             raise ValueError(
-                "render only accepts render.* configuration overrides: "
-                + invalid[0]
+                "render only accepts render.* configuration overrides: " + invalid[0]
             )
         # Command-line/Python dotted overrides are the final configuration
         # layer, above both the analyzed defaults and --render-config YAML.
@@ -239,25 +461,37 @@ def _render_settings(
     return settings, sha256_json(settings)
 
 
-def _validate_recognition_render_policy(settings: dict[str, Any], recognition: Any) -> None:
+def _validate_recognition_render_policy(
+    settings: dict[str, Any], recognition: Any
+) -> None:
     policy = settings.get("recognition_policy")
     if not isinstance(policy, dict):
-        raise TypeError("render.recognition_policy must be a mapping in the analysis result")
+        raise TypeError(
+            "render.recognition_policy must be a mapping in the analysis result"
+        )
     unknown = set(policy) - {"mode", "target_persons"}
     if unknown:
-        raise ValueError("unknown render recognition policy settings: " + ", ".join(sorted(unknown)))
+        raise ValueError(
+            "unknown render recognition policy settings: " + ", ".join(sorted(unknown))
+        )
     mode = str(policy.get("mode", "all"))
     if mode not in {"all", "blur_only", "exempt"}:
-        raise ValueError("render.recognition_policy.mode must be all, blur_only, or exempt")
+        raise ValueError(
+            "render.recognition_policy.mode must be all, blur_only, or exempt"
+        )
     policy["mode"] = mode
     if mode == "all":
         policy["target_persons"] = []
         return
     if not isinstance(recognition, dict) or recognition.get("enabled") is not True:
-        raise ValueError("selective rendering requires a result produced with recognition enabled")
+        raise ValueError(
+            "selective rendering requires a result produced with recognition enabled"
+        )
     raw_targets = policy.get("target_persons")
     if not isinstance(raw_targets, list) or not raw_targets:
-        raise ValueError("render.recognition_policy.target_persons must be a non-empty list")
+        raise ValueError(
+            "render.recognition_policy.target_persons must be a non-empty list"
+        )
     targets: list[str] = []
     for value in raw_targets:
         if not isinstance(value, str) or not value.strip():
@@ -274,7 +508,8 @@ def _validate_recognition_render_policy(settings: dict[str, Any], recognition: A
     missing = sorted(set(targets) - known)
     if missing:
         raise ValueError(
-            "render recognition targets are absent from the analyzed gallery: " + ", ".join(missing)
+            "render recognition targets are absent from the analyzed gallery: "
+            + ", ".join(missing)
         )
     policy["target_persons"] = targets
 
@@ -331,10 +566,14 @@ def _analyze_streaming_pipeline_impl(
     artifacts_level = str(config.get("output", {}).get("artifacts_level", "final"))
     if artifacts_level not in ARTIFACT_LEVELS:
         raise ValueError("artifacts_level must be final, audit, or debug")
-    # Capture the exact files immediately before Session construction. The
-    # package manifest and result artifact both pin the bytes about to load.
-    model_fingerprints = _model_fingerprints(config)
-    model_package = _model_package_fingerprint(config)
+    development_destination = _development_report_path(destination)
+    development_enabled = artifacts_level in {"audit", "debug"}
+    # Fingerprints and repository state are diagnostic data. Avoid their I/O
+    # and serialization entirely for the ordinary user-facing result.
+    model_fingerprints = _model_fingerprints(config) if development_enabled else None
+    model_package = (
+        _model_package_fingerprint(config) if development_enabled else None
+    )
     _raise_if_cancelled(is_cancelled)
     result = run_stream(
         source,
@@ -349,38 +588,54 @@ def _analyze_streaming_pipeline_impl(
     # selective setup cannot be mislabeled as artifact-writing time.
     analysis_seconds = time.perf_counter() - started
     artifact_started = time.perf_counter()
-    timestamps = {int(item["frame_idx"]): float(item["time_seconds"]) for item in result["scan"]["frames"]}
-    for values in (
-        result["scan"]["detections"],
-        result["tracking"]["observations"],
-        result["review"]["evidence"],
-        result["review"]["observations"],
-    ):
-        for item in values:
-            item.setdefault("time_seconds", timestamps[int(item["frame_idx"])])
+    if development_enabled:
+        timestamps = {
+            int(item["frame_idx"]): float(item["time_seconds"])
+            for item in result["scan"]["frames"]
+        }
+        for values in (
+            result["scan"]["detections"],
+            result["tracking"]["observations"],
+            result["review"]["evidence"],
+            result["review"]["observations"],
+        ):
+            for item in values:
+                item.setdefault("time_seconds", timestamps[int(item["frame_idx"])])
     observations = _export_observations(result["review"]["observations"])
     scene_cut_candidates = sum(
-        bool(item.get("scene_cut_candidate", False)) for item in result["scan"]["frames"]
+        bool(item.get("scene_cut_candidate", False))
+        for item in result["scan"]["frames"]
     )
     scene_cut_flow_confirmed = sum(
-        bool(item.get("scene_cut_flow_confirmed", False)) for item in result["scan"]["frames"]
+        bool(item.get("scene_cut_flow_confirmed", False))
+        for item in result["scan"]["frames"]
     )
     scene_cut_appearance_confirmed = sum(
-        bool(item.get("scene_cut_appearance_confirmed", False)) for item in result["scan"]["frames"]
+        bool(item.get("scene_cut_appearance_confirmed", False))
+        for item in result["scan"]["frames"]
     )
     scene_cut_confirmed = sum(
-        bool(item.get("scene_cut_confirmed", False)) for item in result["scan"]["frames"]
+        bool(item.get("scene_cut_confirmed", False))
+        for item in result["scan"]["frames"]
     )
     scene_cut_flash_suppressed = sum(
-        bool(item.get("scene_cut_flash_suppressed", False)) for item in result["scan"]["frames"]
+        bool(item.get("scene_cut_flash_suppressed", False))
+        for item in result["scan"]["frames"]
     )
-    scene_cuts = sum(bool(item.get("scene_cut_from_previous", False)) for item in result["scan"]["frames"])
-    repository = Path(__file__).resolve().parents[2]
+    scene_cuts = sum(
+        bool(item.get("scene_cut_from_previous", False))
+        for item in result["scan"]["frames"]
+    )
+    raw_metadata = result["scan"]["metadata"]
     source_document = {
-        "path": str(source),
-        "sha256": sha256_file(source),
-        "bytes": source.stat().st_size,
-        "metadata": result["scan"]["metadata"],
+        "file_name": source.name,
+        "metadata": {
+            "width": int(raw_metadata["width"]),
+            "height": int(raw_metadata["height"]),
+            "fps": float(raw_metadata["fps"]),
+            "frame_count": int(raw_metadata["frame_count"]),
+            "duration": float(raw_metadata["duration"]),
+        },
         "timing_contract": "cfr_frame_index",
         "coordinate_system": "pixel_xyxy",
         "frame_index_origin": 0,
@@ -394,18 +649,29 @@ def _analyze_streaming_pipeline_impl(
         "reverse_jobs": int(result["reverse_jobs"]),
         "reverse_frames": int(result["reverse_frames"]),
         "long_gap_reanchors": int(result["long_gap_reanchors"]),
-        "discarded_unanchored_tail_frames": int(result["discarded_unanchored_tail_frames"]),
+        "discarded_unanchored_tail_frames": int(
+            result["discarded_unanchored_tail_frames"]
+        ),
         "endpoint_affine_jobs": int(result["endpoint_affine_jobs"]),
         "endpoint_affine_frames": int(result["endpoint_affine_frames"]),
-        "endpoint_affine_published_frames": int(result["endpoint_affine_published_frames"]),
+        "endpoint_affine_published_frames": int(
+            result["endpoint_affine_published_frames"]
+        ),
+        "endpoint_verifier_checkpoints": int(
+            result.get("endpoint_verifier_checkpoints", 0)
+        ),
+        "endpoint_verifier_refinement_frames": int(
+            result.get("endpoint_verifier_refinement_frames", 0)
+        ),
+        "endpoint_local_review_frames": int(
+            result.get("endpoint_local_review_frames", 0)
+        ),
         "interpolate_endpoint_jobs": int(result["interpolate_endpoint_jobs"]),
         "interpolate_endpoint_frames": int(result["interpolate_endpoint_frames"]),
         "interpolate_endpoint_published_frames": int(
             result["interpolate_endpoint_published_frames"]
         ),
-        "interpolate_endpoint_seconds": float(
-            result["interpolate_endpoint_seconds"]
-        ),
+        "interpolate_endpoint_seconds": float(result["interpolate_endpoint_seconds"]),
         "interpolate_endpoint_reason_counts": dict(
             result["interpolate_endpoint_reason_counts"]
         ),
@@ -417,7 +683,15 @@ def _analyze_streaming_pipeline_impl(
         "scene_cut_flash_suppressed": scene_cut_flash_suppressed,
         "scene_cuts": scene_cuts,
         "detector_analyzed_frames": int(result["detector_sampling"]["analyzed_frames"]),
-        "detector_skipped_scan_frames": int(result["detector_sampling"]["skipped_scan_frames"]),
+        "detector_regular_scan_frames": int(
+            result["detector_sampling"]["regular_scan_frames"]
+        ),
+        "detector_forced_scan_frames": int(
+            result["detector_sampling"]["forced_scan_frames"]
+        ),
+        "detector_skipped_scan_frames": int(
+            result["detector_sampling"]["skipped_scan_frames"]
+        ),
         "local_review_attempts": int(result["local_review_sampling"]["attempts"]),
         "local_review_sampled_out": int(result["local_review_sampling"]["sampled_out"]),
         "local_review_forced_attempts": int(
@@ -432,45 +706,55 @@ def _analyze_streaming_pipeline_impl(
         {
             "bidirectional_gap_jobs": int(result["bidirectional_gap_jobs"]),
             "bidirectional_gap_frames": int(result["bidirectional_gap_frames"]),
-            "bidirectional_accepted_frames": int(result["bidirectional_accepted_frames"]),
-            "bidirectional_rejected_frames": int(result["bidirectional_rejected_frames"]),
-            "bidirectional_review_resolutions": int(result["bidirectional_review_resolutions"]),
+            "bidirectional_accepted_frames": int(
+                result["bidirectional_accepted_frames"]
+            ),
+            "bidirectional_rejected_frames": int(
+                result["bidirectional_rejected_frames"]
+            ),
+            "bidirectional_review_resolutions": int(
+                result["bidirectional_review_resolutions"]
+            ),
             "bidirectional_skipped_jobs": int(result["bidirectional_skipped_jobs"]),
-            "bidirectional_association_attempts": int(result["bidirectional_association_attempts"]),
-            "bidirectional_association_rescues": int(result["bidirectional_association_rescues"]),
+            "bidirectional_association_attempts": int(
+                result["bidirectional_association_attempts"]
+            ),
+            "bidirectional_association_rescues": int(
+                result["bidirectional_association_rescues"]
+            ),
         }
     )
-    detector_id, _detector = active_face_detector(config)
-    analysis_document = {
-        "backend": "onnxruntime-streaming-gop-roi",
-        "provider": config["runtime"]["resolved_provider"],
-        "active_face_detector": detector_id,
-        "effective_config_sha256": sha256_json(config),
-        "models": model_fingerprints,
-        "git": git_version(repository),
-        "artifacts_level": artifacts_level,
-        "statistics": analysis_statistics,
-        "analysis_seconds": analysis_seconds,
-        "detector_sampling": result["detector_sampling"],
-        "local_review_sampling": result["local_review_sampling"],
-    }
-    analysis_document["model_package"] = model_package
-    recognition = result.get("recognition", {"enabled": False, "reason": "policy_all"})
+    recognition_diagnostics = result.get(
+        "recognition", {"enabled": False, "reason": "policy_all"}
+    )
+    recognition = _export_recognition(recognition_diagnostics)
     render_defaults = deepcopy(config["render"])
-    recognition_settings = config.get("recognition", {"mode": "all", "target_persons": []})
+    render_defaults.pop("box_stabilization", None)
+    render_defaults.pop("debug_line_thickness", None)
+    video_output_defaults = render_defaults.get("video_output")
+    if isinstance(video_output_defaults, dict):
+        audio_defaults = video_output_defaults.get("audio")
+        if isinstance(audio_defaults, dict):
+            audio_defaults.pop("debug", None)
+    recognition_settings = config.get(
+        "recognition", {"mode": "all", "target_persons": []}
+    )
     recognition_mode = str(recognition_settings.get("mode", "all"))
     render_defaults["recognition_policy"] = {
         "mode": recognition_mode,
         # Selective-only settings are deliberately not inspected in all mode.
         # This preserves the zero-recognition contract even for stale/null
         # values left in a user override.
-        "target_persons": ([] if recognition_mode == "all" else list(recognition_settings["target_persons"])),
+        "target_persons": (
+            []
+            if recognition_mode == "all"
+            else list(recognition_settings["target_persons"])
+        ),
     }
     final_result = {
         "format": "privateframe-result",
         "schema_version": 1,
         "source_video": source_document,
-        "analysis": analysis_document,
         "render_defaults": render_defaults,
         "recognition": recognition,
         "observations": observations,
@@ -488,22 +772,33 @@ def _analyze_streaming_pipeline_impl(
         "tracks": len(result["tracks"]),
         "accepted_tracks": int(result["review"]["accepted_tracks"]),
         "observations": len(result["review"]["observations"]),
-        "recognition": recognition,
+        "recognition": recognition_diagnostics,
         "reverse_jobs": int(result["reverse_jobs"]),
         "reverse_frames": int(result["reverse_frames"]),
         "long_gap_reanchors": int(result["long_gap_reanchors"]),
-        "discarded_unanchored_tail_frames": int(result["discarded_unanchored_tail_frames"]),
+        "discarded_unanchored_tail_frames": int(
+            result["discarded_unanchored_tail_frames"]
+        ),
         "endpoint_affine_jobs": int(result["endpoint_affine_jobs"]),
         "endpoint_affine_frames": int(result["endpoint_affine_frames"]),
-        "endpoint_affine_published_frames": int(result["endpoint_affine_published_frames"]),
+        "endpoint_affine_published_frames": int(
+            result["endpoint_affine_published_frames"]
+        ),
+        "endpoint_verifier_checkpoints": int(
+            result.get("endpoint_verifier_checkpoints", 0)
+        ),
+        "endpoint_verifier_refinement_frames": int(
+            result.get("endpoint_verifier_refinement_frames", 0)
+        ),
+        "endpoint_local_review_frames": int(
+            result.get("endpoint_local_review_frames", 0)
+        ),
         "interpolate_endpoint_jobs": int(result["interpolate_endpoint_jobs"]),
         "interpolate_endpoint_frames": int(result["interpolate_endpoint_frames"]),
         "interpolate_endpoint_published_frames": int(
             result["interpolate_endpoint_published_frames"]
         ),
-        "interpolate_endpoint_seconds": float(
-            result["interpolate_endpoint_seconds"]
-        ),
+        "interpolate_endpoint_seconds": float(result["interpolate_endpoint_seconds"]),
         "interpolate_endpoint_reason_counts": dict(
             result["interpolate_endpoint_reason_counts"]
         ),
@@ -524,16 +819,29 @@ def _analyze_streaming_pipeline_impl(
         },
         "profile": {
             "scene_cut_detector": "adaptive",
-            "detector_frame_stride": int(config["scan"].get("frame_stride", 1)),
+            "max_analysis_fps": float(result["detector_sampling"]["max_analysis_fps"]),
+            "detector_frame_stride": int(
+                result["detector_sampling"]["effective_frame_stride"]
+            ),
             "max_missed_seconds": float(config["streaming"]["max_missed_seconds"]),
-            "max_retroactive_seconds": float(config["streaming"]["max_retroactive_seconds"]),
-            "pre_roll_decode_chunk_frames": int(config["streaming"]["pre_roll_decode_chunk_frames"]),
-            "recent_frame_cache_frames": int(config["streaming"]["recent_frame_cache_frames"]),
+            "max_retroactive_seconds": float(
+                config["streaming"]["max_retroactive_seconds"]
+            ),
+            "pre_roll_decode_chunk_frames": int(
+                config["streaming"]["pre_roll_decode_chunk_frames"]
+            ),
+            "recent_frame_cache_frames": int(
+                result["cache"]["recent_frame_target_frames"]
+            ),
             "roi_size": int(config["tracking"]["kalman_optical_flow"]["roi_size"]),
-            "roi_expansion": float(config["tracking"]["kalman_optical_flow"]["roi_expansion"]),
+            "roi_expansion": float(
+                config["tracking"]["kalman_optical_flow"]["roi_expansion"]
+            ),
             "bidirectional_fusion_mode": "symmetric_local_soft",
             "measurement_filter": bool(
-                config["revalidation"]["geometry_refinement"]["measurement_filter"]["enabled"]
+                config["revalidation"]["geometry_refinement"]["measurement_filter"][
+                    "enabled"
+                ]
             ),
             "box_stabilization": bool(config["render"]["box_stabilization"]["enabled"]),
         },
@@ -542,16 +850,28 @@ def _analyze_streaming_pipeline_impl(
         {
             "bidirectional_gap_jobs": int(result["bidirectional_gap_jobs"]),
             "bidirectional_gap_frames": int(result["bidirectional_gap_frames"]),
-            "bidirectional_accepted_frames": int(result["bidirectional_accepted_frames"]),
-            "bidirectional_rejected_frames": int(result["bidirectional_rejected_frames"]),
-            "bidirectional_review_resolutions": int(result["bidirectional_review_resolutions"]),
+            "bidirectional_accepted_frames": int(
+                result["bidirectional_accepted_frames"]
+            ),
+            "bidirectional_rejected_frames": int(
+                result["bidirectional_rejected_frames"]
+            ),
+            "bidirectional_review_resolutions": int(
+                result["bidirectional_review_resolutions"]
+            ),
             "bidirectional_skipped_jobs": int(result["bidirectional_skipped_jobs"]),
-            "bidirectional_association_attempts": int(result["bidirectional_association_attempts"]),
-            "bidirectional_association_rescues": int(result["bidirectional_association_rescues"]),
+            "bidirectional_association_attempts": int(
+                result["bidirectional_association_attempts"]
+            ),
+            "bidirectional_association_rescues": int(
+                result["bidirectional_association_rescues"]
+            ),
         }
     )
     retained = {destination.name} if destination.parent == work else set()
-    if artifacts_level in {"audit", "debug"}:
+    if development_enabled:
+        if development_destination.parent == work:
+            retained.add(development_destination.name)
         write_json(work / "tracks.streaming-onnx.json", result["tracks"])
         write_json(work / "effective-config.streaming-onnx.json", config)
         retained.update(
@@ -580,7 +900,10 @@ def _analyze_streaming_pipeline_impl(
             work / "revalidation.streaming-onnx.jsonl",
             result["review"]["evidence"],
         )
-        write_jsonl(work / "observations.streaming-onnx.jsonl", observations)
+        write_jsonl(
+            work / "observations.streaming-onnx.jsonl",
+            result["review"]["observations"],
+        )
         retained.update(
             {
                 "detections.streaming-onnx.jsonl",
@@ -590,24 +913,74 @@ def _analyze_streaming_pipeline_impl(
             }
         )
 
-    # This is the only durable production artifact. It contains everything
-    # needed to render debug or privacy output again without rerunning models.
-    write_json(destination, final_result)
+    # Validate a colliding developer filename before committing a new result,
+    # but keep the old pair intact if the atomic result write itself fails.
+    had_development_report = _owned_development_report_exists(
+        development_destination,
+        destination,
+    )
+
+    # The production document is intentionally compact and contains only what
+    # a user, editor, or renderer needs. Diagnostic evidence is written to the
+    # paired developer report below only when explicitly requested.
+    write_json(destination, final_result, indent=None)
+    # The new result is durable. Remove only its deterministic paired filename
+    # before optionally replacing it, so write failures do not destroy the
+    # prior result/report pair and final runs cannot retain a stale report.
+    if had_development_report:
+        development_destination.unlink()
     summary["timings"]["artifact_seconds"] = time.perf_counter() - artifact_started
     summary["timings"]["total_seconds"] = time.perf_counter() - started
-    if artifacts_level in {"audit", "debug"}:
+    if development_enabled:
+        summary["development_report"] = str(development_destination)
+        detector_id, _detector = active_face_detector(config)
+        repository = Path(__file__).resolve().parents[2]
+        development_source_document = {
+            "path": str(source),
+            "sha256": sha256_file(source),
+            "bytes": source.stat().st_size,
+            "metadata": raw_metadata,
+        }
+        development_report = {
+            "format": "privateframe-development-report",
+            "schema_version": 1,
+            "artifacts_level": artifacts_level,
+            "result_file": destination.name,
+            "source_video": development_source_document,
+            "analysis": {
+                "backend": "onnxruntime-streaming-gop-roi",
+                "provider": config["runtime"]["resolved_provider"],
+                "active_face_detector": detector_id,
+                "effective_config_sha256": sha256_json(config),
+                "model_package": model_package,
+                "models": model_fingerprints,
+                "git": git_version(repository),
+                "statistics": analysis_statistics,
+                "timings": deepcopy(summary["timings"]),
+                "detector_sampling": result["detector_sampling"],
+                "local_review_sampling": result["local_review_sampling"],
+                "cache": result["cache"],
+            },
+            "effective_config": config,
+            "recognition_diagnostics": recognition_diagnostics,
+            "observation_diagnostics": result["review"]["observations"],
+        }
+        write_json(development_destination, development_report)
         write_json(work / "summary.streaming-onnx.json", summary)
         named_artifacts = {
             filename: work / filename
             for filename in retained
-            if filename != "manifest.streaming-onnx.json" and (work / filename).exists()
+            if filename != "manifest.streaming-onnx.json"
+            and (work / filename).exists()
         }
         if destination.parent != work:
             named_artifacts[destination.name] = destination
+        if development_destination.parent != work:
+            named_artifacts[development_destination.name] = development_destination
         manifest = {
             "schema_version": 1,
             "artifacts_level": artifacts_level,
-            "source_video_sha256": source_document["sha256"],
+            "source_video_sha256": development_source_document["sha256"],
             "artifacts": {
                 name: {
                     "path": str(path),
@@ -666,7 +1039,6 @@ def render_streaming_artifacts(
     redacted_path: str | Path | None = None,
     render_config: str | Path | None = None,
     config_overrides: Mapping[str, Any] | None = None,
-    verify_source: bool = True,
     progress: Callable[[int, int, str], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -683,8 +1055,14 @@ def render_streaming_artifacts(
     if debug_path is not None:
         targets.append(RenderTarget("debug", Path(debug_path).expanduser().resolve()))
     if redacted_path is not None:
-        targets.append(RenderTarget("redacted", Path(redacted_path).expanduser().resolve()))
-    render_paths = [Path(input_path).expanduser().resolve(), destination, *(target.path for target in targets)]
+        targets.append(
+            RenderTarget("redacted", Path(redacted_path).expanduser().resolve())
+        )
+    render_paths = [
+        Path(input_path).expanduser().resolve(),
+        destination,
+        *(target.path for target in targets),
+    ]
     if not paths_are_distinct(render_paths):
         raise ValueError("input, result JSON, and render output paths must be distinct")
     if work is not None:
@@ -700,7 +1078,6 @@ def render_streaming_artifacts(
         targets=targets,
         settings=effective_render_settings,
         analysis_result=analysis_result,
-        verify_source=verify_source,
         progress=progress,
         is_cancelled=is_cancelled,
     )
@@ -717,9 +1094,6 @@ def render_streaming_artifacts(
             "recognition_policy": deepcopy(render_settings["recognition_policy"]),
         }
     )
-    artifacts_level = str(analysis_result["analysis"]["artifacts_level"])
-    if artifacts_level in {"audit", "debug"} and work is not None:
-        write_json(work / "render-summary.streaming-onnx.json", result)
     return result
 
 
@@ -809,4 +1183,5 @@ __all__ = [
     "analyze_streaming_pipeline",
     "render_streaming_artifacts",
     "run_streaming_pipeline",
+    "validate_result_document",
 ]

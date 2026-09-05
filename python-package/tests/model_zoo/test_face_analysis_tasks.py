@@ -63,10 +63,7 @@ def test_manifest_coreml_enables_managed_cache_without_public_api_change(
     ]
     assert all("_coreml_managed_cache" not in call for call in calls)
     assert all(call["_coreml_cache_root"] == tmp_path for call in calls)
-    assert all(
-        call["_coreml_detector_input_size"] == (640, 640)
-        for call in calls
-    )
+    assert all(call["_coreml_detector_input_size"] == (640, 640) for call in calls)
     assert list(inspect.signature(FaceAnalysis).parameters) == [
         "name",
         "root",
@@ -284,7 +281,7 @@ def test_invalid_manifest_fails_before_any_model_is_built(
     monkeypatch,
 ):
     package, manifest = manifest_package_factory()
-    manifest["unknown"] = {}
+    manifest["tasks"]["detection"].pop("file")
     (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     calls = []
     monkeypatch.setattr(
@@ -293,7 +290,7 @@ def test_invalid_manifest_fails_before_any_model_is_built(
         lambda *_args, **_kwargs: calls.append(True),
     )
 
-    with pytest.raises(ValueError, match="keys must be exactly"):
+    with pytest.raises(ValueError, match=r"tasks\.detection\.file is required"):
         FaceAnalysis(package)
     assert calls == []
 

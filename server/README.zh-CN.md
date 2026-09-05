@@ -114,7 +114,8 @@ docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license
 ```
 
-模型工具还支持 `buffalo_m`、`buffalo_sc` 和 `antelopev2`。安装会生成
+模型工具支持全部七个模型包：`buffalo_l`、`buffalo_m`、`buffalo_s`、
+`buffalo_sc`、`antelopev2`、`raccoon_s` 和 `raccoon_l`。安装会生成
 `manifest.json` 和签名的 `MODEL.LICENSE`，可以使用 `models verify` 核验。
 模型许可独立于 Server 源码许可。
 

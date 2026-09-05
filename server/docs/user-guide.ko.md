@@ -78,7 +78,8 @@ docker compose -f server/deploy/compose.cpu.yml \
 ```
 
 지원 패키지는 `buffalo_l`(`det_10g.onnx` + `w600k_r50.onnx`),
-`buffalo_m`, `buffalo_sc`, `antelopev2`입니다. 설치하면 `manifest.json`과
+`buffalo_m`, `buffalo_s`, `buffalo_sc`, `antelopev2`, `raccoon_s`,
+`raccoon_l`입니다. 설치하면 `manifest.json`과
 서명된 `MODEL.LICENSE`가 생성됩니다. `--accept-license`가 없으면 조건만
 표시하고 다운로드하지 않습니다. 공개 InsightFace 사전 학습 모델은 별도 상업용
 라이선스가 없는 경우 비상업 연구용입니다.

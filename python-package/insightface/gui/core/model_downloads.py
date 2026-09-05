@@ -9,26 +9,53 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import zipfile
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
 
+from ...utils.storage import (
+    MODEL_ZOO_RELEASE_DOWNLOAD_URL,
+    MODEL_ZOO_RELEASE_TAG,
+    model_zoo_download_url,
+)
 from .. import __version__
+from .utils import utc_now_iso
 
-from .utils import safe_json_dumps, utc_now_iso
-
-GITHUB_RELEASES_URL = "https://github.com/deepinsight/insightface/releases"
-GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/deepinsight/insightface/releases/latest"
-FALLBACK_RELEASE_TAG = "v0.7"
-FALLBACK_RELEASE_NAME = "insightface v0.7 model packages"
+GITHUB_MODEL_ZOO_DOWNLOAD_URL = MODEL_ZOO_RELEASE_DOWNLOAD_URL
+GITHUB_RELEASES_URL = (
+    "https://github.com/deepinsight/insightface/releases/tag/model-zoo"
+)
+GITHUB_MODEL_ZOO_RELEASE_API = (
+    "https://api.github.com/repos/deepinsight/insightface/releases/tags/model-zoo"
+)
+# Compatibility alias for integrations that imported the previous constant.
+GITHUB_LATEST_RELEASE_API = GITHUB_MODEL_ZOO_RELEASE_API
+FALLBACK_RELEASE_TAG = MODEL_ZOO_RELEASE_TAG
+FALLBACK_RELEASE_NAME = "InsightFace Model Zoo"
 GFPGAN_MODEL_NAME = "GFPGANv1.4.onnx"
 GFPGAN_DOWNLOAD_URL = (
     "https://github.com/harisreedhar/Face-Upscalers-ONNX/releases/download/"
     "Models/GFPGANv1.4.onnx"
+)
+
+INSIGHTFACE_MODEL_ASSET_NAMES = (
+    "antelopev2.zip",
+    "buffalo_l.zip",
+    "buffalo_m.zip",
+    "buffalo_s.zip",
+    "buffalo_sc.zip",
+    "inswapper_128.onnx",
+    "raccoon_l.zip",
+    "raccoon_s.zip",
+    "scrfd_person_2.5g.onnx",
+)
+_INSIGHTFACE_RELEASE_DOWNLOAD_ROOT = (
+    "https://github.com/deepinsight/insightface/releases/download/"
 )
 
 
@@ -62,32 +89,22 @@ class ModelAsset:
         return "asset"
 
 
-def fallback_model_assets() -> List[ModelAsset]:
-    # Latest GitHub release is v0.7. GitHub's HTML page reports nine assets,
-    # and the SourceForge mirror lists the uploaded model files. The GitHub
-    # download URLs follow the release asset URL pattern.
-    names = [
-        "antelopev2.zip",
-        "buffalo_l.zip",
-        "buffalo_m.zip",
-        "buffalo_s.zip",
-        "buffalo_sc.zip",
-        "inswapper_128.onnx",
-        "scrfd_person_2.5g.onnx",
-    ]
+def fallback_model_assets() -> list[ModelAsset]:
+    """Return the bundled catalog for the dedicated model-zoo release."""
+
     assets = [
         ModelAsset(
             name=name,
-            browser_download_url=f"https://github.com/deepinsight/insightface/releases/download/{FALLBACK_RELEASE_TAG}/{name}",
+            browser_download_url=model_zoo_download_url(name),
             tag_name=FALLBACK_RELEASE_TAG,
             release_name=FALLBACK_RELEASE_NAME,
         )
-        for name in names
+        for name in INSIGHTFACE_MODEL_ASSET_NAMES
     ]
     return merge_required_assets(assets)
 
 
-def third_party_model_assets() -> List[ModelAsset]:
+def third_party_model_assets() -> list[ModelAsset]:
     return [
         ModelAsset(
             name=GFPGAN_MODEL_NAME,
@@ -101,14 +118,44 @@ def third_party_model_assets() -> List[ModelAsset]:
     ]
 
 
-def merge_required_assets(assets: Iterable[ModelAsset]) -> List[ModelAsset]:
-    merged = list(assets)
+def merge_required_assets(assets: Iterable[ModelAsset]) -> list[ModelAsset]:
+    merged = [_normalize_insightface_asset(asset) for asset in assets]
     seen = {asset.name for asset in merged}
+    for name in INSIGHTFACE_MODEL_ASSET_NAMES:
+        if name not in seen:
+            merged.append(
+                ModelAsset(
+                    name=name,
+                    browser_download_url=model_zoo_download_url(name),
+                    tag_name=FALLBACK_RELEASE_TAG,
+                    release_name=FALLBACK_RELEASE_NAME,
+                )
+            )
+            seen.add(name)
     for asset in third_party_model_assets():
         if asset.name not in seen:
             merged.append(asset)
             seen.add(asset.name)
     return merged
+
+
+def _normalize_insightface_asset(asset: ModelAsset) -> ModelAsset:
+    """Point official assets at the canonical release, including cached ones."""
+
+    is_official = asset.name in INSIGHTFACE_MODEL_ASSET_NAMES or (
+        asset.browser_download_url.startswith(_INSIGHTFACE_RELEASE_DOWNLOAD_ROOT)
+    )
+    if asset.source.casefold() != "insightface" or not is_official:
+        return asset
+    release_name = asset.release_name
+    if asset.tag_name != MODEL_ZOO_RELEASE_TAG:
+        release_name = FALLBACK_RELEASE_NAME
+    return replace(
+        asset,
+        browser_download_url=model_zoo_download_url(asset.name),
+        tag_name=MODEL_ZOO_RELEASE_TAG,
+        release_name=release_name or FALLBACK_RELEASE_NAME,
+    )
 
 
 def cache_file(gui_cache_dir: str | os.PathLike[str]) -> Path:
@@ -118,34 +165,68 @@ def cache_file(gui_cache_dir: str | os.PathLike[str]) -> Path:
 
 
 def asset_from_dict(data: dict) -> ModelAsset:
-    return ModelAsset(
-        name=str(data.get("name", "")),
-        browser_download_url=str(data.get("browser_download_url", "")),
-        tag_name=str(data.get("tag_name", data.get("release_tag", FALLBACK_RELEASE_TAG))),
-        release_name=str(data.get("release_name", FALLBACK_RELEASE_NAME)),
-        size=int(data.get("size") or 0),
-        content_type=str(data.get("content_type", "")),
-        updated_at=str(data.get("updated_at", "")),
-        source=str(data.get("source", "InsightFace")),
+    name = str(data.get("name", ""))
+    download_url = str(data.get("browser_download_url", ""))
+    source = data.get("source")
+    if source is None:
+        source = (
+            "InsightFace"
+            if name in INSIGHTFACE_MODEL_ASSET_NAMES
+            or download_url.startswith(_INSIGHTFACE_RELEASE_DOWNLOAD_ROOT)
+            else "third party"
+        )
+    return _normalize_insightface_asset(
+        ModelAsset(
+            name=name,
+            browser_download_url=download_url,
+            tag_name=str(
+                data.get("tag_name", data.get("release_tag", FALLBACK_RELEASE_TAG))
+            ),
+            release_name=str(data.get("release_name", FALLBACK_RELEASE_NAME)),
+            size=int(data.get("size") or 0),
+            content_type=str(data.get("content_type", "")),
+            updated_at=str(data.get("updated_at", "")),
+            source=str(source),
+        )
     )
 
 
-def load_cached_assets(gui_cache_dir: str | os.PathLike[str]) -> List[ModelAsset]:
+def load_cached_assets(gui_cache_dir: str | os.PathLike[str]) -> list[ModelAsset]:
     path = cache_file(gui_cache_dir)
     if not path.exists():
         return fallback_model_assets()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        assets = [asset_from_dict(item) for item in payload.get("assets", []) if item.get("browser_download_url")]
-        return merge_required_assets(assets)
-    except Exception:
+        assets = [
+            asset_from_dict(item)
+            for item in payload.get("assets", [])
+            if item.get("browser_download_url")
+        ]
+        assets = merge_required_assets(assets)
+        normalized = [asdict(asset) for asset in assets]
+        if payload.get("assets") != normalized:
+            try:
+                save_cached_assets(
+                    gui_cache_dir,
+                    assets,
+                    source=GITHUB_MODEL_ZOO_RELEASE_API,
+                )
+            except OSError:
+                # A read-only cache must not prevent the in-memory migration.
+                pass
+        return assets
+    except (AttributeError, OSError, TypeError, ValueError):
         return fallback_model_assets()
 
 
-def save_cached_assets(gui_cache_dir: str | os.PathLike[str], assets: Iterable[ModelAsset], source: str = "") -> Path:
+def save_cached_assets(
+    gui_cache_dir: str | os.PathLike[str],
+    assets: Iterable[ModelAsset],
+    source: str = "",
+) -> Path:
     path = cache_file(gui_cache_dir)
     payload = {
-        "source": source or GITHUB_LATEST_RELEASE_API,
+        "source": source or GITHUB_MODEL_ZOO_RELEASE_API,
         "refreshed_at": utc_now_iso(),
         "assets": [asdict(asset) for asset in assets],
     }
@@ -153,9 +234,12 @@ def save_cached_assets(gui_cache_dir: str | os.PathLike[str], assets: Iterable[M
     return path
 
 
-def refresh_model_assets(gui_cache_dir: str | os.PathLike[str], timeout: int = 20) -> tuple[List[ModelAsset], str]:
+def refresh_model_assets(
+    gui_cache_dir: str | os.PathLike[str],
+    timeout: int = 20,
+) -> tuple[list[ModelAsset], str]:
     request = urllib.request.Request(
-        GITHUB_LATEST_RELEASE_API,
+        GITHUB_MODEL_ZOO_RELEASE_API,
         headers={
             "Accept": "application/vnd.github+json",
             "User-Agent": f"InsightFace-Evaluation-Studio/{__version__}",
@@ -166,22 +250,27 @@ def refresh_model_assets(gui_cache_dir: str | os.PathLike[str], timeout: int = 2
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         assets = fallback_model_assets()
-        save_cached_assets(gui_cache_dir, assets, source=f"fallback after refresh error: {exc}")
-        return assets, f"Refresh failed; using bundled {FALLBACK_RELEASE_TAG} URLs. Error: {exc}"
+        save_cached_assets(
+            gui_cache_dir,
+            assets,
+            source=f"fallback after refresh error: {exc}",
+        )
+        return (
+            assets,
+            f"Refresh failed; using bundled {FALLBACK_RELEASE_TAG} URLs. Error: {exc}",
+        )
 
-    tag = payload.get("tag_name") or FALLBACK_RELEASE_TAG
-    release_name = payload.get("name") or tag
+    release_name = payload.get("name") or FALLBACK_RELEASE_NAME
     assets = []
     for item in payload.get("assets", []):
         name = item.get("name") or ""
-        url = item.get("browser_download_url") or ""
-        if not url or not (name.endswith(".zip") or name.endswith(".onnx")):
+        if not name.endswith((".zip", ".onnx")):
             continue
         assets.append(
             ModelAsset(
                 name=name,
-                browser_download_url=url,
-                tag_name=tag,
+                browser_download_url=model_zoo_download_url(name),
+                tag_name=MODEL_ZOO_RELEASE_TAG,
                 release_name=release_name,
                 size=int(item.get("size") or 0),
                 content_type=item.get("content_type") or "",
@@ -190,29 +279,55 @@ def refresh_model_assets(gui_cache_dir: str | os.PathLike[str], timeout: int = 2
         )
     if not assets:
         assets = fallback_model_assets()
-        message = f"Latest release returned no model assets; using bundled {FALLBACK_RELEASE_TAG} URLs."
+        message = (
+            "The model-zoo release returned no model assets; using bundled "
+            f"{FALLBACK_RELEASE_TAG} URLs."
+        )
     else:
         assets = merge_required_assets(assets)
         message = f"Refreshed {len(assets)} asset(s), including third-party restore models."
-    save_cached_assets(gui_cache_dir, assets, source=GITHUB_LATEST_RELEASE_API)
+    save_cached_assets(gui_cache_dir, assets, source=GITHUB_MODEL_ZOO_RELEASE_API)
     return assets, message
 
 
-def local_model_status(asset: ModelAsset, model_root: str | os.PathLike[str]) -> str:
+def installed_model_asset_path(
+    asset: ModelAsset,
+    model_root: str | os.PathLike[str],
+) -> Path | None:
+    """Return the installed asset path, or ``None`` for absent/partial assets."""
+
     root = Path(model_root).expanduser()
     if asset.name.endswith(".zip"):
         target = root / "models" / asset.stem
         if target.exists() and any(target.glob("*.onnx")):
-            return f"installed: {target}"
-        if target.exists():
-            return f"folder exists: {target}"
-        return "not installed"
+            return target
+        return None
     target_file = root / "models" / asset.stem / asset.name
     if target_file.exists():
-        return f"installed: {target_file}"
+        return target_file
     legacy_file = root / "models" / asset.name
     if legacy_file.exists():
-        return f"installed: {legacy_file}"
+        return legacy_file
+    return None
+
+
+def is_model_asset_installed(
+    asset: ModelAsset,
+    model_root: str | os.PathLike[str],
+) -> bool:
+    """Return whether a complete local copy of a catalog asset is available."""
+
+    return installed_model_asset_path(asset, model_root) is not None
+
+
+def local_model_status(asset: ModelAsset, model_root: str | os.PathLike[str]) -> str:
+    installed_path = installed_model_asset_path(asset, model_root)
+    if installed_path is not None:
+        return f"installed: {installed_path}"
+    if asset.name.endswith(".zip"):
+        target = Path(model_root).expanduser() / "models" / asset.stem
+        if target.exists():
+            return f"folder exists: {target}"
     return "not installed"
 
 
@@ -258,7 +373,7 @@ def _download_with_retries(
     destination: Path,
     asset_name: str,
     expected_size: int = 0,
-    progress: Optional[Callable[[int, int, str], None]] = None,
+    progress: Callable[[int, int, str], None] | None = None,
     retries: int = 4,
 ) -> None:
     partial = destination.with_suffix(destination.suffix + ".part")
@@ -322,7 +437,7 @@ def download_model_asset(
     asset: ModelAsset,
     model_root: str | os.PathLike[str],
     gui_cache_dir: str | os.PathLike[str],
-    progress: Optional[Callable[[int, int, str], None]] = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> Path:
     cache_dir = Path(gui_cache_dir).expanduser() / "models"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -340,11 +455,47 @@ def download_model_asset(
 
     if asset.name.endswith(".zip"):
         target_dir = model_root_path / asset.stem
-        if target_dir.exists():
-            shutil.rmtree(target_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(archive_path) as zf:
-            zf.extractall(target_dir)
+        staging_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{asset.stem}-install-",
+                dir=model_root_path,
+            )
+        )
+        backup_dir: Path | None = None
+        install_committed = False
+        try:
+            with zipfile.ZipFile(archive_path) as zf:
+                zf.extractall(staging_dir)
+            if not any(staging_dir.rglob("*.onnx")):
+                raise RuntimeError(
+                    f"Downloaded package {asset.name} contains no ONNX models."
+                )
+            if target_dir.exists():
+                backup_dir = Path(
+                    tempfile.mkdtemp(
+                        prefix=f".{asset.stem}-previous-",
+                        dir=model_root_path,
+                    )
+                )
+                backup_dir.rmdir()
+                target_dir.replace(backup_dir)
+            try:
+                staging_dir.replace(target_dir)
+                install_committed = True
+            except Exception:
+                if backup_dir is not None and not target_dir.exists():
+                    backup_dir.replace(target_dir)
+                    backup_dir = None
+                raise
+        finally:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            if (
+                install_committed
+                and backup_dir is not None
+                and backup_dir.exists()
+            ):
+                shutil.rmtree(backup_dir, ignore_errors=True)
         if progress:
             progress(1, 1, f"Extracted to {target_dir}")
         return target_dir
@@ -352,7 +503,12 @@ def download_model_asset(
     target_dir = model_root_path / asset.stem
     target_dir.mkdir(parents=True, exist_ok=True)
     target_file = target_dir / asset.name
-    shutil.copy2(archive_path, target_file)
+    staging_file = target_dir / f".{asset.name}.installing"
+    try:
+        shutil.copy2(archive_path, staging_file)
+        staging_file.replace(target_file)
+    finally:
+        staging_file.unlink(missing_ok=True)
     if progress:
         progress(1, 1, f"Saved to {target_file}")
     return target_file

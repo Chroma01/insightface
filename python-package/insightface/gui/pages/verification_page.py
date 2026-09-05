@@ -334,8 +334,11 @@ class VerificationPage(BasePage):
         self.query_path = ""
         self.query_image: np.ndarray | None = None
         self.gallery_paths: list[str] = []
-        self._gallery_embedding_cache_key: tuple[str, ...] | None = None
+        self._gallery_embedding_cache_key: tuple[object, ...] | None = None
         self._gallery_embedding_cache: list[dict] | None = None
+        self._active_engine_cache_identity = self._engine_cache_identity(
+            context.engine
+        )
         self.results: list[dict] = []
         if abs(float(context.config.recognition_threshold) - DEFAULT_THRESHOLD) > 1e-9:
             context.config.recognition_threshold = DEFAULT_THRESHOLD
@@ -459,11 +462,13 @@ class VerificationPage(BasePage):
             self.show_error("Model is not loaded. Please open Models.")
             return
 
+        engine = self.context.engine
+        engine_identity = self._engine_cache_identity(engine)
         query_image = self.query_image.copy()
         query_path = self.query_path
         gallery_paths = list(self.gallery_paths)
         multi_face_policy = self._multi_face_policy()
-        gallery_key = (multi_face_policy, *gallery_paths)
+        gallery_key = (engine_identity, multi_face_policy, *gallery_paths)
         cached_gallery = (
             list(self._gallery_embedding_cache)
             if self._gallery_embedding_cache_key == gallery_key and self._gallery_embedding_cache is not None
@@ -472,7 +477,7 @@ class VerificationPage(BasePage):
         threshold = self.threshold.value()
 
         def task(progress=None, is_cancelled=None):
-            query_faces = self.context.engine.detect_faces(query_image, source_path=query_path)
+            query_faces = engine.detect_faces(query_image, source_path=query_path)
             query_face = select_face_by_policy(
                 query_faces,
                 query_image.shape,
@@ -488,6 +493,7 @@ class VerificationPage(BasePage):
                     progress(1, 1, "Using cached gallery embeddings")
             else:
                 gallery_cache = self._build_gallery_embedding_cache(
+                    engine,
                     gallery_paths,
                     multi_face_policy,
                     progress,
@@ -510,9 +516,20 @@ class VerificationPage(BasePage):
                 "gallery_key": gallery_key,
                 "gallery_cache": gallery_cache,
                 "multi_face_policy": multi_face_policy,
+                "engine_identity": engine_identity,
             }
 
         def done(payload):
+            if (
+                self.context.engine is not engine
+                or self._engine_cache_identity(self.context.engine)
+                != payload["engine_identity"]
+            ):
+                self.set_status(
+                    "Recognition result ignored because the global model changed "
+                    "during processing."
+                )
+                return
             if (
                 self.query_path != payload["query_path"]
                 or tuple(self.gallery_paths) != payload["gallery_paths"]
@@ -572,6 +589,7 @@ class VerificationPage(BasePage):
 
     def _build_gallery_embedding_cache(
         self,
+        engine,
         gallery_paths: list[str],
         multi_face_policy: str,
         progress=None,
@@ -586,7 +604,7 @@ class VerificationPage(BasePage):
                 cache.append(self._gallery_error_cache_item(path, "Image read failure."))
             else:
                 try:
-                    faces = self.context.engine.detect_faces(image, source_path=path)
+                    faces = engine.detect_faces(image, source_path=path)
                     face = select_face_by_policy(
                         faces,
                         image.shape,
@@ -682,13 +700,38 @@ class VerificationPage(BasePage):
         self.set_status("Multi-face handling changed. Gallery embeddings will be recomputed.")
         self._update_policy_notice()
 
+    def refresh(self) -> None:
+        engine_identity = self._engine_cache_identity(self.context.engine)
+        if engine_identity != self._active_engine_cache_identity:
+            self._active_engine_cache_identity = engine_identity
+            self._clear_gallery_embedding_cache()
+            self.results = []
+            self.result_table.setRowCount(0)
+            self.query_input.set_faces([])
+        self._update_policy_notice()
+
+    @staticmethod
+    def _engine_cache_identity(engine) -> tuple[object, ...]:
+        try:
+            model_dir = str(engine.resolve_model_dir())
+        except Exception:
+            model_dir = str(getattr(engine, "custom_model_dir", "") or "")
+        return (
+            id(engine),
+            str(getattr(engine, "model_name", "")),
+            model_dir,
+            tuple(getattr(engine, "requested_providers", ())),
+            tuple(getattr(engine, "det_size", ())),
+        )
+
     def _update_policy_notice(self) -> None:
         language = self.context.config.ui_language
         self.workflow_notice.setText(
             tr(
                 "Gallery face embeddings are cached in memory after the first run and reused while the gallery image list "
                 "and multi-face policy are unchanged. Changing only the query image reuses the cached gallery; adding, "
-                "removing, clearing gallery images, or changing multi-face handling clears and recomputes it.",
+                "removing, clearing gallery images, changing multi-face handling, or changing the global model clears "
+                "and recomputes it.",
                 language,
             )
             + " "

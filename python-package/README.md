@@ -16,7 +16,7 @@ the desktop Evaluation Studio.
 | Use case | Command |
 |---|---|
 | FaceAnalysis and ModelZoo | `pip install insightface` |
-| PrivateFrame Python API and CLI | `pip install "insightface[privateframe]"` |
+| Video face blur/mosaic with the PrivateFrame API and CLI | `pip install "insightface[privateframe]"` |
 | Evaluation Studio GUI, including PrivateFrame | `pip install "insightface[gui]"` |
 
 The base package installs `onnxruntime`. The `privateframe` extra additionally
@@ -82,12 +82,16 @@ insightface-gui
 
 # PrivateFrame CLI
 insightface-privateframe --help
-# Equivalent: python -m insightface.app.privateframe --help
+# Equivalent: python -m insightface_privateframe_bootstrap --help
 ```
 
 ## PrivateFrame
 
-PrivateFrame treats the analysis JSON as a first-class result. Stable default
+PrivateFrame detects and tracks faces in local videos and renders those face
+regions with Gaussian blur or mosaic for privacy. It never modifies or uploads
+the source video. PrivateFrame also treats the analysis JSON as a first-class
+result, so an analysis can be inspected or edited and rendered again without
+rerunning model inference. Stable default
 names pair it with the rendered video in one output directory:
 
 ```text
@@ -95,19 +99,31 @@ video_privateframe.json
 video_privateframe.mp4
 ```
 
+The result JSON is a compact, portable rendering document. It stores the source
+file name and video geometry, final per-frame face boxes, optional identity
+decisions, and effective rendering defaults. It does not store absolute source
+paths, content hashes, model fingerprints, Git state, or internal tracking
+evidence. When rendering it again, PrivateFrame checks the input dimensions,
+frame rate, and decoded frame count rather than hashing the video contents.
+
+With `--output-dir`, PrivateFrame derives a private
+`.<input_stem>_privateframe_work` directory there; its temporary SQLite packet
+cache is removed after analysis. An explicit `--workdir` overrides that runtime
+location. For compatibility, using `--workdir` without `--output-dir` or
+`--result` stores the JSON as `<workdir>/result.privateframe.json`; an explicit
+`--result` always takes precedence.
+
 Use `analyze` for JSON only, `process` for JSON plus the redacted video, and
 `render` to render an existing or edited JSON without running the models again:
 
 ```bash
 # Analysis only: writes /data/output/video_privateframe.json
 insightface-privateframe analyze \
-  --config /path/to/base.yaml \
   --input /data/video.mp4 \
   --output-dir /data/output
 
 # Analyze and render: also writes /data/output/video_privateframe.mp4
 insightface-privateframe process \
-  --config /path/to/base.yaml \
   --input /data/video.mp4 \
   --output-dir /data/output
 
@@ -117,13 +133,114 @@ insightface-privateframe render \
   --output-dir /data/output
 ```
 
-For constrained devices, choose **Fast** or **Ultra Fast** in the GUI, or set
-`scan.performance_mode` from the CLI. These presets trade some assurance for
-speed; **Normal** remains the default.
+`analyze` and `process` use the packaged `configs/base.yaml` by default. Pass
+`--config /path/to/custom.yaml` only when a custom configuration is needed.
+A custom YAML automatically inherits the packaged Base, so it normally contains
+only the changed fields:
 
-The CLI `--json` option only makes command status output compact JSON; it does
-not select JSON-only analysis. The `analyze` subcommand is the JSON-only
-interface.
+```yaml
+schema_version: 1
+scan:
+  max_analysis_fps: 15
+```
+
+An explicit `base_config` field remains available when the custom YAML must
+inherit a different complete parent configuration. CLI dotted options are
+applied last, after the Base and custom YAML layers.
+
+The GUI offers **Normal (up to 30 FPS)** by default and **Fast (up to 15 FPS)**
+for constrained devices. The equivalent CLI override is
+`--scan.max_analysis_fps 15`. PrivateFrame derives a uniform integer sampling
+stride for each video; sampled analysis trades some assurance for speed.
+
+### CLI automation contract
+
+The CLI is safe to invoke from shell scripts and vendor-neutral AI coding tools
+without parsing human-oriented log text. An unfamiliar automation client should
+run `insightface-privateframe describe` and read these high-level fields first:
+
+- `tool.summary`, `tool.purpose_id`, and `tool.capabilities` explain that the
+  tool detects and tracks face regions and renders Gaussian blur or mosaic.
+- `discovery` maps common user intentions to the correct command and gives a
+  safe dry-run/execution policy.
+- `primary_io` distinguishes file artifacts from the final status JSON on
+  stdout.
+- `recommended_workflows` supplies executable argument templates for immediate
+  redaction and for the `analyze → edit JSON → render` workflow.
+- `commands.*.reads`, `commands.*.outputs`, and `commands.*.when_to_use` make
+  each command's data flow explicit; `outputs` means file artifacts, while
+  every command still returns its status on stdout. In particular, `render`
+  reads both the original source video and the result JSON.
+
+For a normal request to blur or anonymize faces, automation should select
+`process`, run the supplied command template once with `--dry-run`, inspect
+both `stdout.ok` and `stdout.ready`, and then repeat it without `--dry-run`.
+Mosaic/pixelation is selected with `--render.redaction.method mosaic`. Existing
+files are never replaced unless `--overwrite` is deliberately added. On
+success, read final resolved file paths from `stdout.artifacts`; a dry-run puts
+the planned paths in `stdout.plan.artifacts`.
+
+`analyze`, `render`, `process`, `describe`, and
+`doctor` write exactly one compact status JSON object to standard output. A
+successful execution has this stable envelope:
+
+```json
+{"status_schema_version":1,"ok":true,"command":"analyze","artifacts":{"result_json":"/output/input_privateframe.json","result_video":null},"runtime":{"provider":"CPUExecutionProvider"},"timings":{"total_seconds":8.2},"summary":{"frame_count":300,"face_tracks":3,"face_regions":615}}
+```
+
+The success summary contains only stable user-facing counts. Detailed tracking,
+recognition, sampling, cache, model, and backend diagnostics are not written to
+standard output; development runs can retain them in the separate developer
+report.
+
+Failures use the same standard-output channel and include a structured `error`
+with `code`, `stage`, `type`, `message`, `retryable`, and `hints`. Standard error
+is reserved for diagnostics and progress, so redirecting it never corrupts the
+final status object. Ctrl-C returns a `cancelled` status and exit code 130. The
+old `--json` switch is no longer needed; `analyze`
+remains the subcommand that selects JSON-only analysis.
+
+Discover the installed CLI instead of hard-coding its options:
+
+```bash
+insightface-privateframe --version
+insightface-privateframe describe
+insightface-privateframe doctor
+```
+
+`describe` returns the public commands, configuration schema and defaults,
+artifact contract, status-output rules, exit codes, and examples. It omits
+internal debug controls. `doctor` reports readiness checks for the runtime,
+models, media support, output location, and safety settings.
+
+Every execution command accepts `--progress auto|text|jsonl|none`. `auto` uses
+human-readable progress only on an interactive terminal; `jsonl` writes one
+compact progress event per line to standard error; `none` is useful for quiet
+automation. In every mode, standard output remains the single final JSON
+object.
+
+Use `--dry-run` to resolve and validate the configuration, input, work
+directory, output artifacts, and dotted overrides without model inference or
+artifact rendering. It may open an in-memory codec context (or encode one
+synthetic frame to a null sink) to validate the final encoder options. It does
+not download models, create ONNX Runtime sessions, compile CoreML models, warm
+up inference, or create output files/directories:
+
+```bash
+insightface-privateframe process \
+  --input /data/video.mp4 \
+  --output-dir /data/output \
+  --scan.max_analysis_fps 15 \
+  --progress jsonl \
+  --dry-run
+```
+
+PrivateFrame protects existing public artifacts by default. Review the dry-run
+plan first, then pass `--overwrite` explicitly when replacing the reported
+JSON or video is intentional. Concurrent CLI writers targeting the same output
+or work directory are serialized with adjacent lock files; locks owned by dead
+processes are reclaimed, while `output_busy` is safe to retry after the active
+invocation finishes.
 
 Development install:
 
@@ -147,9 +264,11 @@ python -m insightface.gui
 The GUI is called **InsightFace Evaluation Studio**. It provides local 1:1 face
 compare, People Library management, 1:N face search, multi-face photo
 recognition, batch folder processing, album people clustering, enterprise
-evaluation reports, and a face swap entry point. User images, videos,
-embeddings, databases, and reports are stored locally by default under
-``~/.insightface/gui`` and are not uploaded automatically.
+evaluation reports, and a face swap entry point. Workspace data such as
+embeddings, databases, and reports is stored locally by default under
+``~/.insightface/gui`` and is not uploaded automatically. PrivateFrame result
+files instead default to the platform's user-visible Videos directory (Movies
+on macOS).
 Image and video previews are clickable upload targets: click
 ``Click to upload or drag a file here`` or drop a file onto the preview. The
 preview changes color on hover and during drag-over. Loaded previews show a
@@ -158,11 +277,17 @@ small delete button and can be replaced by dragging in another file.
 The desktop app uses mode-based navigation. **PrivateFrame** is the first
 workflow, followed by **Face Recognition**, **Album Management**, **Face Swap**,
 and **Enterprise Evaluation** in the persistent **Workflows** rail.
-PrivateFrame accepts a local video and output directory, runs the Python
-pipeline on a background worker, and always creates a reusable `_privateframe.json`.
+PrivateFrame accepts a local video and output directory, initially selects the
+system Videos directory (Movies on macOS), runs the Python pipeline on a
+background worker, and always creates a reusable `_privateframe.json`.
+It uses the GUI's global model, model root, and provider rather than a separate
+PrivateFrame model selector. Processing is enabled for `raccoon_s` and
+`raccoon_l`; a missing package may download into the configured root on first
+use, while an invalid installed V2 package is rejected before the job starts.
 Its output mode can stop after analysis or immediately render the paired
-`_privateframe.mp4`, without blocking the GUI. The main page exposes model,
-performance, privacy policy, redaction, and output mode; **More Options** adds
+`_privateframe.mp4`, without blocking the GUI. The main page displays the
+global model/root status and exposes performance, privacy policy, redaction,
+and output mode; **More Options** adds
 advanced processing, face coverage, Medium-default encoding, quality,
 audio, and selective-recognition Gallery controls. Face Recognition
 is a single **Query & Gallery** workspace: upload
@@ -187,10 +312,12 @@ not changed from the settings dialog.
 
 Face-recognition and face-swap models are not downloaded automatically by the
 general GUI model manager. Open **Models > Downloads**,
-click **Refresh Download URLs** to read the latest GitHub Releases
-asset URLs, then explicitly download the selected package. Downloaded zip files
-are cached under ``~/.insightface/gui/cache/models`` and extracted under
-``~/.insightface/models/<model_name>/``.
+click **Refresh Download URLs** to read the dedicated
+[`model-zoo`](https://github.com/deepinsight/insightface/releases/tag/model-zoo)
+release asset URLs, then explicitly download the selected package. Downloaded
+zip files are cached under ``~/.insightface/gui/cache/models`` and extracted
+under ``<model_root>/models/<model_name>/`` (the default model root is
+``~/.insightface``).
 The Downloads tab also lists GFPGANv1.4 as a third-party face restoration
 model. After it is downloaded, enable **GFPGAN post-processing** in
 **Models > Runtime** to run 512x512 GFPGAN restoration after face swap.
@@ -198,9 +325,16 @@ Detection size defaults to **Auto**, which runs joint 128x128 and 640x640
 detection. Face swap models are selected in **Models > Runtime** from already
 downloaded swap models only; the Face Swap workspace loads the configured swap
 model only when a swap is run.
-PrivateFrame is the exception: its selected `raccoon_s` or `raccoon_l` package
-uses the standard InsightFace ModelZoo directory and may download there on the
-first run.
+New GUI configurations default to `raccoon_s`; existing JSON configurations
+retain their saved model. The shared catalog also includes `raccoon_l`,
+`buffalo_l`, `buffalo_m`, `buffalo_s`, `buffalo_sc`, and `antelopev2`.
+PrivateFrame is the exception to manual downloads: when the global model is a
+Raccoon package, it may download under the configured global model root on the
+first run. It does not fall back to another root or model. Each running job
+keeps its startup model/root/provider snapshot, and PrivateFrame does not share
+its inference Sessions with the ordinary GUI engine. The GUI prevents model
+downloads and PrivateFrame processing from running at the same time, including
+when a download continues after the Models dialog has been closed.
 
 ### Optional face3d Build
 
@@ -357,7 +491,11 @@ Recognition Accuracy:
 
 
 
-For insightface>=0.3.3, models will be downloaded automatically once we init ``app = FaceAnalysis()`` instance.
+For insightface>=0.3.3, models will be downloaded automatically once we init
+``app = FaceAnalysis()`` instance. Automatic ModelZoo downloads use the
+dedicated
+[`model-zoo`](https://github.com/deepinsight/insightface/releases/tag/model-zoo)
+release.
 
 For insightface==0.3.2, you must first download the model package by command:
 

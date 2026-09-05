@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from concurrent.futures import Future
 from pathlib import Path
@@ -92,14 +91,13 @@ class _FakeAnalysis:
         )
         detections = self.detections
         if detections is None:
-            detections = [{
-                "box": [0.0, 0.0, float(image.shape[1]), float(image.shape[0])],
-                "confidence": 0.9,
-            }]
-        rows = [
-            [*value["box"], float(value["confidence"])]
-            for value in detections
-        ]
+            detections = [
+                {
+                    "box": [0.0, 0.0, float(image.shape[1]), float(image.shape[0])],
+                    "confidence": 0.9,
+                }
+            ]
+        rows = [[*value["box"], float(value["confidence"])] for value in detections]
         return np.asarray(rows, dtype=np.float32), None
 
     def _verify(
@@ -126,33 +124,34 @@ def _manifest_config(
         "recognition": b"recognizer-model",
     }
     manifest = {
-        "detection": {
-            "file": "detector.onnx",
-            "sha256": hashlib.sha256(contents["detection"]).hexdigest(),
-            "preprocessing": {"mean": 11.0, "std": 22.0},
+        "manifest_version": 2,
+        "model_id": "raccoon_s",
+        "tasks": {
+            "detection": {
+                "file": "detector.onnx",
+                "preprocessing": {"mean": 11.0, "std": 22.0},
+            },
+            "verification": {
+                "file": "verifier.onnx",
+                "expansion": 1.3,
+                "preprocessing": verifier_preprocessing,
+            },
+            "recognition": {
+                "file": "recognizer.onnx",
+                "preprocessing": {"mean": 33.0, "std": 44.0},
+            },
         },
-        "verification": {
-            "file": "verifier.onnx",
-            "sha256": hashlib.sha256(contents["verification"]).hexdigest(),
-            "expansion": 1.3,
-            "preprocessing": verifier_preprocessing,
-        },
-        "recognition": {
-            "file": "recognizer.onnx",
-            "sha256": hashlib.sha256(contents["recognition"]).hexdigest(),
-            "preprocessing": {"mean": 33.0, "std": 44.0},
-        },
+        "license": "MODEL.LICENSE",
     }
     for task, content in contents.items():
         if task != "recognition" or include_recognizer_file:
-            (package / manifest[task]["file"]).write_bytes(content)
+            (package / manifest["tasks"][task]["file"]).write_bytes(content)
     manifest_path = package / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return {
         "models": {
             "name": "raccoon_s",
             "manifest_path": str(manifest_path),
-            "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             "detection": {
                 "nms_iou_threshold": 0.37,
                 "max_detections": 3,
@@ -204,7 +203,7 @@ def test_make_face_analysis_uses_allowed_modules_as_the_loading_control(
         face_analysis_module,
         "load_model_package",
         lambda _path: (_ for _ in ()).throw(
-            AssertionError("FaceAnalysis reparsed the pinned manifest snapshot")
+            AssertionError("FaceAnalysis reparsed the supplied V2 descriptor")
         ),
     )
     config = _manifest_config(tmp_path, mode="blur_only")
@@ -215,7 +214,7 @@ def test_make_face_analysis_uses_allowed_modules_as_the_loading_control(
     call = constructor_calls[0]
     package = call["name"]
     assert package.path == Path(config["models"]["manifest_path"]).parent
-    assert package.manifest_sha256 == config["models"]["manifest_sha256"]
+    assert package.manifest_version == 2
     assert analysis.model_package is package
     assert call["allowed_modules"] == (
         "detection",
@@ -296,7 +295,7 @@ def test_face_analysis_loads_each_allowed_manifest_module_in_constructor(
         include_recognizer_file=False,
     )
 
-    package = private_models._load_pinned_model_package(config["models"])
+    package = private_models._load_selected_model_package(config["models"])
     analysis = face_analysis_module.FaceAnalysis(
         name=package,
         allowed_modules=("detection", "verification"),
@@ -310,23 +309,21 @@ def test_face_analysis_loads_each_allowed_manifest_module_in_constructor(
     }
 
 
-def test_privateframe_manifest_hash_fails_before_face_analysis_or_session(
+def test_privateframe_does_not_require_a_manifest_snapshot_hash(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    _task_models, model_calls = _patch_standard_model_zoo(monkeypatch)
     config = _manifest_config(tmp_path, mode="all")
-    config["models"]["manifest_sha256"] = "0" * 64
-    constructor_calls: list[bool] = []
-    monkeypatch.setattr(
-        private_models,
-        "FaceAnalysis",
-        lambda **_kwargs: constructor_calls.append(True),
-    )
+    manifest_path = Path(config["models"]["manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["future_release_annotation"] = {"build": 7}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="manifest SHA256 mismatch"):
-        private_models.make_face_analysis(config)
+    analysis = private_models.make_face_analysis(config)
 
-    assert constructor_calls == []
+    assert set(analysis.models) == {"detection", "verification"}
+    assert model_calls == ["detection", "verification"]
 
 
 def test_privateframe_package_name_fails_before_face_analysis_or_session(
@@ -552,7 +549,7 @@ def _streaming_config(mode: str) -> dict[str, Any]:
             "max_missed_seconds": 0.5,
             "max_retroactive_seconds": 1.0,
         },
-        "scan": {},
+        "scan": {"max_analysis_fps": 30},
         "recognition": {"mode": mode},
         "models": {"detection": {"max_detections": 7}},
         "runtime": {"providers": ["CPUExecutionProvider"]},
@@ -644,6 +641,56 @@ def test_streaming_mode_all_never_requests_recognizer(
     )
 
     assert "recognition" not in analysis.models
+
+
+def test_streaming_derives_stride_and_endpoint_coverage_without_mutating_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+    analysis = _FakeAnalysis(include_recognizer=False)
+    _patch_streaming_init(monkeypatch, captured)
+    monkeypatch.setattr(
+        streaming,
+        "probe_video",
+        lambda _source: SimpleNamespace(fps=240.0),
+    )
+    monkeypatch.setattr(
+        streaming,
+        "create_recognition_engine",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            enabled=False,
+            max_frames_per_track=3,
+        ),
+    )
+    config = _streaming_config("all")
+    config["scan"]["max_analysis_fps"] = 15
+    config["tracking"].update(
+        {
+            "endpoint_extension": 8,
+            "reliable_endpoint_extension": 45,
+        }
+    )
+
+    engine = streaming.StreamingEngine(
+        tmp_path / "input.mp4",
+        tmp_path,
+        config,
+        analysis.detector,
+        face_analysis=analysis,
+    )
+
+    assert engine.detector_frame_stride == 16
+    assert engine.nominal_regular_analysis_fps == pytest.approx(15.0)
+    assert engine.interpolate_tracking is True
+    assert engine.settings["endpoint_extension"] == 15
+    assert engine.settings["reliable_endpoint_extension"] == 45
+    assert config["scan"] == {"max_analysis_fps": 15}
+    assert config["tracking"] == {
+        "endpoint_extension": 8,
+        "reliable_endpoint_extension": 45,
+    }
+    engine.close()
 
 
 def test_run_stream_creates_one_analysis_and_preserves_detector_position(

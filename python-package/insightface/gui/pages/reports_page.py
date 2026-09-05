@@ -9,6 +9,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
 
 from ..core.exporters import export_csv
+from ..core.licensing import model_license_display
 from ..core.models import EvaluationResult
 from ..core.reporting import write_reports
 from ..core.utils import timestamp_for_filename, utc_now_iso
@@ -57,7 +58,11 @@ class ReportsPage(BasePage):
         run = self._selected_run()
         if not run:
             return
-        result = EvaluationResult(scenario=run["scenario"], model_name=run["model_name"], provider=run["provider"], threshold=float(run["threshold"]), dataset_summary=run.get("dataset_summary", {}), metrics=run.get("metrics", {}), errors=[], latency=run.get("hardware", {}), license_status=self.context.config.license_status, created_at=run.get("created_at") or utc_now_iso())
+        license_status = model_license_display(
+            self.context.config,
+            model_name=str(run["model_name"]),
+        ).status_text
+        result = EvaluationResult(scenario=run["scenario"], model_name=run["model_name"], provider=run["provider"], threshold=float(run["threshold"]), dataset_summary=run.get("dataset_summary", {}), metrics=run.get("metrics", {}), errors=[], latency=run.get("hardware", {}), license_status=license_status, created_at=run.get("created_at") or utc_now_iso())
         paths = write_reports(result, self.context.config.report_dir, language=self.context.config.ui_language)
         report_path = paths.get("pdf") or paths["markdown"]
         self.context.storage.save_evaluation_run(result.scenario, result.model_name, result.provider, result.threshold, result.dataset_summary, result.metrics, result.latency, report_path, result.created_at)

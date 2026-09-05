@@ -34,12 +34,17 @@ from .core.constants import APP_VERSION, LOCAL_PROCESSING_NOTICE, RESPONSIBLE_US
 from .core.face_engine import is_cuda_provider_available, provider_runtime_display
 from .core.i18n import apply_translations, tr
 from .core.links import open_insightface_url
+from .core.licensing import (
+    current_model_license_display,
+    invalidate_model_license_cache,
+)
 from .core.navigation import (
     AppMode,
     NAVIGATION_MODES,
     last_page_attr,
     mode_from_value,
 )
+from .core.model_packages import CUSTOM_MODEL_CHOICE, GUI_MODEL_PACKAGES
 from .core.theme import application_stylesheet
 from .core.tooltips import apply_button_tooltips, set_button_tooltip
 from .dialogs.license_dialog import LicenseDialog
@@ -117,9 +122,30 @@ class FirstLaunchWizard(QDialog):
         self.mode.addItem("Personal / Research", "Personal / Research")
         self.mode.addItem("Enterprise Evaluation", "Enterprise Evaluation")
         self.model = QComboBox()
-        self.model.addItems(["buffalo_l", "buffalo_s", "antelopev2", "custom model directory"])
+        for package in GUI_MODEL_PACKAGES:
+            self.model.addItem(package, package)
+        self.model.addItem("custom model directory", CUSTOM_MODEL_CHOICE)
+        configured_model = (
+            config.model_name
+            if config.model_name in GUI_MODEL_PACKAGES
+            else CUSTOM_MODEL_CHOICE
+        )
+        configured_index = self.model.findData(configured_model)
+        if configured_index >= 0:
+            self.model.setCurrentIndex(configured_index)
+        custom_value = (
+            ""
+            if config.model_name in GUI_MODEL_PACKAGES
+            else str(config.custom_model_dir or "").strip()
+        )
+        if not custom_value and config.model_name not in GUI_MODEL_PACKAGES:
+            custom_value = str(config.model_name or "").strip()
+        self.custom_model_dir = QLineEdit(custom_value)
+        self.custom_model_dir.setPlaceholderText("Choose a local model directory")
+        self.model.currentIndexChanged.connect(self._update_custom_model_visibility)
         self.provider = QComboBox()
         self.provider.addItems(["Auto", "CPU", "CUDA"])
+        self.provider.setCurrentText(str(config.provider))
         self._update_provider_availability()
         self.license_notice = QLabel(
             "This application runs locally. Code and model licenses may differ. "
@@ -130,6 +156,8 @@ class FirstLaunchWizard(QDialog):
         form.addRow("Workspace", workspace_row)
         form.addRow("Mode", self.mode)
         form.addRow("Model package", self.model)
+        form.addRow("Custom model directory", self.custom_model_dir)
+        self.custom_model_dir_label = form.labelForField(self.custom_model_dir)
         form.addRow("Provider", self.provider)
         form.addRow("License notice", self.license_notice)
         layout.addLayout(form)
@@ -137,6 +165,7 @@ class FirstLaunchWizard(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._update_custom_model_visibility()
         apply_button_tooltips(self)
 
     def browse_workspace(self) -> None:
@@ -152,13 +181,31 @@ class FirstLaunchWizard(QDialog):
             if self.config.mode == "Enterprise Evaluation"
             else AppMode.PRIVATE_FRAME.value
         )
-        selected_model = self.model.currentText()
-        self.config.model_name = selected_model if selected_model != "custom model directory" else self.config.model_name
+        selected_model = self.model.currentData()
+        if selected_model == CUSTOM_MODEL_CHOICE:
+            custom_dir = self.custom_model_dir.text().strip()
+            if not custom_dir:
+                QMessageBox.warning(
+                    self,
+                    "First Launch Wizard",
+                    "Select a custom model directory.",
+                )
+                return
+            self.config.model_name = custom_dir
+            self.config.custom_model_dir = custom_dir
+        else:
+            self.config.model_name = str(selected_model)
+            self.config.custom_model_dir = ""
         provider = self.provider.currentText()
         self.config.provider = "Auto" if provider == "CUDA" and not is_cuda_provider_available() else provider
         self.config.apply_workspace_defaults()
         save_config(self.config)
         super().accept()
+
+    def _update_custom_model_visibility(self, *_args) -> None:
+        visible = self.model.currentData() == CUSTOM_MODEL_CHOICE
+        self.custom_model_dir.setVisible(visible)
+        self.custom_model_dir_label.setVisible(visible)
 
     def _update_provider_availability(self) -> None:
         cuda_available = is_cuda_provider_available()
@@ -216,6 +263,7 @@ class MainWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.active_workers: set[Worker] = set()
         self._model_autoload_running = False
+        self._model_autoload_pending = False
         self._closing_after_workers = False
         self._initializing = True
         self.page_registry = PageRegistry(context)
@@ -499,6 +547,7 @@ class MainWindow(QMainWindow):
         apply_translations(wizard, self.context.config.ui_language)
         if wizard.exec() == QDialog.Accepted:
             self.context.storage = self.context.storage.__class__(self.context.config.database_path)
+            self._model_configuration_changed()
             self.change_mode(mode_from_value(self.context.config.ui_last_mode), restore_last=False)
             self.refresh_statusbar()
 
@@ -521,13 +570,16 @@ class MainWindow(QMainWindow):
         if self._model_autoload_running or self.context.engine.is_loaded():
             return
         self._model_autoload_running = True
+        engine = self.context.engine
 
         def task():
-            self.context.engine.load()
-            return self.context.engine
+            engine.load()
+            return engine
 
         def done(engine):
             self.refresh_statusbar()
+            if engine is not self.context.engine:
+                return
             if engine.is_loaded():
                 self.set_status("Model loaded.")
             elif engine.last_error:
@@ -543,6 +595,9 @@ class MainWindow(QMainWindow):
 
     def _model_autoload_finished(self) -> None:
         self._model_autoload_running = False
+        if self._model_autoload_pending:
+            self._model_autoload_pending = False
+            QTimer.singleShot(0, self._auto_load_model_if_needed)
 
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.context, self)
@@ -577,14 +632,52 @@ class MainWindow(QMainWindow):
             item.setToolTip(tr(mode.description, self.context.config.ui_language))
 
     def open_model_manager(self, initial: str | None = None) -> None:
+        from .app import context_activity_count
+
+        if context_activity_count(
+            self.context, "privateframe_jobs_in_progress"
+        ):
+            message = (
+                "Wait for PrivateFrame processing to finish before opening Models."
+            )
+            self.set_status(message)
+            QMessageBox.warning(
+                self,
+                tr("Models", self.context.config.ui_language),
+                tr(message, self.context.config.ui_language),
+            )
+            return
         dialog = ModelManagerDialog(self.context, self)
         apply_button_tooltips(dialog)
         apply_translations(dialog, self.context.config.ui_language)
-        dialog.modelChanged.connect(self.refresh_statusbar)
+        dialog.modelChanged.connect(self._model_configuration_changed)
+        dialog.modelFilesChanged.connect(self._model_files_changed)
         if initial:
             dialog.open_page(initial)
             apply_translations(dialog, self.context.config.ui_language)
         dialog.exec()
+        self._model_files_changed()
+
+    def _model_configuration_changed(self) -> None:
+        """Propagate one global model selection to the engine and open pages."""
+
+        from .app import reconfigure_context_engine
+
+        engine_changed = reconfigure_context_engine(self.context)
+        self._model_files_changed()
+        if engine_changed and self.current_mode != AppMode.PRIVATE_FRAME:
+            if self._model_autoload_running:
+                self._model_autoload_pending = True
+            else:
+                QTimer.singleShot(0, self._auto_load_model_if_needed)
+
+    def _model_files_changed(self) -> None:
+        """Refresh model readiness without invalidating a configured engine."""
+
+        invalidate_model_license_cache()
+        for page in tuple(self.pages.values()):
+            if hasattr(page, "refresh"):
+                page.refresh()
         self.refresh_statusbar()
 
     def open_license_dialog(self) -> None:
@@ -604,6 +697,9 @@ class MainWindow(QMainWindow):
     def refresh_statusbar(self) -> None:
         cfg = self.context.config
         provider_name, provider_tooltip = provider_runtime_display(cfg.provider)
+        license_display = current_model_license_display(self.context)
+        license_status = tr(license_display.status_text, cfg.ui_language)
+        license_tooltip = license_display.tooltip(cfg.ui_language)
         self.model_chip.setVisible(cfg.ui_show_status_chips)
         self.provider_chip.setVisible(cfg.ui_show_status_chips)
         self.license_chip.setVisible(cfg.ui_show_status_chips)
@@ -614,10 +710,10 @@ class MainWindow(QMainWindow):
                 230,
             )
         )
-        self.license_chip.setText(self._elide(tr(cfg.license_status, cfg.ui_language), 180))
+        self.license_chip.setText(self._elide(license_status, 180))
         self.model_chip.setToolTip(cfg.model_name)
         self.provider_chip.setToolTip(provider_tooltip)
-        self.license_chip.setToolTip(cfg.license_status)
+        self.license_chip.setToolTip(license_tooltip)
         self.status_labels["model"].setText(self._elide(f"{tr('Model', cfg.ui_language)}: {cfg.model_name}", 160))
         self.status_labels["provider"].setText(
             f"{tr('Provider', cfg.ui_language)}: {provider_name}"
@@ -625,7 +721,13 @@ class MainWindow(QMainWindow):
         self.status_labels["provider"].setToolTip(provider_tooltip)
         self.status_labels["database"].setText(self._elide(f"{tr('DB', cfg.ui_language)}: {cfg.database_path}", 280))
         self.status_labels["database"].setToolTip(cfg.database_path)
-        self.status_labels["license"].setText(self._elide(f"{tr('License', cfg.ui_language)}: {tr(cfg.license_status, cfg.ui_language)}", 220))
+        self.status_labels["license"].setText(
+            self._elide(
+                f"{tr('License', cfg.ui_language)}: {license_status}",
+                220,
+            )
+        )
+        self.status_labels["license"].setToolTip(license_tooltip)
 
     def run_task(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -25,6 +26,36 @@ def _assert_response_model(
     model = route.response_model
     assert isinstance(model, type) and issubclass(model, BaseModel)
     model.model_validate(response.json())
+
+
+def test_system_and_models_endpoints_share_one_license_summary(
+    client: TestClient,
+) -> None:
+    license_summary = {
+        "license_id": None,
+        "issuer": None,
+        "model_id": "synthetic-recognition",
+        "grant": "non-commercial",
+        "customer": None,
+        "reference": None,
+        "valid_from": None,
+        "valid_until": None,
+        "signature_valid": False,
+        "commercial_use_permitted": False,
+        "status": "default_non_commercial",
+        "defaulted": True,
+        "message": "MODEL.LICENSE is absent; defaulting to non-commercial use",
+    }
+    engine = client.app.state.engine
+    engine.summary = replace(engine.summary, license=license_summary)
+
+    models = client.get("/v1/models")
+    system = client.get("/v1/system")
+
+    assert models.status_code == 200
+    assert system.status_code == 200
+    assert models.json()["license"] == license_summary
+    assert system.json()["model"]["license"] == license_summary
 
 
 def test_every_json_success_response_conforms_to_its_public_model(

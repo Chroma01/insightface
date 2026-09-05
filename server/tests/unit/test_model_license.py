@@ -7,12 +7,20 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from insightface.model_zoo import model_license as shared_model_license
 from insightface_server.licensing import (
     ModelLicenseError,
     canonical_license_bytes,
     verify_model_license,
 )
 from insightface_server.licensing.model_license import _trusted_keys
+
+
+def test_server_license_imports_are_shared_compatibility_aliases() -> None:
+    assert ModelLicenseError is shared_model_license.ModelLicenseError
+    assert canonical_license_bytes is shared_model_license.canonical_license_bytes
+    assert verify_model_license is shared_model_license.verify_model_license
+    assert _trusted_keys is shared_model_license._trusted_keys
 
 
 def _write_license(
@@ -151,10 +159,10 @@ def test_bundled_public_license_verifies_with_active_public_key() -> None:
 
 def test_trusted_keys_ignore_macos_appledouble_files(tmp_path: Path) -> None:
     bundled_key = (
-        Path(__file__).resolve().parents[2]
-        / "backend"
-        / "insightface_server"
-        / "licensing"
+        Path(__file__).resolve().parents[3]
+        / "python-package"
+        / "insightface"
+        / "model_zoo"
         / "trusted_keys"
         / "insightface-model-license-public-ed25519.pem"
     )

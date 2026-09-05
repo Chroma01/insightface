@@ -71,17 +71,25 @@ class MultiFacePhotoPage(BasePage):
         if not self.context.engine.is_loaded():
             self.show_error("Model is not loaded. Please open Models.")
             return
+        model_name = self.context.engine.model_name
 
         def task():
             faces = self.context.engine.detect_faces(self.image, source_path=self.image_path)
-            gallery = self.context.storage.load_all_gallery_embeddings()
+            gallery = self.context.storage.load_all_gallery_embeddings(
+                model_name=model_name
+            )
             rows = []
             overlays = []
             media_id = self.context.storage.add_media_item(self.image_path, "image", width=self.image.shape[1], height=self.image.shape[0], processed_at=timestamp_for_filename())
             for index, face in enumerate(faces):
                 result = None
                 if face.normed_embedding is not None and gallery:
-                    result_list = self.context.storage.search_embeddings(face.normed_embedding, self.context.config.default_top_k, self.context.config.recognition_threshold)
+                    result_list = self.context.storage.search_embeddings(
+                        face.normed_embedding,
+                        self.context.config.default_top_k,
+                        self.context.config.recognition_threshold,
+                        model_name=model_name,
+                    )
                     result = result_list[0] if result_list else None
                 name = result.person_name if result and result.similarity >= self.context.config.recognition_threshold else "Unknown"
                 similarity = result.similarity if result else 0.0

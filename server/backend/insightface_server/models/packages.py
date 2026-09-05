@@ -36,6 +36,13 @@ DEFAULT_LICENSES_DIR = (
 )
 MAX_ARCHIVE_BYTES = 400 * 1024 * 1024
 MAX_MODEL_BYTES = 256 * 1024 * 1024
+MODEL_ZOO_RELEASE_BASE_URL = (
+    "https://github.com/deepinsight/insightface/releases/download/model-zoo/"
+)
+
+
+def _model_zoo_release_url(package_name: str) -> str:
+    return f"{MODEL_ZOO_RELEASE_BASE_URL}{package_name}.zip"
 
 
 class ModelPackageError(RuntimeError):
@@ -64,6 +71,7 @@ class ModelPackage:
     url: str
     archive_sha256: str
     files: tuple[PackageFile, ...]
+    model_version: str | None = None
     license_summary: str = MODEL_LICENSE_SUMMARY
     license_id: str = MODEL_LICENSE_ID
     license_url: str = MODEL_LICENSE_URL
@@ -74,7 +82,7 @@ BUFFALO_L = ModelPackage(
     name="buffalo_l",
     release="v0.7",
     display_name="Buffalo_L",
-    url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+    url=_model_zoo_release_url("buffalo_l"),
     archive_sha256="80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f",
     files=(
         PackageFile(
@@ -107,7 +115,7 @@ BUFFALO_M = ModelPackage(
     name="buffalo_m",
     release="v0.7",
     display_name="Buffalo_M",
-    url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_m.zip",
+    url=_model_zoo_release_url("buffalo_m"),
     archive_sha256="d98264bd8f2dc75cbc2ddce2a14e636e02bb857b3051c234b737bf3b614edca9",
     files=(
         PackageFile(
@@ -136,11 +144,44 @@ BUFFALO_M = ModelPackage(
     ),
 )
 
+BUFFALO_S = ModelPackage(
+    name="buffalo_s",
+    release="v0.7",
+    display_name="Buffalo_S",
+    url=_model_zoo_release_url("buffalo_s"),
+    archive_sha256="d85a87f503f691807cd8bb97128bdf7a0660326cd9cd02657127fa978bab8b5e",
+    files=(
+        PackageFile(
+            filename="det_500m.onnx",
+            sha256="5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a",
+            model_id="buffalo_s-detection",
+            model_version="1",
+            task="face_detection",
+            input_size=(640, 640),
+            preprocessing_version="insightface-scrfd-1",
+            input_mean=127.5,
+            input_std=128.0,
+        ),
+        PackageFile(
+            filename="w600k_mbf.onnx",
+            sha256="9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f",
+            model_id="buffalo_s-recognition",
+            model_version="1",
+            task="face_recognition",
+            input_size=(112, 112),
+            preprocessing_version="insightface-arcface-1",
+            input_mean=127.5,
+            input_std=127.5,
+            embedding_dimension=512,
+        ),
+    ),
+)
+
 BUFFALO_SC = ModelPackage(
     name="buffalo_sc",
     release="v0.7",
     display_name="Buffalo_SC",
-    url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_sc.zip",
+    url=_model_zoo_release_url("buffalo_sc"),
     archive_sha256="57d31b56b6ffa911c8a73cfc1707c73cab76efe7f13b675a05223bf42de47c72",
     files=(
         PackageFile(
@@ -173,7 +214,7 @@ ANTELOPEV2 = ModelPackage(
     name="antelopev2",
     release="v0.7",
     display_name="AntelopeV2",
-    url="https://github.com/deepinsight/insightface/releases/download/v0.7/antelopev2.zip",
+    url=_model_zoo_release_url("antelopev2"),
     archive_sha256="8e182f14fc6e80b3bfa375b33eb6cff7ee05d8ef7633e738d1c89021dcf0c5c5",
     files=(
         PackageFile(
@@ -202,9 +243,85 @@ ANTELOPEV2 = ModelPackage(
     ),
 )
 
+RACCOON_S = ModelPackage(
+    name="raccoon_s",
+    release="model-zoo",
+    display_name="Raccoon S",
+    url=_model_zoo_release_url("raccoon_s"),
+    archive_sha256="f67a624ef8a4495899eb4359a8a6953f7b4c62a8399c5bc745c0e0f6582f898d",
+    files=(
+        PackageFile(
+            filename="det_10g_wo.onnx",
+            sha256="9f68c41d8150ec20939e5527bca5686d2fb921b5a4c1f2554d618e70c73e6b5b",
+            model_id="raccoon_s-detection",
+            model_version="raccoon_s",
+            task="face_detection",
+            input_size=(640, 640),
+            preprocessing_version="insightface-scrfd-1",
+            input_mean=127.5,
+            input_std=128.0,
+        ),
+        PackageFile(
+            filename="w600k_mbf.onnx",
+            sha256="9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f",
+            model_id="raccoon_s-recognition",
+            model_version="raccoon_s",
+            task="face_recognition",
+            input_size=(112, 112),
+            preprocessing_version="insightface-arcface-1",
+            input_mean=127.5,
+            input_std=127.5,
+            embedding_dimension=512,
+        ),
+    ),
+    model_version="raccoon_s",
+)
+
+RACCOON_L = ModelPackage(
+    name="raccoon_l",
+    release="model-zoo",
+    display_name="Raccoon L",
+    url=_model_zoo_release_url("raccoon_l"),
+    archive_sha256="70cd4f2f1de0a89dd0983bdac55a066a6178543f86e9ec87154f6f259bdded7e",
+    files=(
+        PackageFile(
+            filename="det_10g_wo.onnx",
+            sha256="9f68c41d8150ec20939e5527bca5686d2fb921b5a4c1f2554d618e70c73e6b5b",
+            model_id="raccoon_l-detection",
+            model_version="raccoon_l",
+            task="face_detection",
+            input_size=(640, 640),
+            preprocessing_version="insightface-scrfd-1",
+            input_mean=127.5,
+            input_std=128.0,
+        ),
+        PackageFile(
+            filename="w600k_r50.onnx",
+            sha256="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+            model_id="raccoon_l-recognition",
+            model_version="raccoon_l",
+            task="face_recognition",
+            input_size=(112, 112),
+            preprocessing_version="insightface-arcface-1",
+            input_mean=127.5,
+            input_std=127.5,
+            embedding_dimension=512,
+        ),
+    ),
+    model_version="raccoon_l",
+)
+
 PACKAGES: dict[str, ModelPackage] = {
     package.name: package
-    for package in (BUFFALO_L, BUFFALO_M, BUFFALO_SC, ANTELOPEV2)
+    for package in (
+        BUFFALO_L,
+        BUFFALO_M,
+        BUFFALO_S,
+        BUFFALO_SC,
+        ANTELOPEV2,
+        RACCOON_S,
+        RACCOON_L,
+    )
 }
 
 
@@ -251,10 +368,11 @@ def _package_matches_installed(package: ModelPackage, models_dir: Path) -> bool:
 
 
 def installed_package_name(models_dir: Path) -> str | None:
-    for package in PACKAGES.values():
-        if _package_matches_installed(package, models_dir):
-            return package.name
-    return None
+    try:
+        bundle = load_manifest(models_dir)
+    except RuntimeError:
+        return None
+    return bundle.model_id if bundle.model_id in PACKAGES else None
 
 
 def _requests_session() -> requests.Session:
@@ -387,7 +505,7 @@ def _manifest(package: ModelPackage, relative_bundle: Path) -> dict[str, object]
     return {
         "manifest_version": 1,
         "model_id": package.name,
-        "model_version": package.release,
+        "model_version": package.model_version or package.release,
         "display_name": package.display_name,
         "files": {
             "detector": (relative_bundle / detector.filename).as_posix(),

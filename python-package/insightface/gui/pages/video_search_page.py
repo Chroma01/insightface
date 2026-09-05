@@ -64,7 +64,14 @@ class VideoSearchPage(BasePage):
             self.show_error("Model is not loaded. Please open Models.")
             return
         person_id = self.person_combo.currentData()
-        gallery = [item for item in self.context.storage.load_all_gallery_embeddings() if item.get("person_id") == person_id]
+        model_name = self.context.engine.model_name
+        gallery = [
+            item
+            for item in self.context.storage.load_all_gallery_embeddings(
+                model_name=model_name
+            )
+            if item.get("person_id") == person_id
+        ]
         if not gallery:
             self.show_error("Target person has no registered face samples.")
             return

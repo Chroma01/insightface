@@ -84,17 +84,23 @@ The Workflows rail also keeps the local-processing notice visible in every
 mode: **All processing is local. No images, embeddings, or reports are uploaded
 automatically.**
 
-1. **PrivateFrame**: upload or drop a video, select `raccoon_s` or `raccoon_l`,
-   choose Normal / Fast / Ultra Fast, a privacy policy, and Gaussian / Mosaic,
+1. **PrivateFrame**: upload or drop a video and use the global model, model root,
+   and provider selected under **Models**. PrivateFrame enables processing only
+   for `raccoon_s` or `raccoon_l`; a missing Raccoon package can be downloaded
+   to the displayed global model root on first use, while an invalid installed
+   V2 package is reported before processing starts. Choose **Normal (up to 30
+   FPS)** or **Fast (up to 15 FPS)**, a privacy policy, and Gaussian / Mosaic,
    then process it directly through the PrivateFrame Python API on a background
-   worker. The page always writes `<video>_privateframe.json` to the selected
-   output directory. Choose **JSON only** to stop after analysis for later
-   editing, or **JSON + redacted video** to also write the paired
-   `<video>_privateframe.mp4`. **More Options** contains manual stride and
-   between-scan control, face coverage, encoding preset (Medium by default),
-   CRF quality, AAC audio, and selective-recognition Gallery
-   settings. Gallery people are selected from first-level person folders;
-   uncertain identities remain blurred.
+   worker. The output directory initially uses the
+   operating system's Videos directory (Movies on macOS), and remains editable.
+   The page always writes
+   `<video>_privateframe.json` to the selected output directory. Choose
+   **JSON only** to stop after analysis for later editing, or **JSON + redacted
+   video** to also write the paired `<video>_privateframe.mp4`. **More Options**
+   contains between-scan control, face coverage, encoding preset (Medium by
+   default), CRF quality, AAC audio, and selective-recognition Gallery settings.
+   Gallery people are selected from first-level person folders; uncertain
+   identities remain blurred.
 2. **Face Recognition**: one Query & Gallery workspace. One gallery image runs
    1:1 compare; multiple gallery images or a folder run 1:N gallery search.
 3. **Album Management**: one **Album** workspace for local folder import,
@@ -124,7 +130,9 @@ not shown in the left sidebar.
 
 Open **Models** from the top app bar or **Tools > Models** to choose:
 
-- model pack: `buffalo_l`, `buffalo_s`, `antelopev2`, or a custom model folder
+- global model pack: `raccoon_s`, `raccoon_l`, `buffalo_l`, `buffalo_m`,
+  `buffalo_s`, `buffalo_sc`, `antelopev2`, or a custom model folder
+- global InsightFace model root (the parent of `models/<model_name>`)
 - provider: Auto, CPU, CUDA when `CUDAExecutionProvider` is available
 - detection size: Auto, 128x128, 320x320, 640x640, 1024x1024
 - face swap model
@@ -142,16 +150,24 @@ listed in **Models > Downloads** as a third-party restore model and is not
 downloaded automatically. When enabled, face swap output is passed through the
 configured GFPGAN ONNX model using a 512x512 restore pass.
 
+New GUI installations default to `raccoon_s`, so the initially selected
+PrivateFrame workflow can run without a separate model selection. Existing
+`config.json` files keep their saved model selection.
+
 The GUI opens even when a model is missing. In that case, pages show
 `Model is not loaded. Please open Models.`
 
 The general face-recognition and face-swap GUI does not download models
 automatically. Open **Models > Downloads** and click **Refresh Download URLs**
-to fetch the latest release assets from:
+to fetch the dedicated `model-zoo` release assets from:
 
 ```text
-https://github.com/deepinsight/insightface/releases
+https://github.com/deepinsight/insightface/releases/tag/model-zoo
 ```
+
+InsightFace assets resolve under
+`https://github.com/deepinsight/insightface/releases/download/model-zoo/`.
+Cached official URLs from the former `v0.7` release are migrated when loaded.
 
 The refreshed URLs are cached in:
 
@@ -160,9 +176,8 @@ The refreshed URLs are cached in:
 ```
 
 The GFPGANv1.4 third-party entry is added by the GUI alongside refreshed
-InsightFace release assets. It points to the Hugging Face `resolve/main` file
-URL for `Gourieff/ReActor` and is saved under the same local model root after
-manual download.
+InsightFace release assets. Its separate third-party release URL is unchanged,
+and the file is saved under the same local model root after manual download.
 
 Downloaded archives are cached in:
 
@@ -170,10 +185,13 @@ Downloaded archives are cached in:
 ~/.insightface/gui/cache/models
 ```
 
-PrivateFrame is the exception: `raccoon_s` and `raccoon_l` use the standard
-InsightFace ModelZoo directory and may be downloaded there on first use.
+PrivateFrame is the exception: when the global model is `raccoon_s` or
+`raccoon_l`, it may be downloaded under the configured global model root on
+first use. PrivateFrame never silently falls back to `~/.insightface` or to a
+different Raccoon package.
 
-Zip model packages are extracted to:
+Zip model packages are extracted below the configured model root. With the
+default root, that is:
 
 ```text
 ~/.insightface/models/<model_name>/
@@ -186,9 +204,20 @@ For example:
 ~/.insightface/models/antelopev2/
 ```
 
-Users can also manually place model directories under `~/.insightface/models/`
-or choose **custom model directory** from **Models > Runtime** to reveal the
-custom directory field.
+Users can also manually place model directories under the configured
+`<model_root>/models/` directory or choose **custom model directory** from
+**Models > Runtime** to reveal the custom directory field. Choosing a catalog
+package clears the custom-directory override; choosing a custom directory saves
+that non-empty path as both the model identity and explicit model directory.
+
+Changing the global model settings invalidates the ordinary GUI FaceAnalysis
+engine and refreshes PrivateFrame. A PrivateFrame job already in progress keeps
+the model name, model root, and provider snapshot captured when it started; the
+new global selection applies to the next job. Runtime Sessions are not shared
+between the ordinary GUI and PrivateFrame. Within one GUI process, model
+downloads and PrivateFrame processing are mutually exclusive: a download keeps
+PrivateFrame disabled even if the Models dialog is closed, and Models cannot be
+opened until a running PrivateFrame job finishes.
 
 ## Face Recognition
 

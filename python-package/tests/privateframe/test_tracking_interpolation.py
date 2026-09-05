@@ -56,8 +56,11 @@ def test_between_scan_frames_defaults_to_interpolate(
         ("interpolate", 2, True),
         ("interpolate", 3, True),
         ("interpolate", 4, True),
+        ("interpolate", 8, True),
+        ("interpolate", 16, True),
         ("visual", 2, False),
         ("visual", 4, False),
+        ("visual", 16, False),
     ],
 )
 def test_interpolate_tracking_is_effective_only_for_sampled_strides(
@@ -130,6 +133,99 @@ def _state(
 
 def _by_frame(items: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     return {int(item["frame_idx"]): item for item in items}
+
+
+def _endpoint_affine_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fps: float,
+    scores: dict[int, float] | None = None,
+) -> tuple[StreamingEngine, list[tuple[int, int]]]:
+    engine = _interpolation_engine()
+    engine.fps = fps
+    engine.config = {
+        "streaming": {
+            "pre_roll_corridor_expansion": 4.0,
+            "max_corridor_side_pixels": 256,
+            "pre_roll_decode_chunk_frames": 3,
+        },
+        "tracking": {
+            "kalman_optical_flow": {
+                "endpoint_affine_repair": {"enabled": True},
+                "min_points": 4,
+            }
+        },
+        "revalidation": {
+            "policy": {
+                "rule_gate": {
+                    "short_track": {
+                        "moderate_verifier_p50": 0.40,
+                        "strong_verifier_p50": 0.80,
+                    }
+                }
+            }
+        },
+    }
+    engine.cache = SimpleNamespace(oldest_frame_index=lambda: 0)
+    engine.endpoint_affine_candidates = []
+    engine.endpoint_affine_jobs = 0
+    engine.endpoint_affine_frames = 0
+    engine.endpoint_verifier_checkpoints = 0
+    engine.endpoint_verifier_refinement_frames = 0
+    engine.endpoint_local_review_frames = {}
+    engine.recognition_engine = SimpleNamespace(
+        enabled=False,
+        max_frames_per_track=3,
+    )
+    engine.recognition_candidates = {}
+    engine._bidirectional_fusion_settings = lambda: {
+        "max_corridor_side_pixels": 256,
+        "max_materialized_bytes": 16 * 1024 * 1024,
+    }
+    engine._decode_frames = lambda first, last, **_kwargs: {
+        frame_idx: np.zeros((32, 32, 3), dtype=np.uint8)
+        for frame_idx in range(first, last + 1)
+    }
+
+    class FakeAffineState:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def step(self, _frame: np.ndarray) -> dict[str, Any]:
+            return {
+                "valid": True,
+                "box": np.asarray([10.0, 10.0, 30.0, 30.0]),
+                "selected": 12,
+                "inliers": 10,
+                "quality": 0.9,
+                "affine_scale": 1.0,
+                "affine_rotation_degrees": 0.0,
+            }
+
+    monkeypatch.setattr(streaming_module, "AffineEndpointState", FakeAffineState)
+    verify_calls: list[tuple[int, int]] = []
+
+    def verify_once(
+        _frame: np.ndarray,
+        item: dict[str, Any],
+        _box: list[float],
+        **_kwargs: Any,
+    ) -> float:
+        verify_calls.append(
+            (
+                int(item["frame_idx"]),
+                len(engine.endpoint_affine_candidates),
+            )
+        )
+        return float((scores or {}).get(int(item["frame_idx"]), 1.0))
+
+    monkeypatch.setattr(engine, "_verify_once", verify_once)
+    monkeypatch.setattr(
+        engine,
+        "_capture_tracking_recognition_candidate",
+        lambda *_args, **_kwargs: None,
+    )
+    return engine, verify_calls
 
 
 def test_detector_anchor_interpolation_uses_linear_center_and_log_size() -> None:
@@ -496,7 +592,9 @@ def test_interpolate_endpoint_is_capped_before_every_close_boundary(
         "anchor_frame": anchor_frame,
         "target_frame": target,
         "direction": 1,
-        "run_neural_review": False,
+        "run_neural_review": True,
+        "sparse_neural_review": True,
+        "emit_before": None,
         "repair_reason": "interpolate_unanchored_endpoint",
         "boundary_reason": close_reason,
         "boundary_frame_exclusive": boundary,
@@ -504,58 +602,21 @@ def test_interpolate_endpoint_is_capped_before_every_close_boundary(
     assert target < boundary
 
 
-def test_interpolate_endpoint_affine_never_runs_neural_review(
+def test_interpolate_endpoint_affine_runs_sparse_verifier_without_local_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    engine = _interpolation_engine()
-    engine.config = {
-        "streaming": {
-            "pre_roll_corridor_expansion": 4.0,
-            "max_corridor_side_pixels": 256,
-        },
-        "tracking": {
-            "kalman_optical_flow": {
-                "endpoint_affine_repair": {"enabled": True},
-            }
-        },
-    }
-    engine.cache = SimpleNamespace(oldest_frame_index=lambda: 0)
-    engine.endpoint_affine_candidates = []
-    engine.endpoint_affine_jobs = 0
-    engine.endpoint_affine_frames = 0
+    engine, verify_calls = _endpoint_affine_engine(
+        monkeypatch,
+        fps=30.0,
+    )
     engine.settings = {
         "endpoint_extension": 8,
         "reliable_endpoint_extension": 45,
         "reliable_endpoint_min_detector_frames": 20,
     }
-    engine._bidirectional_fusion_settings = lambda: {
-        "max_corridor_side_pixels": 256,
-        "max_materialized_bytes": 16 * 1024 * 1024,
-    }
-    engine._decode_frames = lambda first, last, **_kwargs: {
-        frame_idx: np.zeros((32, 32, 3), dtype=np.uint8)
-        for frame_idx in range(first, last + 1)
-    }
-
-    class FakeAffineState:
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
-
-        def step(self, _frame: np.ndarray) -> dict[str, Any]:
-            return {
-                "valid": True,
-                "box": np.asarray([10.0, 10.0, 30.0, 30.0]),
-                "selected": 12,
-                "inliers": 10,
-                "quality": 0.8,
-                "affine_scale": 1.0,
-                "affine_rotation_degrees": 0.0,
-            }
-
-    monkeypatch.setattr(streaming_module, "AffineEndpointState", FakeAffineState)
 
     def forbidden(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("interpolate endpoint repair must not run neural review")
+        raise AssertionError("strong sparse checkpoint must not run Local SCRFD")
 
     monkeypatch.setattr(engine, "_measure_review", forbidden)
 
@@ -570,6 +631,7 @@ def test_interpolate_endpoint_affine_never_runs_neural_review(
     )
 
     assert emitted == 2
+    assert verify_calls == [(2, 0)]
     assert len(engine.endpoint_affine_candidates) == 2
     assert all(
         item["endpoint_repair_reason"] == "interpolate_unanchored_endpoint"
@@ -577,9 +639,233 @@ def test_interpolate_endpoint_affine_never_runs_neural_review(
         and item["endpoint_boundary_frame_exclusive"] == 3
         and item["reduced_assurance"] is True
         and item["_review_measurement"]["local_match_count"] == -1
-        and item["_review_measurement"]["verifier_face_probability"] is None
         for item in engine.endpoint_affine_candidates
     )
+    assert engine.endpoint_affine_candidates[0]["_review_measurement"][
+        "verifier_face_probability"
+    ] is None
+    assert engine.endpoint_affine_candidates[1]["_review_measurement"][
+        "verifier_face_probability"
+    ] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("direction", "anchor_frame", "target_frame", "expected_checks"),
+    [
+        (1, 0, 10, [8, 10]),
+        (-1, 10, 0, [2, 0]),
+    ],
+)
+def test_sparse_endpoint_verifier_is_symmetric_and_commits_whole_buckets(
+    monkeypatch: pytest.MonkeyPatch,
+    direction: int,
+    anchor_frame: int,
+    target_frame: int,
+    expected_checks: list[int],
+) -> None:
+    engine, verify_calls = _endpoint_affine_engine(
+        monkeypatch,
+        fps=30.0,
+    )
+
+    emitted = engine._run_endpoint_affine(
+        track_id="t00001",
+        anchor_frame=anchor_frame,
+        anchor_box=np.asarray([10.0, 10.0, 30.0, 30.0]),
+        target_frame=target_frame,
+        direction=direction,
+        run_neural_review=True,
+        sparse_neural_review=True,
+    )
+
+    assert emitted == 10
+    assert [frame for frame, _count in verify_calls] == expected_checks
+    # Nothing from the active bucket is visible at its checkpoint. The second
+    # checkpoint sees only the eight frames released by the first one.
+    assert [count for _frame, count in verify_calls] == [0, 8]
+    assert [item["frame_idx"] for item in engine.endpoint_affine_candidates] == list(
+        range(anchor_frame + direction, target_frame + direction, direction)
+    )
+
+
+def test_sparse_endpoint_failed_checkpoint_refines_only_the_boundary_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, verify_calls = _endpoint_affine_engine(
+        monkeypatch,
+        fps=8.0,
+        scores={4: 0.0},
+    )
+    # Keep this test focused on Verifier boundary refinement rather than the
+    # independent Local-SCRFD anomaly fallback.
+    engine.endpoint_local_review_frames = {"t00001": {0}}
+
+    emitted = engine._run_endpoint_affine(
+        track_id="t00001",
+        anchor_frame=0,
+        anchor_box=np.asarray([10.0, 10.0, 30.0, 30.0]),
+        target_frame=4,
+        direction=1,
+        run_neural_review=True,
+        sparse_neural_review=True,
+    )
+
+    assert emitted == 3
+    assert [item["frame_idx"] for item in engine.endpoint_affine_candidates] == [
+        1,
+        2,
+        3,
+    ]
+    assert [frame for frame, _count in verify_calls] == [2, 4, 3]
+    assert engine.endpoint_verifier_refinement_frames == 1
+
+
+def test_sparse_endpoint_checkpoint_interval_respects_materialized_memory_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, verify_calls = _endpoint_affine_engine(
+        monkeypatch,
+        fps=120.0,
+    )
+    # The 20px test box with corridor expansion 4 materializes a 100px crop.
+    frame_bytes = 100 * 100 * 3
+    engine._bidirectional_fusion_settings = lambda: {
+        "max_corridor_side_pixels": 256,
+        "max_materialized_bytes": 4 * frame_bytes,
+    }
+    decoded_ranges: list[tuple[int, int]] = []
+
+    def decode_frames(first: int, last: int, **_kwargs: Any) -> dict[int, np.ndarray]:
+        decoded_ranges.append((first, last))
+        return {
+            frame_idx: np.zeros((32, 32, 3), dtype=np.uint8)
+            for frame_idx in range(first, last + 1)
+        }
+
+    engine._decode_frames = decode_frames
+
+    emitted = engine._run_endpoint_affine(
+        track_id="t00001",
+        anchor_frame=0,
+        anchor_box=np.asarray([10.0, 10.0, 30.0, 30.0]),
+        target_frame=10,
+        direction=1,
+        run_neural_review=True,
+        sparse_neural_review=True,
+    )
+
+    assert emitted == 10
+    # 120 FPS would normally check every 30 frames. A four-crop memory budget
+    # tightens that interval so the pending bucket cannot exceed the budget.
+    assert [frame for frame, _count in verify_calls] == [4, 8, 10]
+    assert max(last - first + 1 for first, last in decoded_ranges[1:]) <= 3
+
+
+@pytest.mark.parametrize(
+    ("candidate_frames", "expected_local_frames"),
+    [
+        ([0, 8, 16], []),
+        ([0, 1, 2], [2, 10, 18]),
+    ],
+)
+def test_endpoint_local_scrfd_runs_at_most_one_hz_for_recognition_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_frames: list[int],
+    expected_local_frames: list[int],
+) -> None:
+    engine, _verify_calls = _endpoint_affine_engine(
+        monkeypatch,
+        fps=8.0,
+    )
+    engine.recognition_engine = SimpleNamespace(
+        enabled=True,
+        max_frames_per_track=3,
+    )
+    engine.recognition_candidates = {
+        "t00001": [
+            (f"detection:{frame_idx}", SimpleNamespace(frame_index=frame_idx))
+            for frame_idx in candidate_frames
+        ]
+    }
+    local_calls: list[int] = []
+
+    def local_review(
+        _image: np.ndarray,
+        item: dict[str, Any],
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        local_calls.append(int(item["frame_idx"]))
+        review = engine._empty_local_review()
+        review.update(
+            {
+                "local_match_count": 1,
+                "local_confidence": 0.9,
+                "local_box": list(item["box"]),
+                "local_landmarks": None,
+                "local_review_reason": "endpoint_recognition_candidate",
+                "verifier_face_probability": 1.0,
+            }
+        )
+        return review
+
+    monkeypatch.setattr(engine, "_measure_review", local_review)
+    monkeypatch.setattr(
+        engine,
+        "_refine_tracking_geometry",
+        lambda *_args, **_kwargs: None,
+    )
+
+    engine._run_endpoint_affine(
+        track_id="t00001",
+        anchor_frame=0,
+        anchor_box=np.asarray([10.0, 10.0, 30.0, 30.0]),
+        target_frame=18,
+        direction=1,
+        run_neural_review=True,
+        sparse_neural_review=True,
+    )
+
+    assert local_calls == expected_local_frames
+
+
+def test_interpolate_backward_endpoint_stops_at_the_latest_scene_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _interpolation_engine()
+    engine.settings = {
+        "endpoint_extension": 8,
+        "reliable_endpoint_extension": 45,
+        "reliable_endpoint_min_detector_frames": 20,
+    }
+    engine.cache = SimpleNamespace(oldest_frame_index=lambda: 0)
+    engine.audits = [
+        {"frame_idx": 5, "scene_cut_from_previous": True},
+    ]
+    state = _state(left_frame=10)
+    state.track["detections"] = [
+        {"frame_idx": 10, "box": [10.0, 10.0, 30.0, 30.0]},
+    ]
+    calls: list[dict[str, Any]] = []
+
+    def run_endpoint(**kwargs: Any) -> int:
+        calls.append(kwargs)
+        return abs(int(kwargs["target_frame"]) - int(kwargs["anchor_frame"]))
+
+    monkeypatch.setattr(engine, "_run_endpoint_affine", run_endpoint)
+
+    emitted = engine._repair_interpolate_endpoint(
+        state,
+        direction=-1,
+        extension=8,
+        close_reason="initial_pre_roll",
+    )
+
+    assert emitted == 5
+    assert calls[0]["anchor_frame"] == 10
+    assert calls[0]["target_frame"] == 5
+    assert calls[0]["direction"] == -1
+    assert calls[0]["boundary_frame_exclusive"] is None
 
 
 def test_interpolate_endpoint_publication_filters_rejected_and_extends_contiguously() -> None:

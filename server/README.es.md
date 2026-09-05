@@ -129,7 +129,8 @@ docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license
 ```
 
-La herramienta también admite `buffalo_m`, `buffalo_sc` y `antelopev2`.
+La herramienta admite los siete paquetes: `buffalo_l`, `buffalo_m`,
+`buffalo_s`, `buffalo_sc`, `antelopev2`, `raccoon_s` y `raccoon_l`.
 Escribe `manifest.json` y el `MODEL.LICENSE` firmado; `models verify` comprueba
 el paquete. Los términos del modelo son independientes de la licencia del
 código Server.

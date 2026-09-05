@@ -146,10 +146,12 @@ matches = client.search("employees", "query.jpg", limit=5)
 - Back up the SQLite database and configured crop storage together while writes are stopped or by using a SQLite-safe snapshot method.
 - API keys are stored as hashes. Supplying a different `INSIGHTFACE_API_KEY` on a later start intentionally rotates the active key for that data volume.
 - Do not log images, embeddings or keys. Keep broad CORS disabled unless required.
-- Model files are not included in the image. InsightFace-provided open-source
-  pretrained models, including `buffalo_l`, are for non-commercial research use
-  only. Commercial use requires a separate license; visit
-  <https://www.insightface.ai>. The **System** page displays the same notice.
+- Model files are not included in the image. The **System** page reads the
+  active package's `MODEL.LICENSE` and displays its actual grant. If that file
+  is absent, the Server reports the model as non-commercial by default. An
+  existing but invalid, mismatched, inactive, or expired signed license still
+  prevents startup. Commercial use requires a separate license; visit
+  <https://www.insightface.ai>.
 
 ## 10. Troubleshooting
 
@@ -169,11 +171,19 @@ docker compose -f server/deploy/compose.cpu.yml \
 
 Supported public packages are `buffalo_l` (`det_10g.onnx` +
 `w600k_r50.onnx`), `buffalo_m` (`det_2.5g.onnx` + `w600k_r50.onnx`),
-`buffalo_sc` (`det_500m.onnx` + `w600k_mbf.onnx`), and `antelopev2`
-(`scrfd_10g_bnkps.onnx` + `glintr100.onnx`). Installation creates
+`buffalo_s` and `buffalo_sc` (`det_500m.onnx` + `w600k_mbf.onnx`),
+`antelopev2` (`scrfd_10g_bnkps.onnx` + `glintr100.onnx`), `raccoon_s`
+(`det_10g_wo.onnx` + `w600k_mbf.onnx`), and `raccoon_l`
+(`det_10g_wo.onnx` + `w600k_r50.onnx`). Server installs only detection and
+recognition from each package; a Raccoon verifier is not installed or loaded.
+Installation creates
 `manifest.json` and signed `MODEL.LICENSE`. Without `--accept-license`, the
 tool prints the terms and exits without downloading. `models verify` validates
-the package identity, signed license, validity dates, and current authorization.
+the package identity, signed license, validity dates, and current authorization;
+unlike runtime display fallback, this explicit verification command requires a
+signed license file.
+Catalog archives come from the dedicated
+[`model-zoo` GitHub Release](https://github.com/deepinsight/insightface/releases/tag/model-zoo).
 
 Public InsightFace pretrained models are for non-commercial research unless a
 separate commercial license has been issued. A private model can use the same

@@ -20,7 +20,6 @@ where = ["backend"]
 
 [tool.setuptools.package-data]
 "insightface_server.licensing" = [
-  "trusted_keys/*.pem",
   "defaults/*/MODEL.LICENSE",
 ]
 

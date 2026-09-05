@@ -1,111 +1,199 @@
+import hashlib
 import json
 
 import pytest
 
 from insightface.model_zoo.package_manifest import (
     MODEL_PACKAGE_TASKS,
+    has_model_package_manifest,
     load_model_package,
+    model_package_manifest_version,
     verify_model_artifact,
 )
 
 
-@pytest.mark.parametrize("name", ["raccoon_s", "raccoon_l"])
-def test_supported_packages_expose_exact_tasks(manifest_package_factory, name):
+def _write_manifest(package, manifest):
+    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["raccoon_s", "raccoon_l", "custom_package"])
+def test_v2_exposes_identity_and_declared_tasks(manifest_package_factory, name):
     package, _manifest = manifest_package_factory(name)
 
     descriptor = load_model_package(package)
 
     assert descriptor.name == name
+    assert descriptor.model_id == name
+    assert descriptor.manifest_version == 2
+    assert descriptor.source_schema == "unified-v2"
+    assert descriptor.license_path == package / "MODEL.LICENSE"
     assert tuple(descriptor.tasks) == MODEL_PACKAGE_TASKS
+    assert has_model_package_manifest(package) is True
+    assert model_package_manifest_version(package) == 2
 
 
-def test_descriptor_parsing_defers_model_binary_verification(
+def test_known_tasks_require_only_file_and_receive_defaults(
     manifest_package_factory,
 ):
-    package, _manifest = manifest_package_factory()
+    package, manifest = manifest_package_factory()
+    manifest["tasks"] = {
+        task: {"file": value["file"]} for task, value in manifest["tasks"].items()
+    }
+    _write_manifest(package, manifest)
+
     descriptor = load_model_package(package)
 
-    # Parsing metadata does not eagerly hash every potentially large ONNX file.
-    (package / "verifier.onnx").write_bytes(b"corrupt")
+    assert descriptor.task("detection").metadata == {
+        "preprocessing": {"mean": 127.5, "std": 128.0},
+        "preprocessing_version": "insightface-scrfd-1",
+    }
+    assert descriptor.task("verification").metadata == {
+        "preprocessing": "embedded",
+        "expansion": 1.3,
+    }
+    assert descriptor.task("recognition").metadata == {
+        "preprocessing": {"mean": 127.5, "std": 127.5},
+        "preprocessing_version": "insightface-arcface-1",
+        "input_size": (112, 112),
+        "embedding_dimension": 512,
+    }
+    for task in MODEL_PACKAGE_TASKS:
+        assert "sha256" not in descriptor.task(task).as_config()
 
-    assert verify_model_artifact(descriptor.task("detection")).name == "detector.onnx"
-    with pytest.raises(RuntimeError, match="SHA256 mismatch"):
-        verify_model_artifact(descriptor.task("verification"))
 
-
-@pytest.mark.parametrize("mutation", ["missing", "extra"])
-def test_manifest_top_level_tasks_are_exact(manifest_package_factory, mutation):
+def test_unknown_root_task_and_metadata_are_ignored(manifest_package_factory):
     package, manifest = manifest_package_factory()
-    if mutation == "missing":
-        manifest.pop("verification")
-    else:
-        manifest["attribute"] = {}
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest.update(
+        {
+            "model_version": "ignored",
+            "sha256": "ignored",
+            "future_root": {"anything": True},
+        }
+    )
+    manifest["tasks"]["future_task"] = "opaque future value"
+    manifest["tasks"]["detection"].update(
+        {
+            "future_metadata": [1, 2, 3],
+        }
+    )
+    _write_manifest(package, manifest)
 
-    with pytest.raises(ValueError, match="keys must be exactly"):
+    descriptor = load_model_package(package)
+
+    assert tuple(descriptor.tasks) == MODEL_PACKAGE_TASKS
+    assert set(descriptor.task("detection").metadata) == {
+        "preprocessing",
+        "preprocessing_version",
+    }
+
+
+@pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
+def test_task_sha256_is_optional_and_verified_when_declared(
+    manifest_package_factory,
+    task,
+):
+    package, manifest = manifest_package_factory()
+    model_path = package / manifest["tasks"][task]["file"]
+    expected = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    manifest["tasks"][task]["sha256"] = expected
+    _write_manifest(package, manifest)
+
+    descriptor = load_model_package(package).task(task)
+
+    assert descriptor.sha256 == expected
+    assert descriptor.as_config()["sha256"] == expected
+    assert verify_model_artifact(descriptor) == model_path
+
+
+@pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
+@pytest.mark.parametrize(
+    ("sha256", "error_type"),
+    [
+        (None, TypeError),
+        (False, TypeError),
+        ("", ValueError),
+        ("a" * 63, ValueError),
+        ("a" * 65, ValueError),
+        ("A" * 64, ValueError),
+        ("g" * 64, ValueError),
+        (f"{'a' * 64} ", ValueError),
+    ],
+)
+def test_task_sha256_requires_exact_lowercase_hex(
+    manifest_package_factory,
+    task,
+    sha256,
+    error_type,
+):
+    package, manifest = manifest_package_factory()
+    manifest["tasks"][task]["sha256"] = sha256
+    _write_manifest(package, manifest)
+
+    with pytest.raises(error_type, match=rf"tasks\.{task}\.sha256"):
+        load_model_package(package)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_type"),
+    [
+        ("manifest_version", 1, ValueError),
+        ("manifest_version", "2", ValueError),
+        ("model_id", "../bad", ValueError),
+        ("tasks", [], TypeError),
+        ("license", "LICENSE.txt", ValueError),
+    ],
+)
+def test_v2_validates_required_root_fields(
+    manifest_package_factory,
+    field,
+    value,
+    error_type,
+):
+    package, manifest = manifest_package_factory()
+    manifest[field] = value
+    _write_manifest(package, manifest)
+
+    with pytest.raises(error_type):
+        load_model_package(package)
+
+
+@pytest.mark.parametrize("field", ["model_id", "tasks", "license"])
+def test_v2_rejects_missing_required_root_fields(manifest_package_factory, field):
+    package, manifest = manifest_package_factory()
+    manifest.pop(field)
+    _write_manifest(package, manifest)
+
+    with pytest.raises(ValueError, match="missing required fields"):
         load_model_package(package)
 
 
 @pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
-def test_manifest_task_fields_are_exact(manifest_package_factory, task):
+def test_known_v2_task_requires_file(manifest_package_factory, task):
     package, manifest = manifest_package_factory()
-    manifest[task]["unexpected"] = True
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest["tasks"][task].pop("file")
+    _write_manifest(package, manifest)
 
-    with pytest.raises(ValueError, match=rf"{task} keys must be exactly"):
+    with pytest.raises(ValueError, match=rf"tasks\.{task}\.file is required"):
         load_model_package(package)
 
 
-@pytest.mark.parametrize(
-    "task",
-    MODEL_PACKAGE_TASKS,
-)
+@pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
 @pytest.mark.parametrize(
     "preprocessing",
-    [
-        "embedded",
-        {"mean": 12.5, "std": 64.0},
-    ],
+    ["embedded", {"mean": 12.5, "std": 64.0}],
 )
-def test_every_task_accepts_both_preprocessing_modes(
+def test_every_known_task_accepts_both_preprocessing_modes(
     manifest_package_factory,
     task,
     preprocessing,
 ):
     package, manifest = manifest_package_factory()
-    manifest[task]["preprocessing"] = preprocessing
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest["tasks"][task]["preprocessing"] = preprocessing
+    _write_manifest(package, manifest)
 
     descriptor = load_model_package(package).task(task)
 
     assert descriptor.metadata["preprocessing"] == preprocessing
-
-
-@pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
-def test_preprocessing_is_required_for_every_task(
-    manifest_package_factory,
-    task,
-):
-    package, manifest = manifest_package_factory()
-    manifest[task].pop("preprocessing")
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(ValueError, match=rf"{task} keys must be exactly"):
-        load_model_package(package)
-
-
-@pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
-def test_legacy_top_level_mean_and_std_are_rejected(
-    manifest_package_factory,
-    task,
-):
-    package, manifest = manifest_package_factory()
-    manifest[task].pop("preprocessing")
-    manifest[task].update({"mean": 0.0, "std": 1.0})
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(ValueError, match=rf"{task} keys must be exactly"):
-        load_model_package(package)
 
 
 @pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
@@ -117,67 +205,39 @@ def test_legacy_top_level_mean_and_std_are_rejected(
         (1, TypeError),
         ([], TypeError),
         ("external", ValueError),
+        ({}, ValueError),
+        ({"mean": 0.0}, ValueError),
+        ({"mean": 0.0, "std": 0.0}, ValueError),
+        ({"mean": float("nan"), "std": 1.0}, ValueError),
     ],
 )
-def test_preprocessing_rejects_wrong_union_types_and_unknown_strings(
+def test_known_task_rejects_invalid_explicit_preprocessing(
     manifest_package_factory,
     task,
     preprocessing,
     error_type,
 ):
     package, manifest = manifest_package_factory()
-    manifest[task]["preprocessing"] = preprocessing
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest["tasks"][task]["preprocessing"] = preprocessing
+    _write_manifest(package, manifest)
 
-    with pytest.raises(error_type, match=rf"{task}\.preprocessing"):
+    with pytest.raises(error_type, match=rf"tasks\.{task}\.preprocessing"):
         load_model_package(package)
 
 
-@pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
 @pytest.mark.parametrize(
-    "preprocessing",
+    ("task", "field", "value", "error_type"),
     [
-        {},
-        {"mean": 0.0},
-        {"std": 1.0},
-        {"mean": 0.0, "std": 1.0, "mode": "external"},
+        ("detection", "preprocessing_version", "", ValueError),
+        ("verification", "expansion", 0.0, ValueError),
+        ("verification", "expansion", True, TypeError),
+        ("recognition", "preprocessing_version", 1, TypeError),
+        ("recognition", "input_size", [112], TypeError),
+        ("recognition", "input_size", [112, 96], ValueError),
+        ("recognition", "embedding_dimension", 0, ValueError),
     ],
 )
-def test_preprocessing_mean_std_mapping_has_exact_fields(
-    manifest_package_factory,
-    task,
-    preprocessing,
-):
-    package, manifest = manifest_package_factory()
-    manifest[task]["preprocessing"] = preprocessing
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(
-        ValueError,
-        match=rf"{task}\.preprocessing keys must be exactly",
-    ):
-        load_model_package(package)
-
-
-@pytest.mark.parametrize("task", MODEL_PACKAGE_TASKS)
-@pytest.mark.parametrize(
-    ("field", "value", "error_type"),
-    [
-        ("mean", True, TypeError),
-        ("mean", "0", TypeError),
-        ("mean", None, TypeError),
-        ("mean", float("nan"), ValueError),
-        ("mean", float("inf"), ValueError),
-        ("std", False, TypeError),
-        ("std", "1", TypeError),
-        ("std", None, TypeError),
-        ("std", 0.0, ValueError),
-        ("std", -1.0, ValueError),
-        ("std", float("nan"), ValueError),
-        ("std", float("inf"), ValueError),
-    ],
-)
-def test_preprocessing_mean_std_values_are_strictly_validated(
+def test_known_task_validates_recognized_optional_metadata(
     manifest_package_factory,
     task,
     field,
@@ -185,51 +245,64 @@ def test_preprocessing_mean_std_values_are_strictly_validated(
     error_type,
 ):
     package, manifest = manifest_package_factory()
-    preprocessing = {"mean": 0.0, "std": 1.0}
-    preprocessing[field] = value
-    manifest[task]["preprocessing"] = preprocessing
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest["tasks"][task][field] = value
+    _write_manifest(package, manifest)
 
-    with pytest.raises(
-        error_type,
-        match=rf"{task}\.preprocessing\.{field}",
-    ):
+    with pytest.raises(error_type):
         load_model_package(package)
 
 
-def test_legacy_model_name_keys_are_strictly_rejected(
+def test_task_without_sha256_does_not_hash_or_compare_model_content(
+    manifest_package_factory,
+):
+    package, _manifest = manifest_package_factory()
+    descriptor = load_model_package(package)
+    (package / "verifier.onnx").write_bytes(b"changed-after-parse")
+
+    assert verify_model_artifact(descriptor.task("verification")) == (
+        package / "verifier.onnx"
+    )
+
+
+def test_declared_sha256_detects_model_changed_after_parse(
     manifest_package_factory,
 ):
     package, manifest = manifest_package_factory()
-    legacy_manifest = {
-        "detector": manifest["detection"],
-        "verifier": manifest["verification"],
-        "recognizer": manifest["recognition"],
-    }
-    (package / "manifest.json").write_text(
-        json.dumps(legacy_manifest),
-        encoding="utf-8",
-    )
+    model_path = package / "verifier.onnx"
+    manifest["tasks"]["verification"]["sha256"] = hashlib.sha256(
+        model_path.read_bytes()
+    ).hexdigest()
+    _write_manifest(package, manifest)
+    descriptor = load_model_package(package).task("verification")
 
-    with pytest.raises(ValueError, match="keys must be exactly"):
-        load_model_package(package)
+    model_path.write_bytes(b"changed-after-parse")
+
+    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+        verify_model_artifact(descriptor)
 
 
-def test_manifest_model_path_cannot_escape_package(manifest_package_factory, tmp_path):
+def test_selected_model_must_exist_when_resolved(manifest_package_factory):
+    package, _manifest = manifest_package_factory()
+    descriptor = load_model_package(package)
+    (package / "verifier.onnx").unlink()
+
+    with pytest.raises(FileNotFoundError, match="model file does not exist"):
+        verify_model_artifact(descriptor.task("verification"))
+
+
+def test_model_path_cannot_escape_package(manifest_package_factory):
     package, manifest = manifest_package_factory()
-    outside = tmp_path / "outside.onnx"
-    outside.write_bytes(b"outside")
-    manifest["detection"]["file"] = "../outside.onnx"
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest["tasks"]["detection"]["file"] = "../outside.onnx"
+    _write_manifest(package, manifest)
 
     with pytest.raises(ValueError, match="escapes"):
         load_model_package(package)
 
 
-def test_manifest_tasks_must_reference_distinct_files(manifest_package_factory):
+def test_known_tasks_must_reference_distinct_files(manifest_package_factory):
     package, manifest = manifest_package_factory()
-    manifest["verification"]["file"] = manifest["detection"]["file"]
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest["tasks"]["verification"]["file"] = manifest["tasks"]["detection"]["file"]
+    _write_manifest(package, manifest)
 
     with pytest.raises(ValueError, match="distinct files"):
         load_model_package(package)
@@ -253,3 +326,16 @@ def test_verification_rejects_package_root_replaced_by_symlink(
 
     with pytest.raises(ValueError, match="escapes"):
         verify_model_artifact(descriptor.task("detection"))
+
+
+@pytest.mark.parametrize("version", [None, 1, 3])
+def test_non_v2_manifest_is_not_discovered(manifest_package_factory, version):
+    package, manifest = manifest_package_factory()
+    if version is None:
+        manifest.pop("manifest_version")
+    else:
+        manifest["manifest_version"] = version
+    _write_manifest(package, manifest)
+
+    assert has_model_package_manifest(package) is False
+    assert model_package_manifest_version(package) == version

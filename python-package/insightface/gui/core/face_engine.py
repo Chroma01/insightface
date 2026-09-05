@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import glob
 import os
 import threading
 import time
@@ -11,8 +10,15 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
+from ...app.face_analysis import FaceAnalysis
 from ...model_zoo.onnxruntime_utils import get_default_providers
+from ...model_zoo.package_manifest import (
+    SUPPORTED_MANIFEST_PACKAGES,
+    has_model_package_manifest,
+    load_model_package,
+)
 from .constants import AUTO_DET_SIZES, DEFAULT_DET_SIZE, DEFAULT_MODEL_NAME, DEFAULT_THRESHOLD
+from .i18n import tr
 from .logging import get_logger
 from .models import CompareResult, FaceRecord
 from .quality import score_face
@@ -47,6 +53,7 @@ class FaceEngine:
         self.auto_det_size = len(self.det_sizes) > 1
         self.models: Dict[str, Any] = {}
         self.det_model = None
+        self.face_analysis: Optional[FaceAnalysis] = None
         self.loaded = False
         self.last_error = ""
         self.embedding_dim: Optional[int] = None
@@ -71,123 +78,137 @@ class FaceEngine:
         with self._lock:
             self.loaded = False
             self.last_error = ""
-            self.models.clear()
+            self.models = {}
+            self.det_model = None
+            self.face_analysis = None
+            self.embedding_dim = None
+            self.active_providers = []
+            self.ctx_id = -1
+            self._prepared_det_size = None
             start = time.perf_counter()
             model_dir = self.resolve_model_dir()
-            if not model_dir.exists():
+            if not model_dir.is_dir():
                 self.last_error = (
                     f"Model directory not found: {model_dir}. Configure a local model directory "
                     "or install the model pack first."
                 )
                 LOGGER.warning(self.last_error)
                 return
-            onnx_files = sorted(glob.glob(str(model_dir / "*.onnx")))
-            if not onnx_files:
+            official_manifest_package = (
+                self.model_name in SUPPORTED_MANIFEST_PACKAGES
+                and not self._custom_model_directory_selected()
+            )
+            if official_manifest_package:
+                try:
+                    package = load_model_package(model_dir)
+                    if package.name != self.model_name:
+                        raise ValueError(
+                            f"manifest model_id {package.name!r} does not match "
+                            f"the selected package {self.model_name!r}"
+                        )
+                    missing_tasks = [
+                        task
+                        for task in ("detection", "recognition")
+                        if task not in package.tasks
+                    ]
+                    if missing_tasks:
+                        raise ValueError(
+                            "manifest is missing required GUI task(s): "
+                            + ", ".join(missing_tasks)
+                        )
+                except Exception as exc:
+                    self.last_error = (
+                        f"Official model package {self.model_name!r} requires a valid "
+                        f"V2 manifest: {exc}"
+                    )
+                    LOGGER.warning(self.last_error)
+                    return
+                manifest_backed = True
+            else:
+                manifest_backed = has_model_package_manifest(model_dir)
+            if not manifest_backed and not any(model_dir.glob("*.onnx")):
                 self.last_error = f"No .onnx model files found in {model_dir}."
                 LOGGER.warning(self.last_error)
                 return
             try:
-                from insightface.app.common import Face
-            except Exception as exc:
-                self.last_error = f"InsightFace runtime import failed: {exc}"
-                LOGGER.exception(self.last_error)
-                return
-
-            del Face
-            try:
-                for onnx_file in onnx_files:
-                    model = self._load_model_from_onnx(onnx_file)
-                    if model is None:
-                        continue
-                    if model.taskname in self.models:
-                        continue
-                    self.models[model.taskname] = model
-                if "detection" not in self.models:
+                analysis = self._create_face_analysis(
+                    model_dir,
+                    manifest_backed=manifest_backed,
+                )
+                if "detection" not in analysis.models:
                     self.last_error = f"No detection model found in {model_dir}."
                     return
-                self.det_model = self.models["detection"]
-                ctx_id = (
-                    -1
-                    if self.requested_providers[0] == "CPUExecutionProvider"
-                    else 0
+                ctx_id = -1 if self._primary_provider() == "CPUExecutionProvider" else 0
+                analysis.prepare(
+                    ctx_id,
+                    det_size=self._detector_input_size(),
+                    det_thresh=0.5,
                 )
                 self.ctx_id = ctx_id
-                for taskname, model in self.models.items():
-                    if taskname == "detection":
-                        self._prepare_detection()
-                    else:
-                        model.prepare(ctx_id)
+                self.face_analysis = analysis
+                self.models = analysis.models
+                self.det_model = analysis.det_model
+                self._prepared_det_size = self._detector_input_size()
                 self.loaded = True
                 self.embedding_dim = self._infer_embedding_dim()
                 self.active_providers = self.requested_providers
                 self.last_latency_ms["load"] = (time.perf_counter() - start) * 1000.0
+            except AssertionError as exc:
+                detail = str(exc).strip()
+                self.last_error = (
+                    f"Model load failed: {detail}"
+                    if detail
+                    else f"No detection model found in {model_dir}."
+                )
+                LOGGER.exception(self.last_error)
+                self.loaded = False
             except Exception as exc:
                 self.last_error = f"Model load failed: {exc}"
                 LOGGER.exception(self.last_error)
                 self.loaded = False
 
-    def _load_model_from_onnx(self, onnx_file: str):
-        """Load a model pack member, forcing GUI detection through SCRFD."""
-        try:
-            from insightface.model_zoo.arcface_onnx import ArcFaceONNX
-            from insightface.model_zoo.attribute import Attribute
-            from insightface.model_zoo.inswapper import INSwapper
-            from insightface.model_zoo.landmark import Landmark
-            from insightface.model_zoo.model_zoo import PickableInferenceSession
-            from insightface.model_zoo.scrfd import SCRFD
-        except Exception as exc:
-            raise RuntimeError(f"InsightFace model imports failed: {exc}") from exc
+    def _custom_model_directory_selected(self) -> bool:
+        if self.custom_model_dir and self.custom_model_dir.is_dir():
+            return True
+        return Path(os.path.expanduser(self.model_name)).is_dir()
 
-        session_kwargs = {
+    def _create_face_analysis(
+        self,
+        model_dir: Path,
+        *,
+        manifest_backed: bool,
+    ) -> FaceAnalysis:
+        """Create a local-only model host for the GUI's supported tasks."""
+
+        kwargs: Dict[str, Any] = {
             "providers": self.requested_providers,
-            "provider_options": None,
+            "static_shape_sessions": True,
         }
         session_options = self._quiet_onnxruntime_session_options()
         if session_options is not None:
-            session_kwargs["sess_options"] = session_options
-        session = PickableInferenceSession(onnx_file, **session_kwargs)
-        LOGGER.info("Applied providers for %s: %s", onnx_file, getattr(session, "_providers", []))
-        inputs = session.get_inputs()
-        if not inputs:
-            return None
-        input_shape = inputs[0].shape
-        outputs = session.get_outputs()
-        input_height = self._shape_dim(input_shape, 2)
-        input_width = self._shape_dim(input_shape, 3)
+            kwargs["sess_options"] = session_options
+        if self._primary_provider() == "CoreMLExecutionProvider":
+            kwargs["_coreml_detector_input_size"] = max(
+                self.det_sizes,
+                key=lambda value: int(value[0]) * int(value[1]),
+            )
+        allowed_modules = (
+            ("detection", "recognition") if manifest_backed else None
+        )
+        # Passing the verified directory, rather than model_name/root, keeps
+        # the GUI on FaceAnalysis's local-directory path and prevents an
+        # implicit model download.
+        return FaceAnalysis(
+            name=model_dir.resolve(),
+            allowed_modules=allowed_modules,
+            **kwargs,
+        )
 
-        if self._is_scrfd_detection_outputs(outputs):
-            LOGGER.info("GUI detection model routed to SCRFD: %s", onnx_file)
-            return SCRFD(model_file=onnx_file, session=session)
-        if input_height == 192 and input_width == 192:
-            return Landmark(model_file=onnx_file, session=session)
-        if input_height == 96 and input_width == 96:
-            return Attribute(model_file=onnx_file, session=session)
-        if len(inputs) == 2 and input_height == 128 and input_width == 128:
-            return INSwapper(model_file=onnx_file, session=session)
-        if (
-            input_height is not None
-            and input_width is not None
-            and input_height == input_width
-            and input_height >= 112
-            and input_height % 16 == 0
-        ):
-            return ArcFaceONNX(model_file=onnx_file, session=session)
-        return None
-
-    @staticmethod
-    def _shape_dim(shape, index: int) -> Optional[int]:
-        try:
-            value = shape[index]
-        except Exception:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _is_scrfd_detection_outputs(outputs) -> bool:
-        return len(outputs) in {6, 9, 10, 15}
+    def _primary_provider(self) -> str:
+        provider = self.requested_providers[0] if self.requested_providers else ""
+        if isinstance(provider, (list, tuple)) and provider:
+            return str(provider[0])
+        return str(provider)
 
     @staticmethod
     def _quiet_onnxruntime_session_options():
@@ -231,26 +252,20 @@ class FaceEngine:
             if image is None:
                 return []
             image = np.ascontiguousarray(image)
-            try:
-                from insightface.app.common import Face
-            except Exception as exc:
-                raise ModelNotLoadedError(f"InsightFace Face class import failed: {exc}") from exc
+            analysis = self.face_analysis
+            if analysis is None:
+                raise ModelNotLoadedError("Model is not loaded. Please open Models.")
 
             start = time.perf_counter()
-            bboxes, kpss = self._detect_raw(image)
+            faces = analysis.get(image, max_num=0, det_metric="default")
             records: List[FaceRecord] = []
-            if bboxes is None or bboxes.shape[0] == 0:
+            if not faces:
                 self.last_latency_ms["detect"] = (time.perf_counter() - start) * 1000.0
                 return records
-            for idx in range(bboxes.shape[0]):
-                bbox = bboxes[idx, 0:4]
-                det_score = float(bboxes[idx, 4])
-                kps = kpss[idx] if kpss is not None else None
-                face = Face(bbox=bbox, kps=kps, det_score=det_score)
-                for taskname, model in self.models.items():
-                    if taskname == "detection":
-                        continue
-                    model.get(image, face)
+            for idx, face in enumerate(faces):
+                bbox = np.asarray(face.bbox, dtype=np.float32).reshape(-1)[:4]
+                det_score = float(face.det_score)
+                kps = face.kps
                 embedding = getattr(face, "embedding", None)
                 normed_embedding = getattr(face, "normed_embedding", None)
                 if normed_embedding is None and embedding is not None:
@@ -353,50 +368,10 @@ class FaceEngine:
         width, height = self.det_sizes[0]
         return f"{width}x{height}"
 
-    def _prepare_detection(self) -> None:
-        if self.det_model is None:
-            return
-        input_size = self._detector_input_size()
-        if self._prepared_det_size == input_size:
-            return
-        LOGGER.debug("Preparing detection model with det_size=%s", input_size)
-        self.det_model.prepare(self.ctx_id, input_size=input_size, det_thresh=0.5)
-        self._prepared_det_size = input_size
-
-    def _detect_raw(self, image: np.ndarray):
-        self._prepare_detection()
-        return self.det_model.detect(image, max_num=0, metric="default")
-
     def _detector_input_size(self):
         if self.auto_det_size:
             return list(self.det_sizes)
         return self.det_sizes[0]
-
-    @staticmethod
-    def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float = 0.4) -> list[int]:
-        if boxes.size == 0:
-            return []
-        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-        areas = np.maximum(0.0, x2 - x1 + 1.0) * np.maximum(0.0, y2 - y1 + 1.0)
-        order = scores.argsort()[::-1]
-        keep: list[int] = []
-        while order.size > 0:
-            current = int(order[0])
-            keep.append(current)
-            if order.size == 1:
-                break
-            xx1 = np.maximum(x1[current], x1[order[1:]])
-            yy1 = np.maximum(y1[current], y1[order[1:]])
-            xx2 = np.minimum(x2[current], x2[order[1:]])
-            yy2 = np.minimum(y2[current], y2[order[1:]])
-            width = np.maximum(0.0, xx2 - xx1 + 1.0)
-            height = np.maximum(0.0, yy2 - yy1 + 1.0)
-            inter = width * height
-            union = areas[current] + areas[order[1:]] - inter
-            iou = np.where(union > 0, inter / union, 0.0)
-            order = order[np.where(iou <= iou_threshold)[0] + 1]
-        return keep
-
 
 def available_execution_providers() -> List[str]:
     try:
@@ -430,7 +405,10 @@ def providers_from_choice(choice: str) -> List[str]:
     return get_default_providers(available)
 
 
-def provider_runtime_display(choice: str) -> tuple[str, str]:
+def provider_runtime_display(
+    choice: str,
+    language: str | None = None,
+) -> tuple[str, str]:
     """Describe the provider chain the GUI can use for a saved choice.
 
     ``Auto`` is a configuration policy, not an execution provider.  Display
@@ -440,11 +418,16 @@ def provider_runtime_display(choice: str) -> tuple[str, str]:
     """
 
     configured = str(choice or "Auto").strip() or "Auto"
+
+    def localized(text: str) -> str:
+        # Preserve the historical English contract when callers omit language.
+        return tr(text, language) if language is not None else text
+
     available = available_execution_providers()
     if not available:
         return (
-            "Unavailable",
-            "ONNX Runtime reports no available execution providers.",
+            localized("Unavailable"),
+            localized("ONNX Runtime reports no available execution providers."),
         )
     try:
         selected = [
@@ -457,18 +440,24 @@ def provider_runtime_display(choice: str) -> tuple[str, str]:
         selected = []
     if not selected:
         return (
-            "Unavailable",
-            f"Configured selection: {configured}. No matching ONNX Runtime "
-            "execution provider is currently available.",
+            localized("Unavailable"),
+            localized(
+                "Configured selection: {selection}. No matching ONNX Runtime "
+                "execution provider is currently available."
+            ).format(selection=configured),
         )
     primary, *fallbacks = selected
     if fallbacks:
         chain = primary + "".join(
-            f" → {provider} (fallback)" for provider in fallbacks
+            " → "
+            + localized("{provider} (fallback)").format(provider=provider)
+            for provider in fallbacks
         )
     else:
         chain = primary
     return (
         primary,
-        f"Configured selection: {configured}. Resolved provider chain: {chain}.",
+        localized(
+            "Configured selection: {selection}. Resolved provider chain: {chain}."
+        ).format(selection=configured, chain=chain),
     )

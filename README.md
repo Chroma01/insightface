@@ -17,6 +17,26 @@ InsightFace 1.0 focuses on easier local evaluation and desktop usage:
 - Added **InsightFace Evaluation Studio**, a cross-platform GUI Demo for Windows, macOS, and Linux.
 - The GUI supports local face recognition, enterprise model evaluation/reporting, and basic face swap trials.
 
+## PrivateFrame video face privacy
+
+PrivateFrame detects and tracks faces in local videos and renders Gaussian blur
+or mosaic over those face regions. It produces both an editable analysis JSON
+and a privacy-redacted video without modifying or uploading the source video.
+
+Install the Python CLI with `pip install "insightface[privateframe]"`. Humans,
+shell automation, and AI coding tools can discover its purpose, workflows,
+inputs, outputs, configuration, and status contract without running inference:
+
+```bash
+insightface-privateframe --help
+insightface-privateframe describe
+```
+
+For a normal face-blurring request, use `process`; for JSON-only analysis use
+`analyze`; to render an existing or edited analysis use `render`. See the
+[Python package guide](python-package/README.md#privateframe) for installation
+and examples.
+
 ## InsightFace Server
 
 The new [InsightFace Server](server/) provides a simple self-hosted Web UI,

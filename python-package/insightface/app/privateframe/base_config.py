@@ -18,8 +18,10 @@ from .model_catalog import (
     RECOGNITION_TASK,
     SUPPORTED_MODEL_PACKAGES,
     VERIFICATION_TASK,
+    declared_model_sha256,
     materialize_model_package,
     normalize_preprocessing,
+    validate_model_package_selection,
 )
 
 _RECOGNITION_DEFAULTS: dict[str, Any] = {
@@ -30,20 +32,10 @@ _RECOGNITION_DEFAULTS: dict[str, Any] = {
     "similarity_threshold": 0.40,
 }
 
-PERFORMANCE_MODE_FRAME_STRIDES: dict[str, int] = {
-    "normal": 1,
-    "fast": 2,
-    "ultra_fast": 4,
-}
-
-_CONFIG_SCHEMA_PATH = Path(__file__).with_name("configs") / "base.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("configs") / "base.yaml"
 _OPTIONAL_CONFIG_SCHEMA: dict[str, Any] = {
     "recognition": {"max_frames_per_track": None},
     "scan": {
-        # ``frame_stride`` remains an explicit expert override. The built-in
-        # configuration uses ``performance_mode`` so a derived configuration
-        # can select a preset without inheriting an explicit stride.
-        "frame_stride": None,
         "passes": [
             {
                 "candidate_filter": {
@@ -83,16 +75,6 @@ _OPTIONAL_CONFIG_SCHEMA: dict[str, Any] = {
 }
 
 
-def performance_mode_frame_stride(value: Any, *, field: str = "scan.performance_mode") -> int:
-    """Validate a public performance preset and return its canonical stride."""
-
-    if not isinstance(value, str):
-        raise TypeError(f"{field} must be a string")
-    if value not in PERFORMANCE_MODE_FRAME_STRIDES:
-        raise ValueError(f"{field} must be normal, fast, or ultra_fast")
-    return PERFORMANCE_MODE_FRAME_STRIDES[value]
-
-
 def _schema_from_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _schema_from_value(item) for key, item in value.items()}
@@ -124,9 +106,9 @@ def _merge_schema(target: dict[str, Any], update: dict[str, Any]) -> None:
 
 
 def _current_config_schema() -> dict[str, Any]:
-    raw = yaml.safe_load(_CONFIG_SCHEMA_PATH.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise TypeError(f"invalid built-in config schema: {_CONFIG_SCHEMA_PATH}")
+        raise TypeError(f"invalid built-in config schema: {DEFAULT_CONFIG_PATH}")
     schema = _schema_from_value(raw)
     _merge_schema(schema, _OPTIONAL_CONFIG_SCHEMA)
     schema["base_config"] = None
@@ -359,29 +341,16 @@ def validate_scan_passes(config: dict[str, Any]) -> None:
     """Validate full-frame SCRFD views and optional raw-candidate gates."""
 
     scan = config["scan"]
-    performance_mode = scan.pop("performance_mode", "normal")
-    preset_stride = performance_mode_frame_stride(performance_mode)
-    # A manually configured stride is the expert-level setting and therefore
-    # wins over the friendly preset. Only the canonical integer survives into
-    # the effective configuration and algorithm code.
-    frame_stride = scan.get("frame_stride", preset_stride)
-    if isinstance(frame_stride, bool) or not isinstance(frame_stride, int):
-        raise TypeError("scan.frame_stride must be an integer")
-    if frame_stride < 1:
-        raise ValueError("scan.frame_stride must be positive")
-    if frame_stride > 4:
-        raise ValueError("scan.frame_stride must be between 1 and 4")
-    scan["frame_stride"] = frame_stride
+    scan["max_analysis_fps"] = _validate_positive_finite(
+        scan.get("max_analysis_fps", 30),
+        field="scan.max_analysis_fps",
+    )
     tracking = config.get("tracking")
     if isinstance(tracking, dict):
         endpoint_extension = tracking.get("endpoint_extension")
         if endpoint_extension is not None:
             if isinstance(endpoint_extension, bool) or not isinstance(endpoint_extension, int):
                 raise TypeError("tracking.endpoint_extension must be an integer")
-            if frame_stride - 1 > endpoint_extension:
-                raise ValueError(
-                    "scan.frame_stride cannot skip more frames than tracking.endpoint_extension"
-                )
         association_scan_gap = tracking.get("association_max_scan_gap")
         if association_scan_gap is not None:
             if (
@@ -787,40 +756,65 @@ def validate_model_package_contracts(config: dict[str, Any]) -> None:
         raise TypeError("models configuration is required")
     expected_model_keys = {
         "name",
+        "root",
         "manifest_path",
-        "manifest_sha256",
         DETECTION_TASK,
         VERIFICATION_TASK,
-        RECOGNITION_TASK,
     }
+    recognition = config.get("recognition", {})
+    selective = (
+        str(recognition.get("mode", "all")) != "all"
+        if isinstance(recognition, Mapping)
+        else False
+    )
+    if selective:
+        expected_model_keys.add(RECOGNITION_TASK)
     if set(models) != expected_model_keys:
         raise ValueError("effective models keys do not match the raccoon package contract")
     if models.get("name") not in SUPPORTED_MODEL_PACKAGES:
         raise ValueError("model package must be raccoon_s or raccoon_l")
+    root = models.get("root")
+    if not isinstance(root, str):
+        raise TypeError("models.root must be a string")
+    if not root.strip():
+        raise ValueError("models.root must be a non-empty path")
     expected_task_keys = {
         DETECTION_TASK: {
             "file",
-            "sha256",
             "preprocessing",
+            "preprocessing_version",
             "path",
             "nms_iou_threshold",
             "max_detections",
         },
         VERIFICATION_TASK: {
             "file",
-            "sha256",
             "expansion",
             "preprocessing",
             "path",
         },
-        RECOGNITION_TASK: {"file", "sha256", "preprocessing", "path"},
+        RECOGNITION_TASK: {
+            "file",
+            "preprocessing",
+            "preprocessing_version",
+            "input_size",
+            "embedding_dimension",
+            "path",
+        },
     }
-    for task, expected in expected_task_keys.items():
+    required_tasks = [DETECTION_TASK, VERIFICATION_TASK]
+    if selective:
+        required_tasks.append(RECOGNITION_TASK)
+    for task in required_tasks:
+        required = expected_task_keys[task]
         settings = models.get(task)
         if not isinstance(settings, dict):
             raise TypeError(f"models.{task} configuration is required")
-        if set(settings) != expected:
-            raise ValueError(f"effective models.{task} keys do not match the manifest contract")
+        if not required <= set(settings) or set(settings) - (required | {"sha256"}):
+            raise ValueError(
+                f"effective models.{task} keys do not match the manifest contract"
+            )
+        declared_model_sha256(settings, field=f"models.{task}.sha256")
         normalize_preprocessing(
             settings["preprocessing"],
             f"models.{task}.preprocessing",
@@ -829,6 +823,8 @@ def validate_model_package_contracts(config: dict[str, Any]) -> None:
     revalidation = config.get("revalidation")
     if not isinstance(revalidation, dict):
         raise TypeError("revalidation configuration is required")
+
+
 def validate_current_config_contract(config: dict[str, Any]) -> None:
     """Reject settings whose runtime branches were removed from this release."""
 
@@ -1129,6 +1125,68 @@ def _prepared_overrides_gallery_dir(
     return False
 
 
+_NUMBER_FIELDS_WITH_INTEGER_DEFAULTS = {"scan.max_analysis_fps"}
+_INTEGER_OR_STRING_FIELDS = {"render.video_output.audio.bitrate"}
+
+
+def _validate_config_value_types(
+    value: Any,
+    template: Any,
+    path: tuple[str, ...] = (),
+) -> None:
+    field = ".".join(path) or "configuration"
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{field} must be finite")
+    if template is None:
+        # Nullable/optional fields have dedicated semantic validators.
+        return
+    if isinstance(template, dict):
+        if not isinstance(value, dict):
+            raise TypeError(f"{field} must be a mapping")
+        for key, item in value.items():
+            if key in template:
+                _validate_config_value_types(
+                    item,
+                    template[key],
+                    (*path, str(key)),
+                )
+        return
+    if isinstance(template, list):
+        if not isinstance(value, list):
+            raise TypeError(f"{field} must be a list")
+        if not template:
+            return
+        for index, item in enumerate(value):
+            item_template = template[min(index, len(template) - 1)]
+            _validate_config_value_types(
+                item,
+                item_template,
+                (*path, str(index)),
+            )
+        return
+    if isinstance(template, bool):
+        if not isinstance(value, bool):
+            raise TypeError(f"{field} must be boolean")
+        return
+    if isinstance(template, int):
+        if field in _NUMBER_FIELDS_WITH_INTEGER_DEFAULTS:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{field} must be a number")
+        elif isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{field} must be an integer")
+        return
+    if isinstance(template, float):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{field} must be a number")
+        return
+    if isinstance(template, str):
+        if field in _INTEGER_OR_STRING_FIELDS:
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                raise TypeError(f"{field} must be an integer or string")
+        elif not isinstance(value, str):
+            raise TypeError(f"{field} must be a string")
+
+
 def _load_base_config(
     path: str | Path,
     *,
@@ -1136,6 +1194,7 @@ def _load_base_config(
     derived_override_root: Path | None = None,
     dotted_overrides: Mapping[str, Any] | None = None,
     dotted_override_root: Path | None = None,
+    materialize_models: bool = True,
 ) -> dict[str, Any]:
     source = Path(path).expanduser().resolve()
     with source.open("r", encoding="utf-8") as stream:
@@ -1147,6 +1206,10 @@ def _load_base_config(
     ):
         raise ValueError("ONNX config must be a schema_version: 1 mapping")
     config = deepcopy(config)
+    with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as stream:
+        type_template = yaml.safe_load(stream)
+    if not isinstance(type_template, dict):
+        raise TypeError("packaged Base configuration must be a mapping")
     root = source.parent
     recognition_root = root
     if derived_overrides is not None:
@@ -1172,9 +1235,13 @@ def _load_base_config(
             _apply_prepared_config_overrides(config, prepared)
     validate_current_config_contract(config)
     validate_config_keys(config)
-    materialize_model_package(config)
+    _validate_config_value_types(config, type_template)
+    validate_model_package_selection(config)
+    if materialize_models:
+        materialize_model_package(config)
     resolve_runtime_provider(config)
-    validate_model_package_contracts(config)
+    if materialize_models:
+        validate_model_package_contracts(config)
     validate_scan_passes(config)
     validate_scene_cut_detector(config["scan"])
     validate_revalidation_passes(config)
@@ -1190,9 +1257,8 @@ def _load_base_config(
 
 
 __all__ = [
-    "PERFORMANCE_MODE_FRAME_STRIDES",
+    "DEFAULT_CONFIG_PATH",
     "apply_config_overrides",
-    "performance_mode_frame_stride",
     "resolve_runtime_provider",
     "validate_admission_policy",
     "validate_bidirectional_fusion",

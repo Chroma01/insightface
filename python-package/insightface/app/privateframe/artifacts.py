@@ -50,6 +50,7 @@ def write_json(path: str | Path, value: Any, *, indent: int | None = 2) -> None:
                 ensure_ascii=False,
                 sort_keys=True,
                 indent=indent,
+                separators=(",", ":") if indent is None else None,
             )
             stream.write("\n")
             stream.flush()

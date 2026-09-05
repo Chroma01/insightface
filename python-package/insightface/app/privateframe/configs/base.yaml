@@ -6,12 +6,17 @@ output:
   artifacts_level: final
 
 models:
-  # The compact package manifest maps tasks to files, pins their SHA256, and
-  # declares external normalization or embedded preprocessing plus verifier
-  # expansion. Tensor metadata comes from ONNX Runtime. Base intentionally
-  # selects the small package by its standard ModelZoo name. InsightFace
-  # resolves it below ~/.insightface/models and downloads it when absent.
+  # The V2 package manifest maps tasks to files. It may declare external
+  # normalization or embedded preprocessing plus verifier expansion; omitted
+  # values receive task-specific defaults. Unknown package metadata is ignored
+  # by PrivateFrame. Base intentionally selects the small package by its
+  # standard ModelZoo name. InsightFace resolves it below ~/.insightface/models
+  # and downloads it when absent.
   name: raccoon_s
+  # InsightFace root containing the models/ directory. GUI integrations should
+  # override this with the same global model_root used by FaceAnalysis. The
+  # selected root is authoritative: PrivateFrame never searches a second root.
+  root: ~/.insightface
   detection:
     nms_iou_threshold: 0.40
     max_detections: 300
@@ -60,22 +65,19 @@ recognition:
   similarity_threshold: 0.40
 
 scan:
-  # Friendly presets for full-frame detector sampling: normal / fast /
-  # ultra_fast materialize to frame strides 1 / 2 / 4. An explicitly supplied
-  # scan.frame_stride remains available as an expert override and takes
-  # precedence over this preset.
-  performance_mode: normal
-  # A stride greater than 1 performs the regular multi-view scan on every Nth
-  # frame. Scene boundaries, video endpoints, and new-track admission bursts
-  # may force additional real detector scans.
+  # Cap regular full-frame detector sampling at approximately this many frames
+  # per second. The runtime derives one uniform integer stride for each video,
+  # with a 5% tolerance for nominal rates such as 30.02 FPS. Scene boundaries,
+  # video endpoints, and new-track admission bursts may force additional real
+  # detector scans. The output video always retains its source frame rate.
+  max_analysis_fps: 30
   # Skipped frames always run decode and scene-cut detection. When the resulting
   # stride is greater than 1, the default interpolate policy reviews real
   # detector anchors and publishes reduced-assurance geometry between them
   # without per-frame flow/SCRFD/Verifier work. Explicitly select visual to run
-  # the optical-flow/review path between scans. Start with 2; either sampled
-  # policy is an explicit recall/privacy tradeoff and can miss a face that
-  # exists only between sampled full-frame detections.
-  # Explicit strides support 1..4; 3 and 4 are intentionally aggressive.
+  # the optical-flow/review path between scans. On constrained devices, start
+  # with 15 FPS; either sampled policy is an explicit recall/privacy tradeoff
+  # and can miss a face that exists only between sampled full-frame detections.
   # By default SCRFD uses one fixed-input-shape Session per resolution for the
   # 800/256 full-frame views, while all angles at the same resolution share it.
   # Local revalidation owns an independent detector host/Session pool. The
@@ -154,9 +156,12 @@ scan:
 streaming:
   max_missed_seconds: 5.0
   max_retroactive_seconds: 5.0
-  # Only a short BGR history is retained; the five-second history remains
-  # compressed packet data in SQLite. Both frame and byte limits apply.
-  recent_frame_cache_frames: 16
+  # Keep one shared LRU of complete decoded BGR frames so overlapping history
+  # requests with different face crops reuse the same decode. null derives the
+  # frame target from the longest configured replay horizon; the byte limit is
+  # always the hard memory bound. Use an integer for an explicit frame cap, or
+  # zero to disable decoded-frame retention.
+  recent_frame_cache_frames: null
   recent_frame_cache_max_bytes: 268435456
   # Reverse pre-roll consumes newest blocks first instead of materializing all
   # 150 maximum-size RGB corridors at once.
@@ -190,7 +195,9 @@ tracking:
   association_min_score: 0.0
   # New tracks initially replay only a short endpoint so sparse false positives
   # cannot create long paths. Once a track accumulates the reliable detector
-  # count, replay its first anchor once more and expose up to 45 earlier frames.
+  # count, replay its first anchor once more and expose the longer pre-roll.
+  # In interpolate mode both leading and trailing unanchored endpoints share
+  # affine motion, sparse Verifier checkpoints, and anomaly-only Local SCRFD.
   endpoint_extension: 8
   reliable_endpoint_extension: 45
   reliable_pre_roll_extension: 150
@@ -227,10 +234,11 @@ tracking:
     recovery_cycle_min_iou: 0.10
     # After ordinary visual-mode endpoint LK stops, try a strict partial-affine
     # path for a few additional frames. `max_frames` limits only that fallback.
-    # Interpolate has no ordinary LK path, so its one-sided repair uses the
-    # shared endpoint_extension/reliable_endpoint_extension limits above.
-    # Candidates remain isolated from Kalman, association, admission evidence,
-    # recognition, and core box stabilization in both cases.
+    # Interpolate has no ordinary LK path, so its symmetric unanchored-endpoint
+    # tracking uses the shared endpoint limits above.
+    # Candidates remain isolated from Kalman, association, and core admission.
+    # Once the core track is accepted they join output stabilization; a sparse
+    # Local-SCRFD checkpoint may also contribute a normal recognition sample.
     endpoint_affine_repair:
       enabled: true
       max_frames: 8

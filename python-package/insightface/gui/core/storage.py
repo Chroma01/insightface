@@ -114,6 +114,7 @@ class Storage:
                     thumbnail_mime TEXT,
                     embedding BLOB,
                     embedding_dim INTEGER,
+                    model_name TEXT,
                     bbox_json TEXT,
                     kps_json TEXT,
                     det_score REAL,
@@ -125,6 +126,13 @@ class Storage:
                     status TEXT,
                     created_at TEXT,
                     updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS media_analysis (
+                    media_id INTEGER NOT NULL,
+                    model_name TEXT NOT NULL,
+                    processed_at TEXT,
+                    PRIMARY KEY (media_id, model_name)
                 );
 
                 CREATE TABLE IF NOT EXISTS clusters (
@@ -173,6 +181,11 @@ class Storage:
             self._ensure_column(conn, "media_items", "thumbnail_mime", "TEXT")
             self._ensure_column(conn, "media_faces", "thumbnail", "BLOB")
             self._ensure_column(conn, "media_faces", "thumbnail_mime", "TEXT")
+            self._ensure_column(conn, "media_faces", "model_name", "TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_faces_model_media "
+                "ON media_faces(model_name, media_id)"
+            )
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -401,6 +414,7 @@ class Storage:
         similarity: Optional[float] = None,
         cluster_id: Optional[int] = None,
         status: str = "unknown",
+        model_name: str = "",
     ) -> int:
         blob, dim = embedding_to_blob(embedding)
         now = utc_now_iso()
@@ -409,10 +423,10 @@ class Storage:
                 """
                 INSERT INTO media_faces (
                     media_id, frame_index, timestamp_ms, crop_path, thumbnail, thumbnail_mime, embedding, embedding_dim,
-                    bbox_json, kps_json, det_score, quality_score, assigned_person_id,
+                    model_name, bbox_json, kps_json, det_score, quality_score, assigned_person_id,
                     predicted_person_id, similarity, cluster_id, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     media_id,
@@ -423,6 +437,7 @@ class Storage:
                     thumbnail_mime if thumbnail else "",
                     blob,
                     dim,
+                    str(model_name or ""),
                     safe_json_dumps(list(bbox) if bbox is not None else None),
                     safe_json_dumps(list(kps) if kps is not None else None),
                     det_score,
@@ -438,18 +453,38 @@ class Storage:
             )
             return int(cur.lastrowid)
 
-    def load_all_gallery_embeddings(self) -> List[Dict[str, Any]]:
+    def mark_media_item_processed(self, media_id: int, model_name: str) -> None:
+        """Record that a media item was analyzed, including zero-face results."""
+
         with self.connect() as conn:
-            rows = conn.execute(
+            conn.execute(
                 """
+                INSERT INTO media_analysis (media_id, model_name, processed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(media_id, model_name)
+                DO UPDATE SET processed_at=excluded.processed_at
+                """,
+                (int(media_id), str(model_name), utc_now_iso()),
+            )
+
+    def load_all_gallery_embeddings(
+        self,
+        model_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        query = """
                 SELECT fs.id AS sample_id, fs.person_id, fs.crop_path, fs.embedding,
-                       fs.embedding_dim,
+                       fs.embedding_dim, fs.model_name,
                        COALESCE(p.display_name, p.name, 'Unknown') AS person_name
                 FROM face_samples fs
                 LEFT JOIN people p ON p.id = fs.person_id
                 WHERE fs.embedding IS NOT NULL AND fs.person_id IS NOT NULL
                 """
-            ).fetchall()
+        params: tuple[Any, ...] = ()
+        if model_name is not None:
+            query += " AND fs.model_name=?"
+            params = (str(model_name),)
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
             gallery = []
             for row in rows:
                 item = dict(row)
@@ -462,8 +497,14 @@ class Storage:
         query_embedding: np.ndarray,
         top_k: int = 5,
         threshold: float = DEFAULT_THRESHOLD,
+        model_name: Optional[str] = None,
     ):
-        return search_gallery(query_embedding, self.load_all_gallery_embeddings(), top_k=top_k, threshold=threshold)
+        return search_gallery(
+            query_embedding,
+            self.load_all_gallery_embeddings(model_name=model_name),
+            top_k=top_k,
+            threshold=threshold,
+        )
 
     def log_recognition(
         self,
@@ -607,6 +648,7 @@ class Storage:
         cluster_threshold: Optional[float] = None,
         min_samples: int = 2,
         min_face_size: Optional[int] = None,
+        model_name: Optional[str] = None,
     ) -> None:
         now = utc_now_iso()
         serializable_clusters: List[Dict[str, Any]] = []
@@ -633,6 +675,7 @@ class Storage:
             serializable_clusters.append(data)
         payload = {
             "version": 1,
+            "model_name": str(model_name) if model_name is not None else None,
             "algorithm": algorithm,
             "cluster_threshold": float(cluster_threshold) if cluster_threshold is not None else None,
             "min_samples": int(min_samples),
@@ -647,27 +690,79 @@ class Storage:
                 VALUES (?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
                 """,
-                (ALBUM_RESULTS_SETTING, json.dumps(payload, ensure_ascii=False), now),
+                (
+                    self._album_results_setting(model_name),
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                ),
             )
-            conn.execute("UPDATE media_faces SET cluster_id=NULL, updated_at=?", (now,))
-            conn.executemany(
-                "UPDATE media_faces SET cluster_id=?, status='clustered', updated_at=? WHERE id=?",
-                [(cluster_id, now, face_id) for cluster_id, face_id in assignments],
-            )
+            if model_name is None:
+                conn.execute(
+                    "UPDATE media_faces SET cluster_id=NULL, updated_at=?",
+                    (now,),
+                )
+                conn.executemany(
+                    "UPDATE media_faces SET cluster_id=?, status='clustered', updated_at=? WHERE id=?",
+                    [
+                        (cluster_id, now, face_id)
+                        for cluster_id, face_id in assignments
+                    ],
+                )
+            else:
+                normalized_model_name = str(model_name)
+                conn.execute(
+                    "UPDATE media_faces SET cluster_id=NULL, updated_at=? "
+                    "WHERE model_name=?",
+                    (now, normalized_model_name),
+                )
+                conn.executemany(
+                    "UPDATE media_faces SET cluster_id=?, status='clustered', updated_at=? "
+                    "WHERE id=? AND model_name=?",
+                    [
+                        (cluster_id, now, face_id, normalized_model_name)
+                        for cluster_id, face_id in assignments
+                    ],
+                )
 
-    def load_album_results(self) -> Dict[str, Any]:
-        raw = self.get_setting(ALBUM_RESULTS_SETTING, "{}")
+    @staticmethod
+    def _album_results_setting(model_name: Optional[str]) -> str:
+        if model_name is None:
+            return ALBUM_RESULTS_SETTING
+        return f"{ALBUM_RESULTS_SETTING}.{model_name}"
+
+    def load_album_results(
+        self,
+        model_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raw = self.get_setting(self._album_results_setting(model_name), "{}")
         try:
             data = json.loads(raw or "{}")
         except Exception:
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        if model_name is not None and data.get("model_name") != str(model_name):
+            return {}
+        return data
 
-    def clear_album_results(self) -> None:
+    def clear_album_results(self, model_name: Optional[str] = None) -> None:
         now = utc_now_iso()
         with self.connect() as conn:
-            conn.execute("DELETE FROM app_settings WHERE key=?", (ALBUM_RESULTS_SETTING,))
-            conn.execute("UPDATE media_faces SET cluster_id=NULL, updated_at=?", (now,))
+            conn.execute(
+                "DELETE FROM app_settings WHERE key=?",
+                (self._album_results_setting(model_name),),
+            )
+            if model_name is None:
+                conn.execute(
+                    "UPDATE media_faces SET cluster_id=NULL, updated_at=?",
+                    (now,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE media_faces SET cluster_id=NULL, updated_at=? "
+                    "WHERE model_name=?",
+                    (now, str(model_name)),
+                )
 
     def delete_media_items_by_paths(self, paths: Iterable[str]) -> int:
         values = [str(path) for path in paths]
@@ -684,11 +779,74 @@ class Storage:
                     continue
                 id_placeholders = ",".join("?" for _ in media_ids)
                 conn.execute(f"DELETE FROM media_faces WHERE media_id IN ({id_placeholders})", media_ids)
+                conn.execute(
+                    f"DELETE FROM media_analysis WHERE media_id IN ({id_placeholders})",
+                    media_ids,
+                )
                 conn.execute(f"DELETE FROM media_items WHERE id IN ({id_placeholders})", media_ids)
                 deleted += len(media_ids)
         return deleted
 
-    def existing_media_paths(self, paths: Iterable[str]) -> set[str]:
+    def delete_media_faces_by_paths(
+        self,
+        paths: Iterable[str],
+        *,
+        model_name: str,
+    ) -> int:
+        """Delete one model's indexed faces without touching other model data."""
+
+        values = [str(path) for path in paths]
+        if not values:
+            return 0
+        affected_paths: set[str] = set()
+        with self.connect() as conn:
+            for index in range(0, len(values), 899):
+                chunk = values[index : index + 899]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT mi.path
+                    FROM media_items mi
+                    WHERE mi.path IN ({placeholders})
+                      AND (
+                          EXISTS (
+                              SELECT 1 FROM media_analysis ma
+                              WHERE ma.media_id=mi.id AND ma.model_name=?
+                          )
+                          OR EXISTS (
+                              SELECT 1 FROM media_faces mf
+                              WHERE mf.media_id=mi.id AND mf.model_name=?
+                          )
+                      )
+                    """,
+                    [*chunk, str(model_name), str(model_name)],
+                ).fetchall()
+                affected_paths.update(str(row["path"]) for row in rows)
+                conn.execute(
+                    f"""
+                    DELETE FROM media_faces
+                    WHERE model_name=? AND media_id IN (
+                        SELECT id FROM media_items WHERE path IN ({placeholders})
+                    )
+                    """,
+                    [str(model_name), *chunk],
+                )
+                conn.execute(
+                    f"""
+                    DELETE FROM media_analysis
+                    WHERE model_name=? AND media_id IN (
+                        SELECT id FROM media_items WHERE path IN ({placeholders})
+                    )
+                    """,
+                    [str(model_name), *chunk],
+                )
+        return len(affected_paths)
+
+    def existing_media_paths(
+        self,
+        paths: Iterable[str],
+        model_name: Optional[str] = None,
+    ) -> set[str]:
         values = [str(path) for path in paths]
         if not values:
             return set()
@@ -697,23 +855,54 @@ class Storage:
             for index in range(0, len(values), 900):
                 chunk = values[index : index + 900]
                 placeholders = ",".join("?" for _ in chunk)
-                rows = conn.execute(f"SELECT path FROM media_items WHERE path IN ({placeholders})", chunk).fetchall()
+                if model_name is None:
+                    rows = conn.execute(
+                        f"SELECT path FROM media_items WHERE path IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        f"""
+                        SELECT mi.path
+                        FROM media_items mi
+                        WHERE mi.path IN ({placeholders})
+                          AND (
+                              EXISTS (
+                                  SELECT 1 FROM media_analysis ma
+                                  WHERE ma.media_id=mi.id AND ma.model_name=?
+                              )
+                              OR EXISTS (
+                                  SELECT 1 FROM media_faces mf
+                                  WHERE mf.media_id=mi.id
+                                    AND mf.embedding IS NOT NULL
+                                    AND mf.model_name=?
+                              )
+                          )
+                        """,
+                        [*chunk, str(model_name), str(model_name)],
+                    ).fetchall()
                 existing.update(str(row["path"]) for row in rows)
         return existing
 
-    def list_media_faces(self) -> List[Dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
+    def list_media_faces(
+        self,
+        model_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        query = """
                 SELECT mf.*, mi.path AS media_path, mi.media_type, mi.width, mi.height,
                        mi.thumbnail AS media_thumbnail,
                        mi.thumbnail_mime AS media_thumbnail_mime
                 FROM media_faces mf
                 JOIN media_items mi ON mi.id = mf.media_id
                 WHERE mf.embedding IS NOT NULL
-                ORDER BY mf.created_at DESC, mf.id DESC
                 """
-            ).fetchall()
+        params: tuple[Any, ...] = ()
+        if model_name is not None:
+            query += " AND mf.model_name=?"
+            params = (str(model_name),)
+        query += " ORDER BY mf.created_at DESC, mf.id DESC"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
             result = []
             for row in rows:
                 item = dict(row)

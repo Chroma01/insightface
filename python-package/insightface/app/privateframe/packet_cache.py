@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections import OrderedDict
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -62,6 +63,198 @@ def crop_bgr(
             sy1:sy2, sx1:sx2
         ]
     return canvas
+
+
+class DecodedFrameStore:
+    """Byte-bounded LRU of complete, display-oriented BGR frames.
+
+    Historical consumers ask for their own crops, but the store always loads
+    and retains the complete frame.  A later request for another crop can then
+    reuse the same decode.  Missing contiguous ranges are split before calling
+    ``loader`` so one decode result does not exceed the store's intended memory
+    budget on fixed-resolution video.
+
+    ``frame_target`` and ``byte_capacity`` are both cache limits.  Setting
+    either one to zero disables retention while preserving range-read
+    semantics.
+    """
+
+    def __init__(self, frame_target: int, byte_capacity: int):
+        self.frame_target = int(frame_target)
+        self.byte_capacity = int(byte_capacity)
+        if self.frame_target < 0:
+            raise ValueError("frame_target cannot be negative")
+        if self.byte_capacity < 0:
+            raise ValueError("byte_capacity cannot be negative")
+        self._frames: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._live_bytes = 0
+        self._peak_bytes = 0
+        self._estimated_frame_bytes = 0
+        self.hits = 0
+
+    @property
+    def frame_count(self) -> int:
+        return len(self._frames)
+
+    @property
+    def live_bytes(self) -> int:
+        return self._live_bytes
+
+    @property
+    def peak_bytes(self) -> int:
+        return self._peak_bytes
+
+    def remember(self, frame_index: int, frame: np.ndarray) -> bool:
+        """Remember one complete BGR frame, returning whether it was retained."""
+
+        self._validate_frame(frame)
+        frame_index = int(frame_index)
+        frame_bytes = int(frame.nbytes)
+        self._estimated_frame_bytes = max(self._estimated_frame_bytes, frame_bytes)
+
+        previous = self._frames.pop(frame_index, None)
+        if previous is not None:
+            self._live_bytes -= int(previous.nbytes)
+
+        if (
+            self.frame_target == 0
+            or self.byte_capacity == 0
+            or frame_bytes > self.byte_capacity
+        ):
+            return False
+
+        self._frames[frame_index] = frame
+        self._live_bytes += frame_bytes
+        while self._frames and (
+            len(self._frames) > self.frame_target
+            or self._live_bytes > self.byte_capacity
+        ):
+            _oldest_index, oldest = self._frames.popitem(last=False)
+            self._live_bytes -= int(oldest.nbytes)
+        self._peak_bytes = max(self._peak_bytes, self._live_bytes)
+        return frame_index in self._frames
+
+    def read_range(
+        self,
+        first_frame: int,
+        last_frame: int,
+        *,
+        loader: Callable[[int, int], Mapping[int, np.ndarray]],
+        crop: tuple[int, int, int, int] | None = None,
+        crops: Mapping[int, tuple[int, int, int, int]] | None = None,
+    ) -> dict[int, np.ndarray]:
+        """Read a frame interval, decoding only uncached contiguous portions.
+
+        ``loader`` must return complete, already-oriented BGR frames.  Cropping
+        is deliberately applied only after each complete frame is remembered.
+        """
+
+        first_frame = int(first_frame)
+        last_frame = int(last_frame)
+        if first_frame > last_frame:
+            return {}
+        if crop is not None and crops is not None:
+            raise ValueError("crop and crops are mutually exclusive")
+
+        output: dict[int, np.ndarray] = {}
+        missing: list[int] = []
+        for frame_index in range(first_frame, last_frame + 1):
+            frame = self._frames.pop(frame_index, None)
+            if frame is None:
+                missing.append(frame_index)
+                continue
+            self._frames[frame_index] = frame
+            self.hits += 1
+            output[frame_index] = self._select(frame, frame_index, crop, crops)
+
+        for interval_first, interval_last in self._missing_intervals(missing):
+            chunk_first = interval_first
+            while chunk_first <= interval_last:
+                chunk_size = self._decode_chunk_size(interval_last - chunk_first + 1)
+                chunk_last = min(interval_last, chunk_first + chunk_size - 1)
+                self._reserve_decode_block(chunk_last - chunk_first + 1)
+                loaded = loader(chunk_first, chunk_last)
+                absent = [
+                    frame_index
+                    for frame_index in range(chunk_first, chunk_last + 1)
+                    if frame_index not in loaded
+                ]
+                if absent:
+                    raise RuntimeError(
+                        f"decoded frame loader omitted frames: {absent[:8]}"
+                    )
+                for frame_index in range(chunk_first, chunk_last + 1):
+                    frame = loaded[frame_index]
+                    self.remember(frame_index, frame)
+                    output[frame_index] = self._select(
+                        frame, frame_index, crop, crops
+                    )
+                chunk_first = chunk_last + 1
+
+        return {
+            frame_index: output[frame_index]
+            for frame_index in range(first_frame, last_frame + 1)
+        }
+
+    def clear(self) -> None:
+        self._frames.clear()
+        self._live_bytes = 0
+
+    @staticmethod
+    def _validate_frame(frame: np.ndarray) -> None:
+        if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError("decoded frame must be an HxWx3 BGR numpy array")
+
+    @staticmethod
+    def _missing_intervals(missing: list[int]) -> Iterator[tuple[int, int]]:
+        if not missing:
+            return
+        first = last = missing[0]
+        for frame_index in missing[1:]:
+            if frame_index == last + 1:
+                last = frame_index
+                continue
+            yield first, last
+            first = last = frame_index
+        yield first, last
+
+    def _decode_chunk_size(self, remaining: int) -> int:
+        if self.frame_target == 0 or self.byte_capacity == 0:
+            return remaining
+        if self._estimated_frame_bytes <= 0:
+            return 1
+        frames_by_bytes = max(
+            1, self.byte_capacity // self._estimated_frame_bytes
+        )
+        return max(1, min(remaining, self.frame_target, frames_by_bytes))
+
+    def _reserve_decode_block(self, frame_count: int) -> None:
+        """Evict before a loader materializes its fixed-resolution block."""
+
+        if (
+            self.byte_capacity == 0
+            or self._estimated_frame_bytes <= 0
+            or frame_count <= 0
+        ):
+            return
+        block_bytes = min(
+            self.byte_capacity,
+            int(frame_count) * self._estimated_frame_bytes,
+        )
+        maximum_live_bytes = self.byte_capacity - block_bytes
+        while self._frames and self._live_bytes > maximum_live_bytes:
+            _oldest_index, oldest = self._frames.popitem(last=False)
+            self._live_bytes -= int(oldest.nbytes)
+
+    @staticmethod
+    def _select(
+        frame: np.ndarray,
+        frame_index: int,
+        crop: tuple[int, int, int, int] | None,
+        crops: Mapping[int, tuple[int, int, int, int]] | None,
+    ) -> np.ndarray:
+        selected_crop = crops[frame_index] if crops is not None else crop
+        return crop_bgr(frame, selected_crop) if selected_crop is not None else frame
 
 
 class EncodedPacketCache:
@@ -381,6 +574,7 @@ def iter_oriented_frames(
 
 
 __all__ = [
+    "DecodedFrameStore",
     "EncodedPacketCache",
     "crop_bgr",
     "iter_cached_frames",

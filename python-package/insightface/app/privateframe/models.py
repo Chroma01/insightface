@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import platform
-import hashlib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -103,10 +103,10 @@ def packaged_face_recognizer(
     return model
 
 
-def _load_pinned_model_package(
+def _load_selected_model_package(
     models: Mapping[str, Any],
 ) -> ModelPackageDescriptor:
-    """Load and pin the exact manifest snapshot used to build Sessions."""
+    """Load the selected V2 package without pinning a manifest byte snapshot."""
 
     manifest_path = Path(str(models["manifest_path"])).resolve()
     package = load_model_package(manifest_path.parent)
@@ -115,12 +115,6 @@ def _load_pinned_model_package(
         raise RuntimeError(
             f"model package name mismatch for {manifest_path}: "
             f"{package.name} != {expected_name}"
-        )
-    expected = str(models["manifest_sha256"]).strip().lower()
-    if package.manifest_sha256 != expected:
-        raise RuntimeError(
-            "Model package manifest SHA256 mismatch for "
-            f"{package.manifest_path}: {package.manifest_sha256} != {expected}"
         )
     if manifest_path != package.manifest_path:
         raise RuntimeError(
@@ -316,7 +310,13 @@ def _make_face_analysis(
 
     models = config["models"]
     runtime = config["runtime"]
-    package = _load_pinned_model_package(models)
+    package = _load_selected_model_package(models)
+    missing = [task for task in allowed_modules if task not in package.tasks]
+    if missing:
+        raise ValueError(
+            f"PrivateFrame model package {package.name!r} is missing required "
+            f"task(s): {', '.join(missing)}"
+        )
     detection_settings = active_face_detector(config)[1]
     nms_threshold = float(detection_settings["nms_iou_threshold"])
     if not math.isfinite(nms_threshold) or not 0.0 <= nms_threshold <= 1.0:
@@ -363,10 +363,7 @@ def _make_face_analysis(
         )
         if static_shape_sessions:
             constructor_kwargs["resolution_session_factory"] = (
-                _CoreMLResolutionSessionFactory(
-                    runtime,
-                    package.task(DETECTION_TASK).sha256,
-                )
+                _CoreMLResolutionSessionFactory(runtime)
             )
     analysis = FaceAnalysis(
         **constructor_kwargs,

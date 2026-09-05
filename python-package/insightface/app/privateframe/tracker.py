@@ -8,7 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .geometry import clip, containment, iou
+from .geometry import clip
 
 
 class ScalarKalman:
@@ -351,7 +351,6 @@ def _estimate_affine_endpoint_flow(
 
 def _rank(item: dict[str, Any]) -> tuple[Any, ...]:
     return (
-        bool(item["shadow"]),
         float(item["center_distance"]),
         abs(math.log(max(float(item["area_ratio"]), 1e-12))),
         0 if int(item["direction"]) > 0 else 1,
@@ -359,13 +358,21 @@ def _rank(item: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _deduplicate(
-    candidates: list[dict[str, Any]], config: dict[str, Any]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _select_track_frame_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Select one motion candidate for each track and frame.
+
+    Cross-track suppression deliberately does not belong here: these boxes
+    have not passed admission or output stabilization yet.  Comparing tracks
+    at this stage made a later box movement capable of invalidating the
+    geometry that justified an early suppression.
+    """
+
     grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for item in candidates:
         grouped.setdefault((item["track_id"], int(item["frame_idx"])), []).append(item)
-    per_track, shadows = [], []
+    selected_candidates = []
     for values in grouped.values():
         selected = dict(min(values, key=_rank))
         forward = next((item for item in values if int(item["direction"]) > 0), None)
@@ -383,30 +390,13 @@ def _deduplicate(
                 1, int(reverse["anchor_frame"]) - int(forward["anchor_frame"])
             )
             selected["motion_box"] = (
-                np.asarray(forward["motion_box"]) * (1.0 - fraction)
-                + np.asarray(reverse["motion_box"]) * fraction
+                np.asarray(forward["motion_box"]) * (1.0 - fraction) + np.asarray(reverse["motion_box"]) * fraction
             ).tolist()
-        (shadows if selected["shadow"] else per_track).append(selected)
-    by_frame: dict[int, list[dict[str, Any]]] = {}
-    for item in per_track:
-        by_frame.setdefault(int(item["frame_idx"]), []).append(item)
-    published = []
-    for values in by_frame.values():
-        kept = []
-        for item in sorted(values, key=_rank):
-            suppressors = [
-                prior["track_id"]
-                for prior in kept
-                if iou(item["box"], prior["box"]) >= float(config["scan"]["global_nms_iou"])
-                or containment(item["box"], prior["box"]) >= float(config["scan"]["containment_threshold"])
-            ]
-            if suppressors:
-                item["shadow"], item["shadow_reason"], item["suppressor_tracks"] = True, 2, suppressors
-                shadows.append(item)
-            else:
-                kept.append(item)
-        published.extend(kept)
-    return published, shadows
+        selected_candidates.append(selected)
+    return sorted(
+        selected_candidates,
+        key=lambda item: (int(item["frame_idx"]), str(item["track_id"])),
+    )
 
 
 __all__ = ["BoxKalman"]

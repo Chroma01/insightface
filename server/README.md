@@ -128,10 +128,14 @@ docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license
 ```
 
-The model tool also supports `buffalo_m`, `buffalo_sc`, and `antelopev2`. It
-writes `manifest.json` and the signed `MODEL.LICENSE`; use `models verify` to
-check the installed package. Model terms remain separate from the Server source
-license.
+The model tool supports all seven FaceAnalysis packages: `buffalo_l`,
+`buffalo_m`, `buffalo_s`, `buffalo_sc`, `antelopev2`, `raccoon_s`, and
+`raccoon_l`. It installs only each package's detector and recognizer, writes
+`manifest.json` and the signed `MODEL.LICENSE`, and ignores Raccoon's
+PrivateFrame-only verifier. Use `models verify` to check the installed package.
+Model terms remain separate from the Server source license. Catalog archives
+are downloaded from the dedicated
+[`model-zoo` GitHub Release](https://github.com/deepinsight/insightface/releases/tag/model-zoo).
 
 Start CPU:
 

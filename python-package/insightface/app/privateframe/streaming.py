@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import sys
 import time
-from collections import Counter, OrderedDict, deque
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -33,7 +33,7 @@ from .models import (
     make_face_analysis,
     make_review_face_analysis,
 )
-from .packet_cache import EncodedPacketCache, crop_bgr, iter_cached_frames
+from .packet_cache import DecodedFrameStore, EncodedPacketCache, iter_cached_frames
 from .recognition import (
     GALLERY_DETECTOR_CONFIDENCE_THRESHOLD,
     GALLERY_DETECTOR_INPUT_SIZES,
@@ -58,7 +58,7 @@ from .revalidation import LocalReviewer, finalize_precomputed
 from .roi_flow import AffineEndpointState, ROIFlowState
 from .scan import ScanRunner
 from .scene_cut import SceneCutDetector
-from .tracker import _deduplicate
+from .tracker import _select_track_frame_candidates
 from .video import probe_video
 
 # Identity crops are biometric data and used to live until end-of-video without
@@ -67,11 +67,42 @@ from .video import probe_video
 # privacy-safe for both selective policies.
 _RECOGNITION_CANDIDATE_MAX_BYTES = 64 * 1024 * 1024
 _RECOGNITION_CANDIDATE_PRUNE_RATIO = 0.85
+_ENDPOINT_VERIFIER_HZ = 4.0
+_ENDPOINT_LOCAL_REVIEW_HZ = 1.0
+
+# ``max_analysis_fps`` is deliberately a soft ceiling. Real-world CFR files
+# commonly report values such as 30.02 for nominal 30 FPS media; treating that
+# tiny container-level difference as a reason to halve the detector cadence is
+# both surprising and wasteful. Keep the tolerance internal so the public
+# configuration has one sampling control.
+ANALYSIS_FPS_TOLERANCE_MULTIPLIER = 1.05
+_FINAL_CROSS_TRACK_MIN_COVERAGE = 0.80
+_FINAL_CROSS_TRACK_MAX_AREA_RATIO = 2.50
 
 
 def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
     if is_cancelled is not None and is_cancelled():
         raise InterruptedError("PrivateFrame operation was cancelled")
+
+
+def resolve_analysis_stride(
+    source_fps: float,
+    max_analysis_fps: float,
+    *,
+    tolerance_multiplier: float = ANALYSIS_FPS_TOLERANCE_MULTIPLIER,
+) -> int:
+    """Return the smallest uniform integer stride under the soft FPS ceiling."""
+
+    source = float(source_fps)
+    maximum = float(max_analysis_fps)
+    tolerance = float(tolerance_multiplier)
+    if not math.isfinite(source) or source <= 0.0:
+        raise ValueError("source_fps must be positive and finite")
+    if not math.isfinite(maximum) or maximum <= 0.0:
+        raise ValueError("max_analysis_fps must be positive and finite")
+    if not math.isfinite(tolerance) or tolerance < 1.0:
+        raise ValueError("tolerance_multiplier must be finite and at least 1")
+    return max(1, math.ceil(source / (maximum * tolerance)))
 
 
 @dataclass
@@ -113,6 +144,161 @@ class RecognitionLandmarkProposal:
     require_reference_agreement: bool
 
 
+def _evidence_boxes_by_track_frame(
+    evidence: list[dict[str, Any]] | None,
+) -> dict[tuple[str, int], list[list[float]]]:
+    references: dict[tuple[str, int], list[list[float]]] = {}
+    for item in evidence or []:
+        value = item.get("box")
+        if value is None:
+            continue
+        key = (str(item["track_id"]), int(item["frame_idx"]))
+        box = [float(component) for component in value]
+        if box not in references.setdefault(key, []):
+            references[key].append(box)
+    return references
+
+
+def _validate_final_track_geometry(
+    observations: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep one evidence-covering final box per track and frame.
+
+    Stabilization may move a box away from the reviewed geometry. Prefer the
+    stabilized value, fall back to its raw output box when that safely covers
+    all same-key evidence, and omit an unsafe observation so the final
+    coverage invariant can report the missing track/frame. Historical records
+    without same-key evidence retain their prior behavior.
+    """
+
+    def rank(value: dict[str, Any]) -> tuple[bool, bool, float]:
+        return (
+            value.get("local_confidence") is not None,
+            value.get("source") == "detector",
+            float(value.get("local_confidence") or value.get("confidence") or 0.0),
+        )
+
+    selected: dict[tuple[str, int], dict[str, Any]] = {}
+    for item in observations:
+        key = (str(item["track_id"]), int(item["frame_idx"]))
+        prior = selected.get(key)
+        if prior is None or rank(item) > rank(prior):
+            selected[key] = item
+
+    evidence_boxes = _evidence_boxes_by_track_frame(evidence)
+    output: list[dict[str, Any]] = []
+    for key, item in selected.items():
+        references = evidence_boxes.get(key, [])
+        if not references or all(
+            covers_reference(
+                reference,
+                item["box"],
+                min_coverage=_FINAL_CROSS_TRACK_MIN_COVERAGE,
+                max_candidate_area_ratio=_FINAL_CROSS_TRACK_MAX_AREA_RATIO,
+            )
+            for reference in references
+        ):
+            output.append(item)
+            continue
+        raw_box = item.get("raw_output_box")
+        if raw_box is None or not all(
+            covers_reference(
+                reference,
+                raw_box,
+                min_coverage=_FINAL_CROSS_TRACK_MIN_COVERAGE,
+                max_candidate_area_ratio=_FINAL_CROSS_TRACK_MAX_AREA_RATIO,
+            )
+            for reference in references
+        ):
+            continue
+        fallback = dict(item)
+        fallback["box"] = list(raw_box)
+        fallback["motion_box"] = list(raw_box)
+        fallback["box_stabilization"] = "raw_evidence_fallback"
+        output.append(fallback)
+    return sorted(
+        output,
+        key=lambda item: (int(item["frame_idx"]), str(item["track_id"])),
+    )
+
+
+def _deduplicate_final_cross_tracks(
+    observations: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+    *,
+    recognition_mode: str,
+) -> list[dict[str, Any]]:
+    """Suppress duplicate tracks only after their final boxes are stable.
+
+    Selective recognition decisions are track-specific and therefore never
+    share geometry across tracks. In ``all`` mode, a kept box may replace a
+    different track only when the two final boxes mutually cover one another
+    and the kept box also safely covers every evidence reference associated
+    with the dropped track/frame.
+    """
+
+    ordered = sorted(
+        _validate_final_track_geometry(observations, evidence),
+        key=lambda item: (
+            int(item["frame_idx"]),
+            0 if item.get("source") == "detector" else 1,
+            -float(item.get("confidence") or 0.0),
+            str(item["track_id"]),
+        ),
+    )
+    if str(recognition_mode) != "all":
+        return sorted(
+            ordered,
+            key=lambda item: (int(item["frame_idx"]), str(item["track_id"])),
+        )
+
+    evidence_boxes = _evidence_boxes_by_track_frame(evidence)
+    by_frame: dict[int, list[dict[str, Any]]] = {}
+    for item in ordered:
+        by_frame.setdefault(int(item["frame_idx"]), []).append(item)
+
+    output: list[dict[str, Any]] = []
+    for frame_idx in sorted(by_frame):
+        kept: list[dict[str, Any]] = []
+        for item in by_frame[frame_idx]:
+            item_box = item["box"]
+            references = evidence_boxes.get((str(item["track_id"]), frame_idx), [])
+            duplicate = any(
+                str(prior["track_id"]) != str(item["track_id"])
+                and covers_reference(
+                    item_box,
+                    prior["box"],
+                    min_coverage=_FINAL_CROSS_TRACK_MIN_COVERAGE,
+                    max_candidate_area_ratio=_FINAL_CROSS_TRACK_MAX_AREA_RATIO,
+                )
+                and covers_reference(
+                    prior["box"],
+                    item_box,
+                    min_coverage=_FINAL_CROSS_TRACK_MIN_COVERAGE,
+                    max_candidate_area_ratio=_FINAL_CROSS_TRACK_MAX_AREA_RATIO,
+                )
+                and bool(references)
+                and all(
+                    covers_reference(
+                        reference,
+                        prior["box"],
+                        min_coverage=_FINAL_CROSS_TRACK_MIN_COVERAGE,
+                        max_candidate_area_ratio=_FINAL_CROSS_TRACK_MAX_AREA_RATIO,
+                    )
+                    for reference in references
+                )
+                for prior in kept
+            )
+            if not duplicate:
+                kept.append(item)
+        output.extend(kept)
+    return sorted(
+        output,
+        key=lambda item: (int(item["frame_idx"]), str(item["track_id"])),
+    )
+
+
 def _accepted_interval_coverage(
     tracks: list[dict[str, Any]],
     observations: list[dict[str, Any]],
@@ -129,158 +315,54 @@ def _accepted_interval_coverage(
         expected = expected_by_track.setdefault(str(track["track_id"]), set())
         for first, last in track.get("accepted_intervals", []):
             expected.update(range(int(first), int(last) + 1))
-    observed_by_track: dict[str, set[int]] = {}
+    observations_by_key: dict[tuple[str, int], list[dict[str, Any]]] = {}
     observations_by_frame: dict[int, list[dict[str, Any]]] = {}
     for item in observations:
         frame_idx = int(item["frame_idx"])
-        observed_by_track.setdefault(str(item["track_id"]), set()).add(frame_idx)
+        observations_by_key.setdefault(
+            (str(item["track_id"]), frame_idx),
+            [],
+        ).append(item)
         observations_by_frame.setdefault(frame_idx, []).append(item)
-    evidence_by_key = {
-        (str(item["track_id"]), int(item["frame_idx"])): item
-        for item in (evidence or [])
-        if item.get("box") is not None
-    }
+    evidence_boxes = _evidence_boxes_by_track_frame(evidence)
 
-    def geometrically_covered(track_id: str, frame_idx: int) -> bool:
-        if not allow_cross_track_coverage:
-            return False
-        expected = evidence_by_key.get((track_id, frame_idx))
-        if expected is None:
-            return False
-        reference = np.asarray(expected["box"], dtype=np.float64)
-        for candidate in observations_by_frame.get(frame_idx, []):
-            if covers_reference(
+    def covers_evidence(candidate: dict[str, Any], references: list[list[float]]) -> bool:
+        return all(
+            covers_reference(
                 reference,
                 candidate["box"],
-                min_coverage=0.80,
-                max_candidate_area_ratio=2.50,
-            ):
-                return True
-        return False
+                min_coverage=_FINAL_CROSS_TRACK_MIN_COVERAGE,
+                max_candidate_area_ratio=_FINAL_CROSS_TRACK_MAX_AREA_RATIO,
+            )
+            for reference in references
+        )
+
+    def geometrically_covered(track_id: str, frame_idx: int) -> tuple[bool, bool]:
+        references = evidence_boxes.get((track_id, frame_idx), [])
+        exact = observations_by_key.get((track_id, frame_idx), [])
+        if exact and (not references or any(covers_evidence(item, references) for item in exact)):
+            return True, False
+        if not allow_cross_track_coverage or not references:
+            return False, False
+        cross_track = [
+            item
+            for item in observations_by_frame.get(frame_idx, [])
+            if str(item["track_id"]) != track_id
+        ]
+        covered = any(covers_evidence(item, references) for item in cross_track)
+        return covered, covered
 
     expected_frames = sum(len(values) for values in expected_by_track.values())
     hole_frames = 0
     cross_track_coverage_frames = 0
     for track_id, values in expected_by_track.items():
-        exact = observed_by_track.get(track_id, set())
-        for frame_idx in values - exact:
-            if geometrically_covered(track_id, frame_idx):
+        for frame_idx in values:
+            covered, cross_track = geometrically_covered(track_id, frame_idx)
+            if covered and cross_track:
                 cross_track_coverage_frames += 1
-            else:
+            elif not covered:
                 hole_frames += 1
     return expected_frames, hole_frames, cross_track_coverage_frames
-
-
-def _restore_uncovered_accepted_shadows(
-    tracks: list[dict[str, Any]],
-    observations: list[dict[str, Any]],
-    shadows: list[dict[str, Any]],
-    evidence: list[dict[str, Any]],
-    *,
-    allow_cross_track_coverage: bool,
-) -> tuple[list[dict[str, Any]], int]:
-    """Restore a shadow if output smoothing invalidated its suppressor.
-
-    Cross-track shadow suppression is decided before box stabilization.  A
-    later stabilized suppressor can move just far enough that it no longer
-    covers the accepted shadow geometry, leaving a hole inside an admitted
-    interval.  Re-evaluate only those missing accepted track/frame pairs
-    against the final boxes and publish the already-reviewed shadow when no
-    final observation safely covers it.
-    """
-
-    accepted_intervals = {
-        str(track["track_id"]): [
-            (int(first), int(last))
-            for first, last in track.get("accepted_intervals", [])
-        ]
-        for track in tracks
-        if bool(track.get("accepted", False))
-    }
-    observed_by_track: dict[str, set[int]] = {}
-    observations_by_frame: dict[int, list[dict[str, Any]]] = {}
-    for item in observations:
-        track_id = str(item["track_id"])
-        frame_idx = int(item["frame_idx"])
-        observed_by_track.setdefault(track_id, set()).add(frame_idx)
-        observations_by_frame.setdefault(frame_idx, []).append(item)
-    evidence_by_key = {
-        (str(item["track_id"]), int(item["frame_idx"])): item
-        for item in evidence
-        if item.get("box") is not None
-    }
-
-    repairs: list[dict[str, Any]] = []
-    for shadow in sorted(
-        shadows,
-        key=lambda item: (int(item["frame_idx"]), str(item["track_id"])),
-    ):
-        track_id = str(shadow["track_id"])
-        frame_idx = int(shadow["frame_idx"])
-        intervals = accepted_intervals.get(track_id, [])
-        if not any(first <= frame_idx <= last for first, last in intervals):
-            continue
-        exact = observed_by_track.setdefault(track_id, set())
-        if frame_idx in exact:
-            continue
-        review = evidence_by_key.get((track_id, frame_idx), {})
-        reference = review.get(
-            "box",
-            shadow.get("motion_box", shadow.get("box")),
-        )
-        if reference is None:
-            continue
-        shadow_box = shadow.get("motion_box", shadow.get("box"))
-        if shadow_box is None or not covers_reference(
-            reference,
-            shadow_box,
-            min_coverage=0.80,
-            max_candidate_area_ratio=2.50,
-        ):
-            # Exact track identity alone must never turn unrelated/shrunken
-            # shadow geometry into a privacy-coverage repair.
-            continue
-        if allow_cross_track_coverage and any(
-            covers_reference(
-                reference,
-                candidate["box"],
-                min_coverage=0.80,
-                max_candidate_area_ratio=2.50,
-            )
-            for candidate in observations_by_frame.get(frame_idx, [])
-        ):
-            continue
-
-        repair = dict(shadow)
-        published_box = list(shadow_box)
-        repair.update(
-            {
-                "box": published_box,
-                "motion_box": published_box,
-                "shadow": False,
-                "shadow_reason": 0,
-                "suppressor_tracks": [],
-                "accepted_interval_shadow_repair": True,
-                "pre_stabilization_suppressor_tracks": list(
-                    shadow.get("suppressor_tracks", [])
-                ),
-                "local_match_count": int(review.get("local_match_count", -1)),
-                "local_confidence": review.get("local_confidence"),
-                "local_review_reason": review.get("local_review_reason"),
-                "verifier_face_probability": review.get(
-                    "verifier_face_probability"
-                ),
-            }
-        )
-        repairs.append(repair)
-        exact.add(frame_idx)
-        observations_by_frame.setdefault(frame_idx, []).append(repair)
-
-    if not repairs:
-        return observations, 0
-    return _deduplicate_stabilized_track_frames([*observations, *repairs]), len(
-        repairs
-    )
 
 
 def _detector_pipeline_depth(
@@ -298,6 +380,38 @@ def _detector_pipeline_depth(
         return target
     byte_limited_depth = max(configured_depth, int(byte_limit) // int(frame_bytes))
     return min(target, byte_limited_depth)
+
+
+def _decoded_frame_store_target(
+    config: dict[str, Any],
+    fps: float,
+) -> int:
+    """Return the configured or policy-derived decoded-frame horizon.
+
+    ``None`` keeps the Base profile adaptive: retain enough frame indices for
+    the longest configured historical consumer, while the independent byte
+    capacity remains the hard memory bound.  An explicit integer preserves a
+    deterministic operator override; zero disables decoded-frame retention.
+    """
+
+    configured = config["streaming"].get("recent_frame_cache_frames")
+    if configured is not None:
+        return max(0, int(configured))
+    history = config["streaming"]
+    tracking = config.get("tracking", {})
+    flow = tracking.get("kalman_optical_flow", {})
+    fusion = flow.get("bidirectional_fusion", {})
+    time_horizon = math.ceil(
+        max(0.0, float(history.get("max_retroactive_seconds", 0.0)))
+        * max(float(fps), 1.0)
+    )
+    return max(
+        1,
+        time_horizon + 1,
+        int(fusion.get("max_gap_frames", 0)) + 2,
+        int(tracking.get("reliable_pre_roll_extension", 0)) + 1,
+        int(tracking.get("reliable_endpoint_extension", 0)) + 1,
+    )
 
 
 def _detector_scan_burst_frames(rule_gate: dict[str, Any]) -> int:
@@ -636,27 +750,26 @@ def _apply_fragment_aliases(
         merged_tracks.append(track)
 
     # Admission and output metadata need one review record per canonical
-    # object/frame. Prefer a detector measurement, then the canonical path,
-    # then the strongest local confidence.
+    # object/frame. Match the final detector's confidence-first selection so
+    # the chosen box and evidence come from the same stitched fragment.
+    # Detector ties retain input order like finalization; canonical origin and
+    # local confidence remain the tie breakers for tracking-only evidence.
+    def evidence_rank(item: dict[str, Any]) -> tuple[bool, float, bool, float]:
+        detector = item.get("source") == "detector"
+        if detector:
+            return True, float(item.get("confidence") or 0.0), False, 0.0
+        return (
+            False,
+            0.0,
+            item.get("original_track_id", item["track_id"]) == item["track_id"],
+            float(item.get("local_confidence") or 0.0),
+        )
+
     selected_evidence: dict[tuple[str, int], dict[str, Any]] = {}
     for item in evidence:
         key = (str(item["track_id"]), int(item["frame_idx"]))
         prior = selected_evidence.get(key)
-        item_key = (
-            item.get("source") == "detector",
-            item.get("original_track_id", item["track_id"]) == item["track_id"],
-            float(item.get("local_confidence") or 0.0),
-        )
-        prior_key = (
-            (
-                prior.get("source") == "detector",
-                prior.get("original_track_id", prior["track_id"]) == prior["track_id"],
-                float(prior.get("local_confidence") or 0.0),
-            )
-            if prior is not None
-            else (False, False, -1.0)
-        )
-        if prior is None or item_key > prior_key:
+        if prior is None or evidence_rank(item) > evidence_rank(prior):
             selected_evidence[key] = item
 
     # A stitched object can have two independently tracked candidates for the
@@ -707,31 +820,6 @@ def _apply_fragment_aliases(
         candidates[selected_index]["fragment_geometry_selected"] = True
     candidates[:] = [item for index, item in enumerate(candidates) if index in keep]
     return merged_tracks, list(selected_evidence.values())
-
-
-def _deduplicate_stabilized_track_frames(
-    observations: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Keep one final box per canonical object and frame after smoothing."""
-
-    selected: dict[tuple[str, int], dict[str, Any]] = {}
-    for item in observations:
-        key = (str(item["track_id"]), int(item["frame_idx"]))
-        prior = selected.get(key)
-
-        def rank(value: dict[str, Any]) -> tuple[bool, bool, float]:
-            return (
-                value.get("local_confidence") is not None,
-                value.get("source") == "detector",
-                float(value.get("local_confidence") or value.get("confidence") or 0.0),
-            )
-
-        if prior is None or rank(item) > rank(prior):
-            selected[key] = item
-    return sorted(
-        selected.values(),
-        key=lambda item: (int(item["frame_idx"]), str(item["track_id"])),
-    )
 
 
 def _association_score(
@@ -901,9 +989,6 @@ def _candidate(state: ObjectState, frame_idx: int, result: dict[str, Any]) -> di
         "_flow_trusted": bool(result.get("valid", False)),
         "area_ratio": float(area_ratio(reference, value)),
         "center_distance": float(normalized_center_distance(reference, value)),
-        "shadow": False,
-        "shadow_reason": 0,
-        "suppressor_tracks": [],
     }
 
 
@@ -1145,7 +1230,17 @@ class StreamingEngine:
         self.config = config
         self.metadata = probe_video(source)
         self.fps = float(self.metadata.fps)
-        self.detector_frame_stride = int(config["scan"].get("frame_stride", 1))
+        self.max_analysis_fps = float(config["scan"]["max_analysis_fps"])
+        self.analysis_fps_tolerance_multiplier = ANALYSIS_FPS_TOLERANCE_MULTIPLIER
+        self.allowed_regular_analysis_fps = (
+            self.max_analysis_fps * self.analysis_fps_tolerance_multiplier
+        )
+        self.detector_frame_stride = resolve_analysis_stride(
+            self.fps,
+            self.max_analysis_fps,
+            tolerance_multiplier=self.analysis_fps_tolerance_multiplier,
+        )
+        self.nominal_regular_analysis_fps = self.fps / self.detector_frame_stride
         self.between_scan_frames = str(
             config["tracking"].get("between_scan_frames", "interpolate")
         )
@@ -1153,9 +1248,9 @@ class StreamingEngine:
             self.between_scan_frames,
             self.detector_frame_stride,
         )
-        # Every explicitly sampled cadence uses the same reduced-work review
-        # policy. Keeping this tied to only the two friendly presets made a
-        # manual stride such as 3 silently fall back to every-frame review.
+        # Every automatically sampled cadence uses the same reduced-work
+        # review policy, including less common source/ceiling ratios that
+        # derive strides such as 3, 8, or 16.
         self.fast_review_mode = self.detector_frame_stride > 1
         self.local_review_stride = (
             self.detector_frame_stride if self.fast_review_mode else 1
@@ -1185,6 +1280,12 @@ class StreamingEngine:
                 "video_start_burst",
             )
         self.settings = dict(config["tracking"])
+        minimum_endpoint_extension = self.detector_frame_stride - 1
+        for setting in ("endpoint_extension", "reliable_endpoint_extension"):
+            self.settings[setting] = max(
+                int(self.settings.get(setting, 0)),
+                minimum_endpoint_extension,
+            )
         self.settings["max_missed_frames"] = max(
             1, math.ceil(float(config["streaming"]["max_missed_seconds"]) * self.fps)
         )
@@ -1259,6 +1360,17 @@ class StreamingEngine:
         self.recognition_candidate_max_bytes = _RECOGNITION_CANDIDATE_MAX_BYTES
         self.recognition_pool_limit = max(8, 2 * int(self.recognition_engine.max_frames_per_track))
         self.cache = EncodedPacketCache(workdir / "encoded-packets.sqlite", source)
+        self.decoded_frame_store = DecodedFrameStore(
+            frame_target=_decoded_frame_store_target(config, self.fps),
+            byte_capacity=int(
+                config["streaming"].get("recent_frame_cache_max_bytes", 0)
+            ),
+        )
+        self.decoded_frame_bytes = (
+            int(getattr(self.metadata, "width", 0))
+            * int(getattr(self.metadata, "height", 0))
+            * 3
+        )
         self.states: list[ObjectState] = []
         self.tracks: list[dict[str, Any]] = []
         self.detections: list[dict[str, Any]] = []
@@ -1269,6 +1381,9 @@ class StreamingEngine:
         self.endpoint_affine_jobs = 0
         self.endpoint_affine_frames = 0
         self.endpoint_affine_published_frames = 0
+        self.endpoint_verifier_checkpoints = 0
+        self.endpoint_verifier_refinement_frames = 0
+        self.endpoint_local_review_frames: dict[str, set[int]] = {}
         self.interpolate_endpoint_jobs = 0
         self.interpolate_endpoint_frames = 0
         self.interpolate_endpoint_published_frames = 0
@@ -1292,10 +1407,6 @@ class StreamingEngine:
         self.long_gap_reanchors = 0
         self.detector_scan_opportunities = 0
         self.discarded_unanchored_tail_frames = 0
-        self.recent_frames: OrderedDict[int, np.ndarray] = OrderedDict()
-        self.recent_frame_bytes = 0
-        self.peak_recent_frame_bytes = 0
-        self.recent_frame_hits = 0
 
     def _force_detector_scan_range(self, first: int, last: int, reason: str) -> None:
         """Request real full-frame scans for a bounded future frame range."""
@@ -1885,21 +1996,7 @@ class StreamingEngine:
         return artifact
 
     def _remember_frame(self, frame_idx: int, frame: np.ndarray) -> None:
-        maximum_frames = int(self.config["streaming"].get("recent_frame_cache_frames", 0))
-        maximum_bytes = int(self.config["streaming"].get("recent_frame_cache_max_bytes", 0))
-        if maximum_frames <= 0 or maximum_bytes <= 0:
-            return
-        prior = self.recent_frames.pop(frame_idx, None)
-        if prior is not None:
-            self.recent_frame_bytes -= int(prior.nbytes)
-        self.recent_frames[frame_idx] = frame
-        self.recent_frame_bytes += int(frame.nbytes)
-        while self.recent_frames and (
-            len(self.recent_frames) > maximum_frames or self.recent_frame_bytes > maximum_bytes
-        ):
-            _index, removed = self.recent_frames.popitem(last=False)
-            self.recent_frame_bytes -= int(removed.nbytes)
-        self.peak_recent_frame_bytes = max(self.peak_recent_frame_bytes, self.recent_frame_bytes)
+        self.decoded_frame_store.remember(frame_idx, frame)
 
     def _decode_frames(
         self,
@@ -1909,42 +2006,35 @@ class StreamingEngine:
         crop: tuple[int, int, int, int] | None = None,
         crops: dict[int, tuple[int, int, int, int]] | None = None,
     ) -> dict[int, np.ndarray]:
-        """Use the short RGB ring first, then decode only missing intervals."""
+        """Read one range through the shared complete-frame store.
+
+        Complete oriented BGR frames, rather than crop-specific results, are
+        retained so overlapping history consumers can reuse one packet decode.
+        If retention is disabled or a single source frame exceeds its byte
+        capacity, preserve the former crop-at-decode path and memory behavior.
+        """
 
         if crop is not None and crops is not None:
             raise ValueError("crop and crops are mutually exclusive")
-        recent = getattr(self, "recent_frames", {})
-        output: dict[int, np.ndarray] = {}
-        missing: list[int] = []
-        for frame_idx in range(first_frame, last_frame + 1):
-            frame = recent.get(frame_idx)
-            if frame is None:
-                missing.append(frame_idx)
-                continue
-            selected_crop = crops[frame_idx] if crops is not None else crop
-            output[frame_idx] = crop_bgr(frame, selected_crop) if selected_crop is not None else frame
-            self.recent_frame_hits = getattr(self, "recent_frame_hits", 0) + 1
-
-        intervals: list[tuple[int, int]] = []
-        for frame_idx in missing:
-            if intervals and frame_idx == intervals[-1][1] + 1:
-                intervals[-1] = (intervals[-1][0], frame_idx)
-            else:
-                intervals.append((frame_idx, frame_idx))
-        for interval_first, interval_last in intervals:
-            interval_crops = (
-                {frame_idx: crops[frame_idx] for frame_idx in range(interval_first, interval_last + 1)}
-                if crops is not None
-                else None
+        store = self.decoded_frame_store
+        if (
+            store.frame_target <= 0
+            or store.byte_capacity <= 0
+            or self.decoded_frame_bytes > store.byte_capacity
+        ):
+            return self.cache.decode_range(
+                first_frame,
+                last_frame,
+                crop=crop,
+                crops=crops,
             )
-            if crop is not None:
-                decoded = self.cache.decode_range(interval_first, interval_last, crop=crop)
-            elif interval_crops is not None:
-                decoded = self.cache.decode_range(interval_first, interval_last, crops=interval_crops)
-            else:
-                decoded = self.cache.decode_range(interval_first, interval_last)
-            output.update(decoded)
-        return {frame_idx: output[frame_idx] for frame_idx in range(first_frame, last_frame + 1)}
+        return store.read_range(
+            first_frame,
+            last_frame,
+            loader=lambda first, last: self.cache.decode_range(first, last),
+            crop=crop,
+            crops=crops,
+        )
 
     def _review_plan(
         self,
@@ -2008,15 +2098,19 @@ class StreamingEngine:
                 for component in (box if cache_box is None else cache_box)
             ),
         )
-        cached = self._verifier_scores.get(key)
+        scores = getattr(self, "_verifier_scores", None)
+        if scores is None:
+            scores = {}
+            self._verifier_scores = scores
+        cached = scores.get(key)
         if cached is not None:
-            self.verifier_review_cache_hits += 1
+            self.verifier_review_cache_hits = (
+                getattr(self, "verifier_review_cache_hits", 0) + 1
+            )
             return cached
-        score = float(
-            self.reviewer.verify(frame, [box])[0]["face_probability"]
-        )
-        self._verifier_scores[key] = score
-        self.verifier_review_calls += 1
+        score = float(self.reviewer.verify(frame, [box])[0]["face_probability"])
+        scores[key] = score
+        self.verifier_review_calls = getattr(self, "verifier_review_calls", 0) + 1
         return score
 
     def _measure_review(
@@ -2631,9 +2725,6 @@ class StreamingEngine:
                 ),
                 "area_ratio": float(area_ratio(anchor_reference, geometry_box)),
                 "center_distance": float(normalized_center_distance(anchor_reference, geometry_box)),
-                "shadow": False,
-                "shadow_reason": 0,
-                "suppressor_tracks": [],
             }
             evidence = self._record_consensus_review(item, review)
             self._refine_tracking_geometry(
@@ -2892,9 +2983,6 @@ class StreamingEngine:
                 "center_distance": float(
                     normalized_center_distance(left_box, geometry_box)
                 ),
-                "shadow": False,
-                "shadow_reason": 0,
-                "suppressor_tracks": [],
             }
             review = self._empty_local_review()
             review.update(
@@ -3070,6 +3158,8 @@ class StreamingEngine:
         target_frame: int,
         direction: int,
         run_neural_review: bool = True,
+        sparse_neural_review: bool = False,
+        emit_before: int | None = None,
         repair_reason: str = "ordinary_endpoint",
         boundary_reason: str | None = None,
         boundary_frame_exclusive: int | None = None,
@@ -3102,36 +3192,142 @@ class StreamingEngine:
                 int(self._bidirectional_fusion_settings()["max_corridor_side_pixels"]),
             ),
         )
-        estimated_bytes = (
-            max(0, corridor[2] - corridor[0])
-            * max(0, corridor[3] - corridor[1])
-            * 3
-            * (last - first + 1)
+        frame_bytes = (
+            max(0, corridor[2] - corridor[0]) * max(0, corridor[3] - corridor[1]) * 3
         )
         maximum_materialized_bytes = int(
             self._bidirectional_fusion_settings()["max_materialized_bytes"]
         )
-        if estimated_bytes > maximum_materialized_bytes:
+        if frame_bytes <= 0 or frame_bytes > maximum_materialized_bytes:
             return 0
-        decoded = self._decode_frames(first, last, crop=corridor)
-        required = set(range(first, last + 1))
-        if set(decoded) != required or anchor_frame not in decoded:
+        materialized_frame_limit = max(
+            1,
+            maximum_materialized_bytes // frame_bytes,
+        )
+        nominal_verifier_interval = max(
+            1,
+            int(
+                math.ceil(
+                    max(float(getattr(self, "fps", 30.0)), 1.0) / _ENDPOINT_VERIFIER_HZ
+                )
+            ),
+        )
+        verifier_interval = (
+            min(nominal_verifier_interval, materialized_frame_limit)
+            if run_neural_review and sparse_neural_review
+            else nominal_verifier_interval
+        )
+        configured_chunk_size = max(
+            1,
+            int(
+                self.config["streaming"].get(
+                    "pre_roll_decode_chunk_frames",
+                    last - first + 1,
+                )
+            ),
+        )
+        chunk_size = max(
+            1,
+            min(
+                configured_chunk_size,
+                materialized_frame_limit,
+            ),
+        )
+        anchor_decoded = self._decode_frames(
+            anchor_frame,
+            anchor_frame,
+            crop=corridor,
+        )
+        if anchor_frame not in anchor_decoded:
             return 0
         ox, oy = corridor[0], corridor[1]
         state = AffineEndpointState(
-            decoded[anchor_frame],
+            anchor_decoded[anchor_frame],
             np.asarray(_translate_box(anchor_box, -ox, -oy), dtype=np.float64),
             self.config["tracking"]["kalman_optical_flow"],
         )
-        stop = target_frame + direction
+        # AffineEndpointState retains only its normalized gray ROI. Release the
+        # decoded anchor crop before materializing the first endpoint block.
+        del anchor_decoded
+        local_review_interval = max(
+            1,
+            int(
+                math.ceil(
+                    max(float(getattr(self, "fps", 30.0)), 1.0)
+                    / _ENDPOINT_LOCAL_REVIEW_HZ
+                )
+            ),
+        )
+        rule_gate = (
+            self.config.get("revalidation", {}).get("policy", {}).get("rule_gate", {})
+        )
+        short_track = rule_gate.get("short_track", {})
+        verifier_pass = float(short_track.get("moderate_verifier_p50", 0.40))
+        verifier_strong = max(
+            verifier_pass,
+            float(short_track.get("strong_verifier_p50", 0.80)),
+        )
+        endpoint_local_frames = getattr(
+            self,
+            "endpoint_local_review_frames",
+            None,
+        )
+        if endpoint_local_frames is None:
+            endpoint_local_frames = {}
+            self.endpoint_local_review_frames = endpoint_local_frames
+        track_local_frames = endpoint_local_frames.setdefault(track_id, set())
+        pending_bucket: list[tuple[dict[str, Any], np.ndarray]] = []
         emitted = 0
         self.endpoint_affine_jobs += 1
-        for frame_idx in range(anchor_frame + direction, stop, direction):
-            result = state.step(decoded[frame_idx])
-            if not bool(result["valid"]):
+        terminated = False
+        prior_global_box = np.asarray(anchor_box, dtype=np.float64)
+
+        def retain(candidate: dict[str, Any]) -> None:
+            nonlocal emitted
+            frame_idx = int(candidate["frame_idx"])
+            if emit_before is not None and direction < 0 and frame_idx >= emit_before:
+                return
+            self.endpoint_affine_candidates.append(candidate)
+            emitted += 1
+
+        cursor = anchor_frame + direction
+        while direction * (target_frame - cursor) >= 0 and not terminated:
+            remaining = abs(target_frame - cursor) + 1
+            # Historical decode scheduling and neural-review cadence are
+            # independent concerns.  Materialize a normal execution block and
+            # keep the sparse Verifier checkpoints inside that block.  The
+            # pending prefix from a prior block still counts against the same
+            # byte budget, so unusual chunk/checkpoint alignments remain
+            # bounded without forcing every decode to restart at a checkpoint.
+            available_materialized_frames = max(
+                1,
+                materialized_frame_limit - len(pending_bucket),
+            )
+            count = min(
+                chunk_size,
+                remaining,
+                available_materialized_frames,
+            )
+            chunk_end = cursor + direction * (count - 1)
+            chunk_first, chunk_last = sorted((cursor, chunk_end))
+            decoded = self._decode_frames(
+                chunk_first,
+                chunk_last,
+                crop=corridor,
+            )
+            if set(decoded) != set(range(chunk_first, chunk_last + 1)):
                 break
-            global_box = np.asarray(_translate_box(result["box"], ox, oy), dtype=np.float64)
-            candidate = {
+            for frame_idx in range(cursor, chunk_end + direction, direction):
+                image = decoded[frame_idx]
+                result = state.step(image)
+                if not bool(result["valid"]):
+                    terminated = True
+                    break
+                global_box = np.asarray(
+                    _translate_box(result["box"], ox, oy),
+                    dtype=np.float64,
+                )
+                candidate = {
                     "frame_idx": frame_idx,
                     "track_id": track_id,
                     "source": "kalman_optical_flow",
@@ -3146,31 +3342,30 @@ class StreamingEngine:
                     "endpoint_repair": "affine_ransac",
                     "endpoint_repair_reason": repair_reason,
                     "endpoint_boundary_reason": boundary_reason,
-                    "endpoint_boundary_frame_exclusive": (
-                        boundary_frame_exclusive
-                    ),
+                    "endpoint_boundary_frame_exclusive": (boundary_frame_exclusive),
                     "admission_scope": "reliable_endpoint_extension",
-                    "reduced_assurance": not run_neural_review,
+                    "reduced_assurance": (
+                        not run_neural_review or sparse_neural_review
+                    ),
                     "affine_scale": float(result["affine_scale"]),
                     "affine_rotation_degrees": float(result["affine_rotation_degrees"]),
                     "area_ratio": 1.0,
                     "center_distance": 0.0,
-                    "shadow": False,
-                    "shadow_reason": 0,
-                    "suppressor_tracks": [],
                 }
-            if run_neural_review:
-                candidate["_review_measurement"] = self._measure_review(
-                    decoded[frame_idx],
-                    candidate,
-                    (ox, oy),
-                    local_review_reason="endpoint_affine",
-                )
-            else:
-                # This isolated geometry is never detector, face, or identity
-                # evidence. It may be computed while the packet range is still
-                # cached, but publication later filters it through final track
-                # admission and accepted-interval continuity.
+                self.endpoint_affine_frames += 1
+                if run_neural_review and not sparse_neural_review:
+                    candidate["_review_measurement"] = self._measure_review(
+                        image,
+                        candidate,
+                        (ox, oy),
+                        local_review_reason="endpoint_affine",
+                    )
+                    retain(candidate)
+                    prior_global_box = np.asarray(
+                        candidate["motion_box"], dtype=np.float64
+                    )
+                    continue
+
                 review = self._empty_local_review()
                 review.update(
                     {
@@ -3179,52 +3374,302 @@ class StreamingEngine:
                     }
                 )
                 candidate["_review_measurement"] = review
-            self.endpoint_affine_candidates.append(candidate)
-            emitted += 1
-            self.endpoint_affine_frames += 1
+                if not run_neural_review:
+                    retain(candidate)
+                    prior_global_box = global_box
+                    continue
+
+                pending_bucket.append((candidate, image))
+                checkpoint = bool(
+                    frame_idx == target_frame
+                    or abs(frame_idx - anchor_frame) % verifier_interval == 0
+                )
+                if not checkpoint:
+                    prior_global_box = global_box
+                    continue
+
+                local_box = _translate_box(global_box, -ox, -oy)
+                score = self._verify_once(
+                    image,
+                    candidate,
+                    local_box,
+                    cache_box=global_box.tolist(),
+                )
+                self.endpoint_verifier_checkpoints = (
+                    getattr(self, "endpoint_verifier_checkpoints", 0) + 1
+                )
+                review["local_review_reason"] = "endpoint_verifier_checkpoint"
+                review["verifier_face_probability"] = score
+                candidate["_review_measurement"] = review
+
+                weak_affine = bool(
+                    float(result.get("quality", 0.0)) < 0.35
+                    or int(result.get("inliers", 0))
+                    < max(
+                        int(
+                            self.config["tracking"]["kalman_optical_flow"]["min_points"]
+                        ),
+                        math.ceil(0.5 * int(result.get("selected", 0))),
+                    )
+                )
+                recognition_needs_candidate = False
+                recognition_engine = getattr(self, "recognition_engine", None)
+                if recognition_engine is not None and recognition_engine.enabled:
+                    required_candidates = max(
+                        1,
+                        int(recognition_engine.max_frames_per_track),
+                    )
+                    candidate_frames = sorted(
+                        {
+                            int(value.frame_index)
+                            for _identifier, value in getattr(
+                                self,
+                                "recognition_candidates",
+                                {},
+                            ).get(track_id, [])
+                        }
+                    )
+                    independent_frames: list[int] = []
+                    minimum_gap = max(
+                        1,
+                        int(math.ceil(float(getattr(self, "fps", 30.0)))),
+                    )
+                    for candidate_frame in candidate_frames:
+                        if (
+                            not independent_frames
+                            or candidate_frame - independent_frames[-1] >= minimum_gap
+                        ):
+                            independent_frames.append(candidate_frame)
+                    recognition_needs_candidate = (
+                        len(independent_frames) < required_candidates
+                    )
+                local_allowed = bool(
+                    not track_local_frames
+                    or min(abs(frame_idx - prior) for prior in track_local_frames)
+                    >= local_review_interval
+                )
+                if (
+                    score < verifier_strong
+                    or weak_affine
+                    or recognition_needs_candidate
+                ) and local_allowed:
+                    local_reason = (
+                        "endpoint_recognition_candidate"
+                        if recognition_needs_candidate
+                        and score >= verifier_strong
+                        and not weak_affine
+                        else "endpoint_affine_anomaly"
+                    )
+                    review = self._measure_review(
+                        image,
+                        candidate,
+                        (ox, oy),
+                        force_local=True,
+                        local_review_reason=local_reason,
+                    )
+                    track_local_frames.add(frame_idx)
+                    candidate["_review_measurement"] = review
+                    self._refine_tracking_geometry(
+                        candidate,
+                        review,
+                        prior_global_box,
+                    )
+                    score = float(review.get("verifier_face_probability") or 0.0)
+                    corrected_box = np.asarray(
+                        candidate["motion_box"], dtype=np.float64
+                    )
+                    if not np.allclose(corrected_box, global_box):
+                        score = self._verify_once(
+                            image,
+                            candidate,
+                            _translate_box(corrected_box, -ox, -oy),
+                            cache_box=corrected_box.tolist(),
+                        )
+                        review["verifier_face_probability"] = score
+                        state = AffineEndpointState(
+                            image,
+                            np.asarray(
+                                _translate_box(corrected_box, -ox, -oy),
+                                dtype=np.float64,
+                            ),
+                            self.config["tracking"]["kalman_optical_flow"],
+                        )
+                    self._capture_tracking_recognition_candidate(
+                        image,
+                        candidate,
+                        review,
+                        (ox, oy),
+                    )
+
+                if score >= verifier_pass:
+                    for bucket_candidate, _bucket_image in pending_bucket:
+                        retain(bucket_candidate)
+                    pending_bucket.clear()
+                    prior_global_box = np.asarray(
+                        candidate["motion_box"], dtype=np.float64
+                    )
+                    continue
+
+                # The checkpoint failed. Resolve only this short bucket at
+                # frame granularity so a quarter-second sample does not move
+                # the visible endpoint by the whole checkpoint interval.
+                for bucket_candidate, bucket_image in pending_bucket:
+                    if bucket_candidate is candidate:
+                        bucket_score = score
+                    else:
+                        bucket_box = np.asarray(
+                            bucket_candidate["motion_box"],
+                            dtype=np.float64,
+                        )
+                        bucket_score = self._verify_once(
+                            bucket_image,
+                            bucket_candidate,
+                            _translate_box(bucket_box, -ox, -oy),
+                            cache_box=bucket_box.tolist(),
+                        )
+                        bucket_review = bucket_candidate["_review_measurement"]
+                        bucket_review["local_review_reason"] = (
+                            "endpoint_verifier_boundary_refinement"
+                        )
+                        bucket_review["verifier_face_probability"] = bucket_score
+                        self.endpoint_verifier_refinement_frames = (
+                            getattr(self, "endpoint_verifier_refinement_frames", 0) + 1
+                        )
+                    if bucket_score < verifier_pass:
+                        terminated = True
+                        break
+                    retain(bucket_candidate)
+                pending_bucket.clear()
+                prior_global_box = np.asarray(candidate["motion_box"], dtype=np.float64)
+                if terminated:
+                    break
+            del decoded
+            cursor = chunk_end + direction
+        if pending_bucket and run_neural_review and sparse_neural_review:
+            # Affine may fail between scheduled checkpoints. Validate the last
+            # valid geometry instead of discarding the entire still-unchecked
+            # bucket merely because the following frame had insufficient LK
+            # support.
+            checkpoint_candidate, checkpoint_image = pending_bucket[-1]
+            checkpoint_box = np.asarray(
+                checkpoint_candidate["motion_box"],
+                dtype=np.float64,
+            )
+            checkpoint_score = self._verify_once(
+                checkpoint_image,
+                checkpoint_candidate,
+                _translate_box(checkpoint_box, -ox, -oy),
+                cache_box=checkpoint_box.tolist(),
+            )
+            checkpoint_review = checkpoint_candidate["_review_measurement"]
+            checkpoint_review["local_review_reason"] = "endpoint_verifier_affine_stop"
+            checkpoint_review["verifier_face_probability"] = checkpoint_score
+            self.endpoint_verifier_checkpoints = (
+                getattr(self, "endpoint_verifier_checkpoints", 0) + 1
+            )
+            if checkpoint_score >= verifier_pass:
+                for bucket_candidate, _bucket_image in pending_bucket:
+                    retain(bucket_candidate)
+            else:
+                for bucket_candidate, bucket_image in pending_bucket:
+                    if bucket_candidate is checkpoint_candidate:
+                        bucket_score = checkpoint_score
+                    else:
+                        bucket_box = np.asarray(
+                            bucket_candidate["motion_box"],
+                            dtype=np.float64,
+                        )
+                        bucket_score = self._verify_once(
+                            bucket_image,
+                            bucket_candidate,
+                            _translate_box(bucket_box, -ox, -oy),
+                            cache_box=bucket_box.tolist(),
+                        )
+                        bucket_review = bucket_candidate["_review_measurement"]
+                        bucket_review["local_review_reason"] = (
+                            "endpoint_verifier_boundary_refinement"
+                        )
+                        bucket_review["verifier_face_probability"] = bucket_score
+                        self.endpoint_verifier_refinement_frames = (
+                            getattr(self, "endpoint_verifier_refinement_frames", 0) + 1
+                        )
+                    if bucket_score < verifier_pass:
+                        break
+                    retain(bucket_candidate)
+            pending_bucket.clear()
         return emitted
 
     def _repair_interpolate_endpoint(
         self,
         state: ObjectState,
         *,
-        boundary_frame_exclusive: int,
-        close_reason: str,
+        direction: int = 1,
+        extension: int | None = None,
+        emit_before: int | None = None,
+        boundary_frame_exclusive: int | None = None,
+        close_reason: str = "natural",
     ) -> int:
-        """Complete one unanchored track endpoint before any close boundary.
+        """Complete either unanchored endpoint with one symmetric policy.
 
-        ``interpolate`` normally requires detector anchors on both sides. Track
-        closure makes the right side permanently unavailable whether closure
-        came from retirement, a scene cut, or the source boundary. Compute the
-        same bounded one-sided affine continuation while cached packets still
-        exist; final admission decides later whether it may be published.
+        Detector-bounded gaps remain pure interpolation. Outside the first and
+        last detector anchors, partial-affine motion supplies geometry and a
+        sparse Verifier schedule commits short buckets. Final core admission
+        still decides later whether any isolated endpoint may be published.
         """
 
-        if not bool(getattr(self, "interpolate_tracking", False)):
-            return 0
-        anchor_frame = int(state.last_detection_frame)
-        boundary = int(boundary_frame_exclusive)
-        if boundary <= anchor_frame + 1:
+        if not bool(getattr(self, "interpolate_tracking", False)) or direction not in {
+            -1,
+            1,
+        }:
             return 0
         reliable = len(state.track["detections"]) >= int(
             self.settings["reliable_endpoint_min_detector_frames"]
         )
-        extension = int(
-            self.settings[
-                "reliable_endpoint_extension" if reliable else "endpoint_extension"
+        if extension is None:
+            extension = int(
+                self.settings[
+                    "reliable_endpoint_extension" if reliable else "endpoint_extension"
+                ]
+            )
+        extension = max(0, int(extension))
+        if direction < 0:
+            first_detection = state.track["detections"][0]
+            anchor_frame = int(first_detection["frame_idx"])
+            anchor_box = np.asarray(first_detection["box"], dtype=np.float64)
+            target_frame = max(0, anchor_frame - extension)
+            oldest = self.cache.oldest_frame_index()
+            if oldest is not None:
+                target_frame = max(target_frame, int(oldest))
+            prior_cuts = [
+                int(item["frame_idx"])
+                for item in self.audits
+                if bool(item["scene_cut_from_previous"])
+                and target_frame <= int(item["frame_idx"]) <= anchor_frame
             ]
-        )
-        target_frame = min(anchor_frame + extension, boundary - 1)
-        if target_frame <= anchor_frame:
+            if prior_cuts:
+                target_frame = max(target_frame, max(prior_cuts))
+            boundary: int | None = None
+        else:
+            anchor_frame = int(state.last_detection_frame)
+            anchor_box = np.asarray(state.last_detection_box, dtype=np.float64)
+            if boundary_frame_exclusive is None:
+                return 0
+            boundary = int(boundary_frame_exclusive)
+            if boundary <= anchor_frame + 1:
+                return 0
+            target_frame = min(anchor_frame + extension, boundary - 1)
+        if target_frame == anchor_frame:
             return 0
         started = time.perf_counter()
         emitted = self._run_endpoint_affine(
             track_id=str(state.track["track_id"]),
             anchor_frame=anchor_frame,
-            anchor_box=np.asarray(state.last_detection_box, dtype=np.float64),
+            anchor_box=anchor_box,
             target_frame=target_frame,
-            direction=1,
-            run_neural_review=False,
+            direction=direction,
+            run_neural_review=True,
+            sparse_neural_review=True,
+            emit_before=emit_before,
             repair_reason="interpolate_unanchored_endpoint",
             boundary_reason=close_reason,
             boundary_frame_exclusive=boundary,
@@ -3397,9 +3842,6 @@ class StreamingEngine:
                 "flow_continuity": continuity,
                 "area_ratio": 1.0,
                 "center_distance": 0.0,
-                "shadow": False,
-                "shadow_reason": 0,
-                "suppressor_tracks": [],
                 # This delayed endpoint is granted only after the core track
                 # has enough detector anchors. It may extend a continuous
                 # accepted interval, but must not dilute core admission.
@@ -3511,8 +3953,6 @@ class StreamingEngine:
         return emitted
 
     def _expand_reliable_pre_roll(self, state: ObjectState) -> None:
-        if bool(getattr(self, "interpolate_tracking", False)):
-            return
         required = int(self.settings["reliable_endpoint_min_detector_frames"])
         extension = int(
             self.settings.get(
@@ -3527,13 +3967,22 @@ class StreamingEngine:
         first_detection = state.track["detections"][0]
         frame_idx = int(first_detection["frame_idx"])
         emit_before = max(0, frame_idx - state.pre_roll_extension)
-        self._pre_roll(
-            state,
-            frame_idx,
-            np.asarray(first_detection["box"], dtype=np.float64),
-            extension=extension,
-            emit_before=emit_before,
-        )
+        if bool(getattr(self, "interpolate_tracking", False)):
+            self._repair_interpolate_endpoint(
+                state,
+                direction=-1,
+                extension=extension,
+                emit_before=emit_before,
+                close_reason="reliable_pre_roll",
+            )
+        else:
+            self._pre_roll(
+                state,
+                frame_idx,
+                np.asarray(first_detection["box"], dtype=np.float64),
+                extension=extension,
+                emit_before=emit_before,
+            )
         state.pre_roll_extension = extension
 
     def _new_state(
@@ -3583,8 +4032,16 @@ class StreamingEngine:
         )
         self.tracks.append(track)
         self.states.append(state)
-        if not bool(getattr(self, "interpolate_tracking", False)):
-            initial_extension = int(self.settings["endpoint_extension"])
+        initial_extension = int(self.settings["endpoint_extension"])
+        if bool(getattr(self, "interpolate_tracking", False)):
+            self._repair_interpolate_endpoint(
+                state,
+                direction=-1,
+                extension=initial_extension,
+                close_reason="initial_pre_roll",
+            )
+            state.pre_roll_extension = initial_extension
+        else:
             self._pre_roll(
                 state,
                 frame_idx,
@@ -4339,47 +4796,51 @@ class StreamingEngine:
                 track["detector_observations"] = len(track["detections"])
         for item in self.endpoint_affine_candidates:
             item["track_id"] = aliases.get(str(item["track_id"]), str(item["track_id"]))
-        published, shadows = _deduplicate(self.candidates, self.config)
+        published = _select_track_frame_candidates(self.candidates)
         scan = {
             "metadata": self.metadata.to_dict(),
             "frame_count": processed,
             "frames": self.audits,
             "detections": self.detections,
         }
-        tracking = {"observations": published, "shadows": shadows}
-        review = finalize_precomputed(scan, self.tracks, tracking, self.evidence, self.config)
-        _raise_if_cancelled(is_cancelled)
-        recognition = self._finalize_recognition(aliases)
-        _raise_if_cancelled(is_cancelled)
-        review["observations"] = _deduplicate_stabilized_track_frames(
-            stabilize_observations(
-                review["observations"],
-                self.config["render"].get("box_stabilization"),
-                scene_cut_frames={
-                    int(item["frame_idx"]) for item in self.audits if bool(item["scene_cut_from_previous"])
-                },
-                scene_mean_absdiff_by_frame={
-                    int(item["frame_idx"]): float(item["scene_mean_absdiff"]) for item in self.audits
-                },
-            )
+        tracking = {"observations": published}
+        review = finalize_precomputed(
+            scan,
+            self.tracks,
+            tracking,
+            self.evidence,
+            self.config,
+            detector_frame_stride=self.detector_frame_stride,
         )
+        _raise_if_cancelled(is_cancelled)
+        # Endpoint candidates are isolated until core admission is final. Once
+        # accepted, attach both directions before recognition and smoothing so
+        # their sparse Local-SCRFD landmarks may participate in the existing
+        # candidate path and their geometry receives the same output filter.
         review["observations"] = self._publish_endpoint_affine_candidates(
             review["observations"], review["evidence"]
         )
-        allow_cross_track_coverage = (
-            str(self.config.get("recognition", {}).get("mode", "all"))
-            == "all"
+        recognition = self._finalize_recognition(aliases)
+        _raise_if_cancelled(is_cancelled)
+        review["observations"] = stabilize_observations(
+            review["observations"],
+            self.config["render"].get("box_stabilization"),
+            scene_cut_frames={
+                int(item["frame_idx"]) for item in self.audits if bool(item["scene_cut_from_previous"])
+            },
+            scene_mean_absdiff_by_frame={
+                int(item["frame_idx"]): float(item["scene_mean_absdiff"]) for item in self.audits
+            },
         )
-        (
+        recognition_mode = str(
+            self.config.get("recognition", {}).get("mode", "all")
+        )
+        review["observations"] = _deduplicate_final_cross_tracks(
             review["observations"],
-            accepted_interval_shadow_repairs,
-        ) = _restore_uncovered_accepted_shadows(
-            self.tracks,
-            review["observations"],
-            tracking["shadows"],
             review["evidence"],
-            allow_cross_track_coverage=allow_cross_track_coverage,
+            recognition_mode=recognition_mode,
         )
+        allow_cross_track_coverage = recognition_mode == "all"
         (
             accepted_interval_frames,
             accepted_interval_hole_frames,
@@ -4390,19 +4851,21 @@ class StreamingEngine:
             review["evidence"],
             allow_cross_track_coverage=allow_cross_track_coverage,
         )
-        if self.detector_frame_stride > 1 and accepted_interval_hole_frames:
+        if accepted_interval_hole_frames:
             raise RuntimeError(
-                "detector sampling left "
-                f"{accepted_interval_hole_frames} accepted-interval frames without geometry; "
-                "rerun with scan.frame_stride: 1"
+                "final geometry coverage invariant failed: "
+                f"{accepted_interval_hole_frames} accepted-interval track frames "
+                "have no safe render geometry"
             )
         tracking["observations"].extend(
             item
             for item in review["observations"]
             if item.get("endpoint_repair") == "affine_ransac"
-            or bool(item.get("accepted_interval_shadow_repair", False))
         )
-        tracking["observations"] = _deduplicate_stabilized_track_frames(tracking["observations"])
+        tracking["observations"] = sorted(
+            tracking["observations"],
+            key=lambda item: (int(item["frame_idx"]), str(item["track_id"])),
+        )
         analyzed_frame_indices = [
             int(item["frame_idx"])
             for item in self.audits
@@ -4423,6 +4886,14 @@ class StreamingEngine:
             "regular_stride"
         ]
         detector_sampling = {
+            "source_fps": self.fps,
+            "max_analysis_fps": self.max_analysis_fps,
+            "tolerance_multiplier": self.analysis_fps_tolerance_multiplier,
+            "allowed_regular_analysis_fps": self.allowed_regular_analysis_fps,
+            "effective_frame_stride": self.detector_frame_stride,
+            "nominal_regular_analysis_fps": self.nominal_regular_analysis_fps,
+            # Retain the established result field for consumers while making
+            # its runtime-derived nature explicit in the field above.
             "frame_stride": self.detector_frame_stride,
             "policy": (
                 "every_frame"
@@ -4440,9 +4911,6 @@ class StreamingEngine:
             "accepted_interval_hole_frames": accepted_interval_hole_frames,
             "accepted_interval_cross_track_coverage_frames": (
                 accepted_interval_cross_track_coverage_frames
-            ),
-            "accepted_interval_shadow_repairs": (
-                accepted_interval_shadow_repairs
             ),
             "effective_pipeline_depth": depth,
             "reason_counts": dict(sorted(detector_scan_reasons.items())),
@@ -4506,12 +4974,13 @@ class StreamingEngine:
                 "historical_decode_requests": self.cache.historical_decode_requests,
                 "historical_packets_read": self.cache.historical_packets_read,
                 "peak_decode_range_bytes": self.cache.peak_decode_range_bytes,
-                "recent_frame_hits": self.recent_frame_hits,
-                "recent_frame_count": len(self.recent_frames),
-                "recent_frame_bytes": self.recent_frame_bytes,
-                "peak_recent_frame_bytes": self.peak_recent_frame_bytes,
+                "recent_frame_hits": self.decoded_frame_store.hits,
+                "recent_frame_count": self.decoded_frame_store.frame_count,
+                "recent_frame_bytes": self.decoded_frame_store.live_bytes,
+                "peak_recent_frame_bytes": self.decoded_frame_store.peak_bytes,
+                "recent_frame_target_frames": self.decoded_frame_store.frame_target,
                 "recent_frame_peak_limit_bytes": int(
-                    self.config["streaming"].get("recent_frame_cache_max_bytes", 0)
+                    self.decoded_frame_store.byte_capacity
                 ),
             },
             "reverse_jobs": self.reverse_jobs,
@@ -4530,6 +4999,24 @@ class StreamingEngine:
             "endpoint_affine_jobs": self.endpoint_affine_jobs,
             "endpoint_affine_frames": self.endpoint_affine_frames,
             "endpoint_affine_published_frames": self.endpoint_affine_published_frames,
+            "endpoint_verifier_checkpoints": getattr(
+                self,
+                "endpoint_verifier_checkpoints",
+                0,
+            ),
+            "endpoint_verifier_refinement_frames": getattr(
+                self,
+                "endpoint_verifier_refinement_frames",
+                0,
+            ),
+            "endpoint_local_review_frames": sum(
+                len(values)
+                for values in getattr(
+                    self,
+                    "endpoint_local_review_frames",
+                    {},
+                ).values()
+            ),
             "interpolate_endpoint_jobs": getattr(
                 self,
                 "interpolate_endpoint_jobs",

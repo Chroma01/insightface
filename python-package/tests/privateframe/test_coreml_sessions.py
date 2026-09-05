@@ -142,8 +142,12 @@ class _InferenceSessionFactory:
 
 
 class _Package:
-    def task(self, _task: str) -> SimpleNamespace:
-        return SimpleNamespace(sha256="a" * 64)
+    name = "fake-package"
+    tasks = {
+        "detection": SimpleNamespace(),
+        "verification": SimpleNamespace(),
+        "recognition": SimpleNamespace(),
+    }
 
 
 def _runtime(*providers: str) -> dict[str, Any]:
@@ -209,7 +213,7 @@ def _install_face_analysis_fakes(
     monkeypatch.setattr(private_models.ort, "SessionOptions", _SessionOptions)
     monkeypatch.setattr(
         private_models,
-        "_load_pinned_model_package",
+        "_load_selected_model_package",
         lambda _models: _Package(),
     )
     monkeypatch.setattr(private_models, "FaceAnalysis", construct)

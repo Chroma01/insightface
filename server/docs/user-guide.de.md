@@ -79,7 +79,8 @@ docker compose -f server/deploy/compose.cpu.yml \
 ```
 
 Unterstützt sind `buffalo_l` (`det_10g.onnx` + `w600k_r50.onnx`),
-`buffalo_m`, `buffalo_sc` und `antelopev2`. Die Installation erzeugt
+`buffalo_m`, `buffalo_s`, `buffalo_sc`, `antelopev2`, `raccoon_s` und
+`raccoon_l`. Die Installation erzeugt
 `manifest.json` und die signierte `MODEL.LICENSE`. Ohne `--accept-license`
 zeigt das Werkzeug die Bedingungen und lädt nichts herunter. Öffentliche
 vortrainierte InsightFace-Modelle sind ohne separate kommerzielle Lizenz nur

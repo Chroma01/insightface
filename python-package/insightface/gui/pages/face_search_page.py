@@ -22,6 +22,8 @@ class FaceSearchPage(BasePage):
         self.query_path = ""
         self.query_image = None
         self.query_face = None
+        self.query_model_name = ""
+        self.query_provider = ""
         self.results = []
         self.query_input = UploadPreview(
             "Query Image",
@@ -68,6 +70,8 @@ class FaceSearchPage(BasePage):
         self.query_path = ""
         self.query_image = None
         self.query_face = None
+        self.query_model_name = ""
+        self.query_provider = ""
         self.results = []
         self.viewer.clear(emit=False)
         self.table.setRowCount(0)
@@ -79,7 +83,11 @@ class FaceSearchPage(BasePage):
         if not self.context.engine.is_loaded():
             self.show_error("Model is not loaded. Please open Models.")
             return
-        if not self.context.storage.load_all_gallery_embeddings():
+        model_name = self.context.engine.model_name
+        provider = self.context.config.provider
+        if not self.context.storage.load_all_gallery_embeddings(
+            model_name=model_name
+        ):
             self.show_error("No registered people. Please add people first.")
             return
 
@@ -87,11 +95,18 @@ class FaceSearchPage(BasePage):
             face = self.context.engine.detect_best_face(self.query_image, source_path=self.query_path)
             if face is None or face.normed_embedding is None:
                 raise ValueError("No face detected or embedding unavailable.")
-            results = self.context.storage.search_embeddings(face.normed_embedding, top_k=self.context.config.default_top_k, threshold=self.threshold.value())
+            results = self.context.storage.search_embeddings(
+                face.normed_embedding,
+                top_k=self.context.config.default_top_k,
+                threshold=self.threshold.value(),
+                model_name=model_name,
+            )
             return face, results
 
         def done(payload):
             self.query_face, self.results = payload
+            self.query_model_name = model_name
+            self.query_provider = provider
             self.viewer.set_faces([{"bbox": self.query_face.bbox, "label": "Query"}])
             self.table.setRowCount(len(self.results))
             for row, result in enumerate(self.results):
@@ -138,8 +153,8 @@ class FaceSearchPage(BasePage):
             kps=self.query_face.kps,
             det_score=self.query_face.det_score,
             quality_score=self.query_face.quality_score,
-            model_name=self.context.config.model_name,
-            provider=self.context.config.provider,
+            model_name=self.query_model_name,
+            provider=self.query_provider,
         )
         self.set_status(f"Added {name.strip()} to People Library.")
 
@@ -156,7 +171,17 @@ class FaceSearchPage(BasePage):
         if not ok:
             return
         person = people[names.index(name)]
-        self.context.storage.add_face_sample(int(person["id"]), self.query_face.normed_embedding, source_image_path=self.query_path, bbox=self.query_face.bbox, kps=self.query_face.kps, det_score=self.query_face.det_score, quality_score=self.query_face.quality_score, model_name=self.context.config.model_name, provider=self.context.config.provider)
+        self.context.storage.add_face_sample(
+            int(person["id"]),
+            self.query_face.normed_embedding,
+            source_image_path=self.query_path,
+            bbox=self.query_face.bbox,
+            kps=self.query_face.kps,
+            det_score=self.query_face.det_score,
+            quality_score=self.query_face.quality_score,
+            model_name=self.query_model_name,
+            provider=self.query_provider,
+        )
         self.set_status(f"Assigned query face to {name}.")
 
     def export_results(self) -> None:

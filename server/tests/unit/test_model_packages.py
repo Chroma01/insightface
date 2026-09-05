@@ -13,10 +13,12 @@ from insightface_server.models import load_manifest
 from insightface_server.models.packages import (
     DEFAULT_LICENSES_DIR,
     MODEL_LICENSE_FILENAME,
+    MODEL_ZOO_RELEASE_BASE_URL,
     PACKAGES,
     ModelPackage,
     ModelPackageError,
     PackageFile,
+    _manifest,
     _verify_model_license,
     extract_required_models,
     install_package,
@@ -35,26 +37,49 @@ def test_catalog_contains_all_supported_packages_with_signed_licenses() -> None:
         "buffalo_l": (
             "80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f",
             ("det_10g.onnx", "w600k_r50.onnx"),
+            datetime(2021, 9, 22, tzinfo=UTC),
         ),
         "buffalo_m": (
             "d98264bd8f2dc75cbc2ddce2a14e636e02bb857b3051c234b737bf3b614edca9",
             ("det_2.5g.onnx", "w600k_r50.onnx"),
+            datetime(2021, 9, 22, tzinfo=UTC),
+        ),
+        "buffalo_s": (
+            "d85a87f503f691807cd8bb97128bdf7a0660326cd9cd02657127fa978bab8b5e",
+            ("det_500m.onnx", "w600k_mbf.onnx"),
+            datetime(2021, 9, 22, tzinfo=UTC),
         ),
         "buffalo_sc": (
             "57d31b56b6ffa911c8a73cfc1707c73cab76efe7f13b675a05223bf42de47c72",
             ("det_500m.onnx", "w600k_mbf.onnx"),
+            datetime(2021, 9, 22, tzinfo=UTC),
         ),
         "antelopev2": (
             "8e182f14fc6e80b3bfa375b33eb6cff7ee05d8ef7633e738d1c89021dcf0c5c5",
             ("scrfd_10g_bnkps.onnx", "glintr100.onnx"),
+            datetime(2021, 9, 22, tzinfo=UTC),
+        ),
+        "raccoon_s": (
+            "f67a624ef8a4495899eb4359a8a6953f7b4c62a8399c5bc745c0e0f6582f898d",
+            ("det_10g_wo.onnx", "w600k_mbf.onnx"),
+            datetime(2026, 8, 29, tzinfo=UTC),
+        ),
+        "raccoon_l": (
+            "70cd4f2f1de0a89dd0983bdac55a066a6178543f86e9ec87154f6f259bdded7e",
+            ("det_10g_wo.onnx", "w600k_r50.onnx"),
+            datetime(2026, 8, 29, tzinfo=UTC),
         ),
     }
 
     assert set(PACKAGES) == set(expected)
     for name, package in PACKAGES.items():
-        archive_sha256, filenames = expected[name]
+        archive_sha256, filenames, valid_from = expected[name]
+        assert package.url == f"{MODEL_ZOO_RELEASE_BASE_URL}{name}.zip"
         assert package.archive_sha256 == archive_sha256
         assert tuple(item.filename for item in package.files) == filenames
+        assert _manifest(package, Path("."))["model_version"] == (
+            name if name.startswith("raccoon_") else "v0.7"
+        )
         assert tuple(item.task for item in package.files) == (
             "face_detection",
             "face_recognition",
@@ -66,7 +91,7 @@ def test_catalog_contains_all_supported_packages_with_signed_licenses() -> None:
         )
         assert license_info.issuer == "InsightFace"
         assert license_info.grant == "non-commercial"
-        assert license_info.valid_from == datetime(2021, 9, 22, tzinfo=UTC)
+        assert license_info.valid_from == valid_from
         assert license_info.valid_until is None
 
 
@@ -78,6 +103,9 @@ def _package(tmp_path: Path) -> tuple[ModelPackage, Path]:
         archive.writestr("nested/det.onnx", detector)
         archive.writestr("nested/rec.onnx", recognizer)
         archive.writestr("ignored.onnx", b"not installed")
+        archive.writestr("verifier.onnx", b"server does not install this task")
+        archive.writestr("manifest.json", '{"manifest_version": 2}')
+        archive.writestr("MODEL.LICENSE", "untrusted archive license")
     package = ModelPackage(
         name="buffalo_l",
         release="v1",
@@ -129,6 +157,7 @@ def test_install_is_verified_atomic_and_idempotent(tmp_path: Path) -> None:
     assert bundle.detector.sha256 == package.files[0].sha256
     assert bundle.recognizer.sha256 == package.files[1].sha256
     assert not (models_dir / "ignored.onnx").exists()
+    assert not (models_dir / "verifier.onnx").exists()
 
     root_manifest_path = models_dir / "manifest.json"
     root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))

@@ -40,4 +40,4 @@ server/**/dist/
 **/.env.*
 **/*.key
 **/*.pem
-!server/backend/insightface_server/licensing/trusted_keys/*.pem
+!python-package/insightface/model_zoo/trusted_keys/*.pem

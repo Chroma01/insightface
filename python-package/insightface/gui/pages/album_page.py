@@ -281,7 +281,9 @@ class AlbumPage(BasePage):
                 QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
-                self.context.storage.clear_album_results()
+                self.context.storage.clear_album_results(
+                    model_name=self._current_model_name()
+                )
                 self.clusters = []
                 self.cluster_items = {}
                 self._populate_clusters()
@@ -308,6 +310,12 @@ class AlbumPage(BasePage):
         if not self.context.engine.is_loaded():
             self.show_error("Model is not loaded. Please open Models.")
             return
+        engine = self.context.engine
+        model_name = str(getattr(engine, "model_name", "") or "").strip()
+        if not model_name:
+            self.show_error("The loaded model has no model name.")
+            return
+        storage = self.context.storage
         self._save_directories()
         all_paths = []
         for folder in folders:
@@ -318,13 +326,23 @@ class AlbumPage(BasePage):
         cosine_threshold = float(self.cluster_threshold.value())
         min_samples = int(self.min_samples.value())
         min_face_size = int(self.min_face_size.value())
-        existing = set() if rebuild else self.context.storage.existing_media_paths(all_paths)
+        existing = (
+            set()
+            if rebuild
+            else storage.existing_media_paths(
+                all_paths,
+                model_name=model_name,
+            )
+        )
         new_paths = list(all_paths) if rebuild else [path for path in all_paths if path not in existing]
 
         def task(progress=None, is_cancelled=None):
             deleted = 0
             if rebuild:
-                deleted = self.context.storage.delete_media_items_by_paths(all_paths)
+                deleted = storage.delete_media_faces_by_paths(
+                    all_paths,
+                    model_name=model_name,
+                )
             imported = 0
             faces_saved = 0
             for index, path in enumerate(new_paths):
@@ -335,7 +353,7 @@ class AlbumPage(BasePage):
                     if progress:
                         progress(index + 1, len(new_paths), f"Skipped unreadable image: {Path(path).name}")
                     continue
-                media_id = self.context.storage.add_media_item(
+                media_id = storage.add_media_item(
                     path,
                     "image",
                     width=image.shape[1],
@@ -345,13 +363,13 @@ class AlbumPage(BasePage):
                     thumbnail=encode_webp_thumbnail(image, max_side=120, quality=35),
                     processed_at=timestamp_for_filename(),
                 )
-                for face in self.context.engine.detect_faces(image, source_path=path):
+                for face in engine.detect_faces(image, source_path=path):
                     if face.normed_embedding is None:
                         continue
                     if self._face_box_size(face.bbox) < min_face_size:
                         continue
                     face_image = face.crop if face.crop is not None else crop_bbox(image, face.bbox)
-                    self.context.storage.add_media_face(
+                    storage.add_media_face(
                         media_id,
                         face.normed_embedding,
                         crop_path="",
@@ -361,8 +379,10 @@ class AlbumPage(BasePage):
                         det_score=face.det_score,
                         quality_score=face.quality_score,
                         status="unknown",
+                        model_name=model_name,
                     )
                     faces_saved += 1
+                storage.mark_media_item_processed(media_id, model_name)
                 imported += 1
                 if progress:
                     progress(
@@ -370,26 +390,51 @@ class AlbumPage(BasePage):
                         max(1, len(new_paths)),
                         f"Imported {imported} new images, saved {faces_saved} faces",
                     )
-            faces = self._faces_for_folders(folders, min_face_size)
-            clusters, algorithm = self._cluster_faces(faces, cosine_threshold, min_samples)
-            self.context.storage.save_album_results(
+            faces = self._faces_for_folders(
+                folders,
+                min_face_size,
+                model_name=model_name,
+                storage=storage,
+            )
+            cluster_items: dict[int, list[dict]] = {}
+            clusters, algorithm = self._cluster_faces(
+                faces,
+                cosine_threshold,
+                min_samples,
+                cluster_items=cluster_items,
+            )
+            storage.save_album_results(
                 clusters,
-                self.cluster_items,
+                cluster_items,
                 algorithm,
                 cluster_threshold=cosine_threshold,
                 min_samples=min_samples,
                 min_face_size=min_face_size,
+                model_name=model_name,
             )
             return {
                 "deleted": deleted,
                 "imported": imported,
                 "faces_saved": faces_saved,
                 "clusters": clusters,
+                "cluster_items": cluster_items,
                 "algorithm": algorithm,
+                "model_name": model_name,
             }
 
         def done(result):
+            if (
+                self.context.engine is not engine
+                or self._current_model_name() != model_name
+            ):
+                self._load_saved_results(self._current_model_name())
+                self.set_status(
+                    f"Album processing for {model_name} completed, but the active model changed; "
+                    "the current model's results are shown."
+                )
+                return
             self.clusters = result["clusters"]
+            self.cluster_items = result["cluster_items"]
             self.algorithm_label.setText(f"Algorithm: {result['algorithm']}")
             self._populate_clusters()
             if rebuild:
@@ -406,10 +451,18 @@ class AlbumPage(BasePage):
 
         self.run_task("Rebuilding album" if rebuild else "Importing and clustering album", task, done)
 
-    def _faces_for_folders(self, folders: list[Path], min_face_size: int) -> list[dict]:
+    def _faces_for_folders(
+        self,
+        folders: list[Path],
+        min_face_size: int,
+        *,
+        model_name: str,
+        storage=None,
+    ) -> list[dict]:
         roots = [folder.resolve() for folder in folders]
         faces = []
-        for face in self.context.storage.list_media_faces():
+        album_storage = storage or self.context.storage
+        for face in album_storage.list_media_faces(model_name=model_name):
             try:
                 media_path = Path(face["media_path"]).resolve()
             except Exception:
@@ -427,6 +480,8 @@ class AlbumPage(BasePage):
         faces: list[dict],
         cosine_threshold: float,
         min_samples: int,
+        *,
+        cluster_items: dict[int, list[dict]] | None = None,
     ) -> tuple[list[dict], str]:
         embeddings = [face["embedding"] for face in faces]
         distance_threshold = max(0.01, 1.0 - float(cosine_threshold))
@@ -444,7 +499,7 @@ class AlbumPage(BasePage):
             groups[int(label)].append(face)
         next_album_id = 1
         clusters = []
-        self.cluster_items = {}
+        result_items: dict[int, list[dict]] = {}
         for label, items in groups.items():
             vectors = [normalize_embedding(item["embedding"]) for item in items if item.get("embedding") is not None]
             vectors = [vector for vector in vectors if vector is not None]
@@ -469,30 +524,41 @@ class AlbumPage(BasePage):
                 "photos": photos,
             }
             clusters.append(cluster)
-            self.cluster_items[cluster_id] = items
+            result_items[cluster_id] = items
+        if cluster_items is None:
+            self.cluster_items = result_items
+        else:
+            cluster_items.update(result_items)
         return sorted(clusters, key=lambda row: (-row["face_count"], row["id"])), algorithm
 
     def _save_directories(self) -> None:
         self.context.storage.save_album_directories(self.folder_list.folders())
 
     def refresh(self) -> None:
-        if self._loaded_saved_state:
-            return
-        self._loaded_saved_state = True
-        self.folder_list.blockSignals(True)
-        self.folder_list.clear()
-        for folder in self.context.storage.list_album_directories():
-            if Path(folder).expanduser().is_dir():
-                self.folder_list.addItem(folder)
-        self.folder_list.blockSignals(False)
-        self._load_saved_results()
+        if not self._loaded_saved_state:
+            self._loaded_saved_state = True
+            self.folder_list.blockSignals(True)
+            self.folder_list.clear()
+            for folder in self.context.storage.list_album_directories():
+                if Path(folder).expanduser().is_dir():
+                    self.folder_list.addItem(folder)
+            self.folder_list.blockSignals(False)
+        self._load_saved_results(self._current_model_name())
 
-    def _load_saved_results(self) -> None:
-        data = self.context.storage.load_album_results()
+    def _load_saved_results(self, model_name: str) -> None:
+        data = self.context.storage.load_album_results(model_name=model_name)
         clusters = data.get("clusters") if isinstance(data, dict) else None
         if not isinstance(clusters, list):
+            self.clusters = []
+            self.cluster_items = {}
+            self.algorithm_label.setText("Algorithm: DBSCAN")
+            self._populate_clusters()
             return
-        faces_by_id = {int(face["id"]): face for face in self.context.storage.list_media_faces() if face.get("id") is not None}
+        faces_by_id = {
+            int(face["id"]): face
+            for face in self.context.storage.list_media_faces(model_name=model_name)
+            if face.get("id") is not None
+        }
         self.clusters = []
         self.cluster_items = {}
         for cluster in clusters:
@@ -501,7 +567,14 @@ class AlbumPage(BasePage):
             except Exception:
                 continue
             face_ids = [int(face_id) for face_id in cluster.get("face_ids", []) if str(face_id).isdigit()]
-            self.cluster_items[cluster_id] = [faces_by_id[face_id] for face_id in face_ids if face_id in faces_by_id]
+            items = [
+                faces_by_id[face_id]
+                for face_id in face_ids
+                if face_id in faces_by_id
+            ]
+            if not items:
+                continue
+            self.cluster_items[cluster_id] = items
             self.clusters.append(cluster)
         algorithm = data.get("algorithm")
         if algorithm not in {"DBSCAN", "centroid fallback", "none"}:
@@ -514,6 +587,9 @@ class AlbumPage(BasePage):
         if data.get("min_face_size") is not None:
             self.min_face_size.setValue(int(data["min_face_size"]))
         self._populate_clusters()
+
+    def _current_model_name(self) -> str:
+        return str(getattr(self.context.engine, "model_name", "") or "").strip()
 
     def _populate_clusters(self) -> None:
         self.cluster_table.setRowCount(len(self.clusters))

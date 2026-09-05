@@ -12,7 +12,7 @@
     <meta name="description" content="Self-hosted InsightFace detection, comparison, enrollment, and search.">
     <title>InsightFace Server</title>
     <link rel="icon" href="/assets/insightface-mark.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=0.2.0-r13">
+    <link rel="stylesheet" href="/assets/styles.css?v=0.2.0-r14">
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
@@ -379,10 +379,10 @@
             </div>
             <article class="panel">
               <div class="panel-heading"><div><p class="eyebrow">MODELS</p><h3>Loaded models</h3></div></div>
-              <aside class="model-license-notice" aria-label="Open-source model license">
-                <strong>Open-source model license</strong>
-                <p>InsightFace-provided open-source pretrained models, including buffalo_l, are for non-commercial research use only.</p>
-                <p>Commercial use requires a separate license. <a href="https://www.insightface.ai" target="_blank" rel="noopener noreferrer">Commercial licensing</a></p>
+              <aside class="model-license-notice" id="system-license-notice" aria-label="Model" hidden>
+                <strong id="system-license-heading">Model</strong>
+                <p id="system-license-summary">—</p>
+                <p id="system-license-commercial-row" hidden><span id="system-license-commercial">Commercial use requires a separate license.</span> <a id="system-license-link" href="https://www.insightface.ai" target="_blank" rel="noopener noreferrer">Commercial licensing</a></p>
               </aside>
               <div class="model-grid" id="system-models"></div>
             </article>
@@ -455,6 +455,6 @@
     </dialog>
 
     <div class="toast-region" id="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script type="module" src="/assets/app.mjs?v=0.2.0-r13"></script>
+    <script type="module" src="/assets/app.mjs?v=0.2.0-r14"></script>
   </body>
 </html>

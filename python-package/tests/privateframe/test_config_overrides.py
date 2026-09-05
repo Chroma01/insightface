@@ -190,7 +190,7 @@ def test_override_layer_order_is_base_then_derived_then_dotted(
             {
                 "schema_version": 1,
                 "base_config": str(CONFIG_PATH),
-                "scan": {"frame_stride": 3},
+                "scan": {"max_analysis_fps": 15},
             }
         ),
         encoding="utf-8",
@@ -198,29 +198,222 @@ def test_override_layer_order_is_base_then_derived_then_dotted(
 
     config = load_config(
         derived,
-        config_overrides={"scan.frame_stride": 2},
+        config_overrides={"scan.max_analysis_fps": 24},
         config_override_root=tmp_path,
     )
 
-    assert config["scan"]["frame_stride"] == 2
+    assert config["scan"]["max_analysis_fps"] == 24.0
 
 
-def test_explicit_dotted_stride_wins_over_dotted_performance_preset(
+def test_custom_yaml_implicitly_inherits_packaged_base(monkeypatch, tmp_path):
+    _without_model_materialization(monkeypatch)
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "scan": {"max_analysis_fps": 15},
+                "render": {"redaction": {"method": "mosaic"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(custom)
+
+    base = _raw_config()
+    assert config["scan"]["max_analysis_fps"] == 15.0
+    assert config["scan"]["workers"] == base["scan"]["workers"]
+    assert config["render"]["redaction"]["method"] == "mosaic"
+    assert config["models"]["name"] == base["models"]["name"]
+
+
+def test_implicit_base_layer_order_is_base_then_custom_then_dotted(
     monkeypatch,
     tmp_path,
 ):
     _without_model_materialization(monkeypatch)
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "scan": {"max_analysis_fps": 15},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     config = load_config(
-        CONFIG_PATH,
-        config_overrides={
-            "scan.performance_mode": "ultra_fast",
-            "scan.frame_stride": 3,
-        },
+        custom,
+        config_overrides={"scan.max_analysis_fps": 24},
         config_override_root=tmp_path,
     )
 
-    assert config["scan"]["frame_stride"] == 3
+    assert config["scan"]["max_analysis_fps"] == 24.0
+
+
+def test_audio_bitrate_override_accepts_integer_form():
+    config = load_config(
+        CONFIG_PATH,
+        config_overrides={"render.video_output.audio.bitrate": 192_000},
+        materialize_models=False,
+    )
+
+    assert config["render"]["video_output"]["audio"]["bitrate"] == 192_000
+
+
+def test_models_root_is_a_public_dotted_override(tmp_path):
+    root = tmp_path / "shared-insightface-root"
+
+    config = load_config(
+        CONFIG_PATH,
+        config_overrides={"models.root": str(root)},
+        config_override_root=tmp_path,
+        materialize_models=False,
+    )
+
+    assert config["models"]["root"] == str(root)
+
+
+@pytest.mark.parametrize("value", [None, 1, True, [], {}])
+def test_models_root_dotted_override_requires_a_string(tmp_path, value):
+    with pytest.raises(TypeError, match="models.root must be a string"):
+        load_config(
+            CONFIG_PATH,
+            config_overrides={"models.root": value},
+            config_override_root=tmp_path,
+            materialize_models=False,
+        )
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_models_root_dotted_override_requires_a_non_empty_path(tmp_path, value):
+    with pytest.raises(ValueError, match="models.root must be a non-empty path"):
+        load_config(
+            CONFIG_PATH,
+            config_overrides={"models.root": value},
+            config_override_root=tmp_path,
+            materialize_models=False,
+        )
+
+
+def test_explicit_relative_base_config_takes_precedence_over_packaged_base(
+    monkeypatch,
+    tmp_path,
+):
+    _without_model_materialization(monkeypatch)
+    explicit_base = _raw_config()
+    explicit_base["scan"]["workers"] = 7
+    (tmp_path / "parent.yaml").write_text(
+        yaml.safe_dump(explicit_base),
+        encoding="utf-8",
+    )
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "base_config": "parent.yaml",
+                "scan": {"max_analysis_fps": 15},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(custom)
+
+    assert config["scan"]["workers"] == 7
+    assert config["scan"]["max_analysis_fps"] == 15.0
+
+
+def test_complete_custom_yaml_remains_supported(monkeypatch, tmp_path):
+    _without_model_materialization(monkeypatch)
+    complete = _raw_config()
+    complete["scan"]["workers"] = 9
+    custom = tmp_path / "complete.yaml"
+    custom.write_text(yaml.safe_dump(complete), encoding="utf-8")
+
+    config = load_config(custom)
+
+    assert config["scan"]["workers"] == 9
+    assert config["render"]["video_output"]["preset"] == "medium"
+
+
+@pytest.mark.parametrize("document", [None, [], "invalid", {"scan": {}}])
+def test_implicit_custom_yaml_requires_current_schema_document(
+    monkeypatch,
+    tmp_path,
+    document,
+):
+    _without_model_materialization(monkeypatch)
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="custom ONNX config.*schema_version: 1"):
+        load_config(custom)
+
+
+def test_implicit_custom_yaml_rejects_unknown_keys_before_merging(
+    monkeypatch,
+    tmp_path,
+):
+    _without_model_materialization(monkeypatch)
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "scan": {"unknown_setting": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown configuration setting"):
+        load_config(custom)
+
+
+@pytest.mark.parametrize("base_value", [None, "", "   ", 1, True, []])
+def test_explicit_base_config_must_be_a_non_empty_path(
+    monkeypatch,
+    tmp_path,
+    base_value,
+):
+    _without_model_materialization(monkeypatch)
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "base_config": base_value,
+                "scan": {"max_analysis_fps": 15},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TypeError, match="base_config must be a non-empty path"):
+        load_config(custom)
+
+
+@pytest.mark.parametrize("legacy_key", ["performance_mode", "frame_stride"])
+def test_removed_scan_sampling_key_is_rejected_as_unknown(
+    monkeypatch,
+    tmp_path,
+    legacy_key,
+):
+    _without_model_materialization(monkeypatch)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"unknown configuration override path: scan\.{legacy_key}",
+    ):
+        load_config(
+            CONFIG_PATH,
+            config_overrides={f"scan.{legacy_key}": 3},
+            config_override_root=tmp_path,
+        )
 
 
 def test_provider_and_artifact_level_use_uniform_dotted_fields(
@@ -311,6 +504,7 @@ def test_high_level_python_apis_only_expose_uniform_config_overrides():
         "provider",
         "artifacts_level",
         "frame_stride",
+        "max_analysis_fps",
         "performance_mode",
     }
 
@@ -338,7 +532,7 @@ def test_generic_gallery_path_uses_explicit_override_root(monkeypatch, tmp_path)
     assert config["recognition"]["gallery_dir"] == str(gallery.resolve())
 
 
-def test_derived_yaml_gallery_root_is_unchanged_by_other_cli_override(
+def test_implicit_custom_yaml_gallery_root_is_unchanged_by_other_cli_override(
     monkeypatch,
     tmp_path,
 ):
@@ -354,7 +548,6 @@ def test_derived_yaml_gallery_root_is_unchanged_by_other_cli_override(
         yaml.safe_dump(
             {
                 "schema_version": 1,
-                "base_config": str(CONFIG_PATH),
                 "recognition": {
                     "mode": "exempt",
                     "gallery_dir": "gallery",

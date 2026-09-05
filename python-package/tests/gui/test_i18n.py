@@ -1,4 +1,5 @@
 import os
+from string import Formatter
 
 import pytest
 
@@ -46,6 +47,55 @@ def test_core_business_translations_have_professional_terms():
     assert tr("Face Recognition", "es") == "Reconocimiento facial"
     assert tr("Run Evaluation", "pt") == "Executar avaliação"
     assert tr("License Center", "ru") == "Центр лицензий"
+
+
+def test_privateframe_translation_catalog_is_complete_and_format_safe():
+    from insightface.gui.core.i18n import _PRIVATEFRAME_UI_TRANSLATIONS
+
+    languages = {"zh", "ja", "ko", "es", "fr", "de", "pt", "ru"}
+    assert set(_PRIVATEFRAME_UI_TRANSLATIONS) == languages
+    expected_keys = set(_PRIVATEFRAME_UI_TRANSLATIONS["zh"])
+    assert len(expected_keys) >= 150
+
+    for language in languages:
+        translations = _PRIVATEFRAME_UI_TRANSLATIONS[language]
+        assert set(translations) == expected_keys
+        for source, translated in translations.items():
+            source_fields = {
+                name for _text, name, _spec, _conversion in Formatter().parse(source)
+                if name
+            }
+            translated_fields = {
+                name
+                for _text, name, _spec, _conversion in Formatter().parse(translated)
+                if name
+            }
+            assert translated_fields == source_fields, (language, source)
+
+
+def test_model_download_action_translation_catalog_is_complete_and_format_safe():
+    from insightface.gui.core.i18n import _MODEL_DOWNLOAD_ACTION_TRANSLATIONS
+
+    languages = {"zh", "ja", "ko", "es", "fr", "de", "pt", "ru"}
+    assert set(_MODEL_DOWNLOAD_ACTION_TRANSLATIONS) == languages
+    expected_keys = set(_MODEL_DOWNLOAD_ACTION_TRANSLATIONS["zh"])
+    assert len(expected_keys) >= 10
+
+    for language in languages:
+        translations = _MODEL_DOWNLOAD_ACTION_TRANSLATIONS[language]
+        assert set(translations) == expected_keys
+        for source, translated in translations.items():
+            source_fields = {
+                name
+                for _text, name, _spec, _conversion in Formatter().parse(source)
+                if name
+            }
+            translated_fields = {
+                name
+                for _text, name, _spec, _conversion in Formatter().parse(translated)
+                if name
+            }
+            assert translated_fields == source_fields, (language, source)
 
 
 def test_apply_translations_updates_basic_widgets():

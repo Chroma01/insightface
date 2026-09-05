@@ -57,10 +57,17 @@ class BatchProcessingPage(BasePage):
             return
         paths = [str(path) for path in list_images(self.folder, recursive=self.recursive.isChecked())]
         min_score = self.min_score.value() / 100.0
+        model_name = self.context.engine.model_name
 
         def task(progress=None, is_cancelled=None):
             rows = []
-            gallery = self.context.storage.load_all_gallery_embeddings() if self.identify.isChecked() else []
+            gallery = (
+                self.context.storage.load_all_gallery_embeddings(
+                    model_name=model_name
+                )
+                if self.identify.isChecked()
+                else []
+            )
             for index, path in enumerate(paths):
                 if is_cancelled and is_cancelled():
                     break
@@ -73,7 +80,12 @@ class BatchProcessingPage(BasePage):
                 for face_index, face in enumerate(faces):
                     result = None
                     if face.normed_embedding is not None and gallery:
-                        matches = self.context.storage.search_embeddings(face.normed_embedding, self.context.config.default_top_k, self.context.config.recognition_threshold)
+                        matches = self.context.storage.search_embeddings(
+                            face.normed_embedding,
+                            self.context.config.default_top_k,
+                            self.context.config.recognition_threshold,
+                            model_name=model_name,
+                        )
                         result = matches[0] if matches else None
                     person_name = result.person_name if result and result.similarity >= self.context.config.recognition_threshold else "Unknown"
                     similarity = result.similarity if result else 0.0

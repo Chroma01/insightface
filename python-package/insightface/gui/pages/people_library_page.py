@@ -288,6 +288,8 @@ class PeopleLibraryPage(BasePage):
         if not self.context.engine.is_loaded():
             self.show_error("Model is not loaded. Please open Models.")
             return
+        model_name = self.context.engine.model_name
+        provider = self.context.config.provider
 
         def task(progress=None, is_cancelled=None):
             imported = 0
@@ -320,8 +322,8 @@ class PeopleLibraryPage(BasePage):
                     kps=face.kps,
                     det_score=face.det_score,
                     quality_score=face.quality_score,
-                    model_name=self.context.config.model_name,
-                    provider=self.context.config.provider,
+                    model_name=model_name,
+                    provider=provider,
                 )
                 imported += 1
                 if progress:

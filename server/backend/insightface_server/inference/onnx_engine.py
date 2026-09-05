@@ -22,8 +22,8 @@ from ..config import (
     normalize_detector_input_sizes,
     normalize_single_face_selection,
 )
-from ..licensing import verify_model_license
-from ..models import ModelBundle, load_manifest
+from ..licensing import ModelLicenseError, inspect_model_package_license
+from ..models import ModelBundle, ModelSpec, load_manifest
 from .base import EngineSummary, FaceObservation, cpu_summary, l2_normalize, validate_image
 from .concurrency import InferenceConcurrencyLimiter
 from .quality import enrich_quality
@@ -232,9 +232,20 @@ class OnnxInsightFaceEngine:
             raise ValueError(f"Unsupported execution_provider: {self._provider}")
         models_dir = Path(str(_setting(settings, "models_dir", "/models")))
         self.bundle: ModelBundle = load_manifest(models_dir)
-        model_license = verify_model_license(
-            self.bundle.license_path, expected_model_id=self.bundle.model_id
+        license_inspection = inspect_model_package_license(
+            models_dir,
+            expected_model_id=self.bundle.model_id,
         )
+        if license_inspection.verified:
+            assert license_inspection.license is not None
+            license_summary = license_inspection.license.public_summary()
+        elif license_inspection.defaulted:
+            license_summary = license_inspection.public_summary()
+        else:
+            raise ModelLicenseError(
+                f"Model license {license_inspection.status}: "
+                f"{license_inspection.message}"
+            )
         recognizer = self.bundle.recognizer
         bundle_identity = [
             {
@@ -258,7 +269,7 @@ class OnnxInsightFaceEngine:
             preprocessing_version=recognizer.preprocessing_version,
             provider=self._provider,
             models=tuple(model.public_summary() for model in self.bundle.models),
-            license=model_license.public_summary(),
+            license=license_summary,
         )
         self._device_id = int(_setting(settings, "device_id", 0))
         self._detector_threshold = float(_setting(settings, "detector_threshold", 0.50))
@@ -336,6 +347,35 @@ class OnnxInsightFaceEngine:
         return session
 
     @staticmethod
+    def _configure_image_preprocessing(model: Any, session: Any, spec: ModelSpec) -> None:
+        inputs = session.get_inputs()
+        if len(inputs) != 1:
+            raise RuntimeError(
+                f"{spec.task} requires exactly one model input; received {len(inputs)}"
+            )
+        input_type = str(inputs[0].type)
+        if input_type not in {"tensor(float)", "tensor(uint8)"}:
+            raise RuntimeError(
+                f"{spec.task} preprocessing requires a float32 or uint8 input; "
+                f"received {input_type}"
+            )
+        if spec.preprocessing == "embedded":
+            input_dtype = np.uint8 if input_type == "tensor(uint8)" else np.float32
+        elif spec.preprocessing == "mean_std":
+            if input_type != "tensor(float)":
+                raise RuntimeError(
+                    f"{spec.task} mean/std preprocessing requires tensor(float) input"
+                )
+            input_dtype = np.float32
+        else:  # pragma: no cover - manifest construction owns this invariant
+            raise RuntimeError(f"Unsupported {spec.task} preprocessing mode: {spec.preprocessing}")
+        model.preprocessing = spec.preprocessing
+        model.input_mean = spec.input_mean
+        model.input_std = spec.input_std
+        model.input_type = input_type
+        model.input_dtype = input_dtype
+
+    @staticmethod
     def _finish_cuda_profile(session: Any, *, model_name: str) -> dict[str, object]:
         profile_value = session.end_profiling()
         if not profile_value:
@@ -391,8 +431,9 @@ class OnnxInsightFaceEngine:
             session=self._detector_session,
             static_shape_sessions=False,
         )
-        self._detector.input_mean = self.bundle.detector.input_mean
-        self._detector.input_std = self.bundle.detector.input_std
+        self._configure_image_preprocessing(
+            self._detector, self._detector_session, self.bundle.detector
+        )
         self._assert_detector_sizes_supported(self._detector_input_sizes)
         self._detector.prepare(
             self._device_id if self._provider == "CUDAExecutionProvider" else -1,
@@ -404,8 +445,9 @@ class OnnxInsightFaceEngine:
             model_file=str(self.bundle.recognizer.path),
             session=self._recognizer_session,
         )
-        self._recognizer.input_mean = self.bundle.recognizer.input_mean
-        self._recognizer.input_std = self.bundle.recognizer.input_std
+        self._configure_image_preprocessing(
+            self._recognizer, self._recognizer_session, self.bundle.recognizer
+        )
 
         self._warm_up()
         provider_audit: dict[str, object] = {}
@@ -454,7 +496,10 @@ class OnnxInsightFaceEngine:
 
         recognizer_input = self._recognizer_session.get_inputs()[0]
         width, height = self.bundle.recognizer.input_size
-        recognition_data = np.zeros((1, 3, height, width), dtype=np.float32)
+        recognition_data = np.zeros(
+            (1, 3, height, width),
+            dtype=getattr(self._recognizer, "input_dtype", np.float32),
+        )
         recognition_outputs = self._recognizer_session.run(
             None, {recognizer_input.name: recognition_data}
         )
@@ -481,7 +526,8 @@ class OnnxInsightFaceEngine:
         detector_input = self._detector_session.get_inputs()[0]
         for detector_width, detector_height in sizes:
             detector_data = np.zeros(
-                (1, 3, detector_height, detector_width), dtype=np.float32
+                (1, 3, detector_height, detector_width),
+                dtype=getattr(self._detector, "input_dtype", np.float32),
             )
             detector_outputs = self._detector_session.run(
                 None, {detector_input.name: detector_data}

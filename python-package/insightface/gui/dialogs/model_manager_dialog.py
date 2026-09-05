@@ -11,7 +11,10 @@ from ..pages.model_settings_page import ModelSettingsPage
 
 
 class ModelManagerDialog(QDialog):
+    # Configuration changes invalidate the ordinary GUI engine. Model-file
+    # changes only refresh readiness displays (for example after a download).
     modelChanged = Signal()
+    modelFilesChanged = Signal()
 
     def __init__(self, context, parent=None):
         super().__init__(parent)
@@ -41,26 +44,54 @@ class ModelManagerDialog(QDialog):
 
     def set_status(self, message: str) -> None:
         self.status_label.setText(tr(message, self.context.config.ui_language))
-        self.modelChanged.emit()
         if self.parent() is not None and hasattr(self.parent(), "set_status"):
             self.parent().set_status(message)
 
-    def run_task(self, title: str, fn, on_result=None, show_dialog: bool = True) -> None:
+    def notify_model_configuration_changed(self) -> None:
+        self.modelChanged.emit()
+
+    def notify_model_files_changed(self) -> None:
+        self.modelFilesChanged.emit()
+
+    def run_task(
+        self,
+        title: str,
+        fn,
+        on_result=None,
+        show_dialog: bool = True,
+        on_progress=None,
+        on_error=None,
+        on_finished=None,
+    ):
         parent = self.parent()
         if parent is not None and hasattr(parent, "run_task"):
-            parent.run_task(title, fn, on_result, show_dialog=show_dialog)
-            return
+            return parent.run_task(
+                title,
+                fn,
+                on_result,
+                show_dialog=show_dialog,
+                on_progress=on_progress,
+                on_error=on_error,
+                on_finished=on_finished,
+            )
         try:
             result = fn()
             if on_result:
                 on_result(result)
         except Exception as exc:
-            self.set_status(str(exc))
+            if on_error:
+                on_error(str(exc))
+            else:
+                self.set_status(str(exc))
+        finally:
+            if on_finished:
+                on_finished()
+        return None
 
     def refresh_model_pages(self) -> None:
         self.runtime_page.refresh()
         self.downloads_page.populate()
-        self.modelChanged.emit()
+        self.notify_model_files_changed()
 
     def _refresh_current_tab(self, index: int | None = None) -> None:
         del index
@@ -69,6 +100,5 @@ class ModelManagerDialog(QDialog):
             widget.refresh()
 
     def refresh_statusbar(self) -> None:
-        self.modelChanged.emit()
         if self.parent() is not None and hasattr(self.parent(), "refresh_statusbar"):
             self.parent().refresh_statusbar()

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QLabel, QLineEd
 from ..core.config import save_config
 from ..core.face_engine import FaceEngine, is_cuda_provider_available, providers_from_choice
 from ..core.model_downloads import is_model_package_installed, list_installed_gfpgan_models, list_installed_swap_models
+from ..core.model_packages import CUSTOM_MODEL_CHOICE, GUI_MODEL_PACKAGES
 from .base import BasePage
 
 
@@ -19,11 +20,21 @@ class ModelSettingsPage(BasePage):
         super().__init__(context, "Model Settings", "Configure model packs, execution provider, face swap models, and runtime checks.", parent)
         form = QFormLayout()
         self.model_combo = QComboBox()
-        self.model_packages = ["buffalo_l", "buffalo_m", "buffalo_s", "buffalo_sc", "antelopev2"]
+        self.model_packages = list(GUI_MODEL_PACKAGES)
         self._rebuild_model_combo()
-        self.custom_dir = QLineEdit(context.config.custom_model_dir)
+        custom_model_dir = (
+            ""
+            if context.config.model_name in self.model_packages
+            else str(context.config.custom_model_dir or "").strip()
+        )
+        if not custom_model_dir and context.config.model_name not in self.model_packages:
+            custom_model_dir = str(context.config.model_name or "").strip()
+        self.custom_dir = QLineEdit(custom_model_dir)
         self.custom_dir_label = None
-        self._update_model_availability()
+        self.model_root = QLineEdit(str(context.config.model_root))
+        self.model_root.setPlaceholderText("~/.insightface")
+        self.model_root.editingFinished.connect(self._update_model_availability)
+        self._update_model_availability(sync_selection=True)
         self.model_combo.currentIndexChanged.connect(self._update_custom_dir_visibility)
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(["Auto", "CPU", "CUDA"])
@@ -39,6 +50,7 @@ class ModelSettingsPage(BasePage):
         self.gfpgan_model_combo = QComboBox()
         self._update_gfpgan_model_choices()
         form.addRow("Model package", self.model_combo)
+        form.addRow("Model root", self.model_root)
         form.addRow("Custom model directory", self.custom_dir)
         self.custom_dir_label = form.labelForField(self.custom_dir)
         form.addRow("Provider", self.provider_combo)
@@ -64,44 +76,89 @@ class ModelSettingsPage(BasePage):
 
     def _apply_to_config(self) -> None:
         cfg = self.context.config
-        chosen = self.model_combo.currentData()
-        cfg.model_name = chosen if chosen != "custom model directory" else self.custom_dir.text().strip()
-        cfg.custom_model_dir = self.custom_dir.text().strip()
+        model_name, model_root, custom_model_dir = self._selected_model_values()
         provider = self.provider_combo.currentText()
-        cfg.provider = "Auto" if provider == "CUDA" and not is_cuda_provider_available() else provider
-        if self.det_combo.currentText() == "Auto":
-            cfg.det_size = [0, 0]
-        else:
-            size = self.det_combo.currentText().split("x")
-            cfg.det_size = [int(size[0]), int(size[1])]
+        provider = (
+            "Auto"
+            if provider == "CUDA" and not is_cuda_provider_available()
+            else provider
+        )
+        det_size = self._selected_det_size()
+        cfg.model_name = model_name
+        cfg.model_root = model_root
+        cfg.custom_model_dir = custom_model_dir
+        cfg.provider = provider
+        cfg.det_size = [det_size[0], det_size[1]]
         cfg.swap_model_path = str(self.swap_model_combo.currentData() or "")
         cfg.gfpgan_model_path = str(self.gfpgan_model_combo.currentData() or "")
-        cfg.enable_gfpgan = bool(self.gfpgan_enabled.isChecked() and cfg.gfpgan_model_path)
+        cfg.enable_gfpgan = bool(
+            self.gfpgan_enabled.isChecked() and cfg.gfpgan_model_path
+        )
+
+    def _selected_model_values(self) -> tuple[str, str, str]:
+        chosen = self.model_combo.currentData()
+        root = self.model_root.text().strip()
+        if not root:
+            raise ValueError("Model root must not be empty.")
+        if chosen == CUSTOM_MODEL_CHOICE:
+            custom_dir = self.custom_dir.text().strip()
+            if not custom_dir:
+                raise ValueError("Select a custom model directory.")
+            # Keep the model identity non-empty for reports/embedding metadata,
+            # while FaceEngine uses the explicit directory for resolution.
+            return custom_dir, root, custom_dir
+        return str(chosen), root, ""
+
+    def _selected_det_size(self) -> tuple[int, int]:
+        if self.det_combo.currentText() == "Auto":
+            return (0, 0)
+        width, height = self.det_combo.currentText().split("x")
+        return int(width), int(height)
 
     def save(self) -> None:
-        self._apply_to_config()
+        try:
+            self._apply_to_config()
+        except ValueError as exc:
+            self.show_error(str(exc))
+            return
         save_config(self.context.config)
+        manager = self.window()
+        if hasattr(manager, "notify_model_configuration_changed"):
+            manager.notify_model_configuration_changed()
         self.set_status("Model settings saved.")
         self.refresh()
 
     def test_load(self) -> None:
-        self._apply_to_config()
+        try:
+            model_name, model_root, custom_model_dir = self._selected_model_values()
+        except ValueError as exc:
+            self.show_error(str(exc))
+            return
+
+        provider = self.provider_combo.currentText()
+        provider = (
+            "Auto"
+            if provider == "CUDA" and not is_cuda_provider_available()
+            else provider
+        )
+        det_size = self._selected_det_size()
 
         def task():
             engine = FaceEngine(
-                model_name=self.context.config.model_name,
-                providers=providers_from_choice(self.context.config.provider),
-                det_size=self.context.config.det_size_tuple,
-                root=self.context.config.model_root,
-                custom_model_dir=self.context.config.custom_model_dir,
+                model_name=model_name,
+                providers=providers_from_choice(provider),
+                det_size=det_size,
+                root=model_root,
+                custom_model_dir=custom_model_dir,
             )
             engine.load()
             return engine
 
         def done(engine):
-            self.context.engine = engine
-            self.window().context.engine = engine
-            self.refresh()
+            info = engine.get_runtime_info()
+            self.runtime.setPlainText(
+                "\n".join(f"{key}: {value}" for key, value in info.items())
+            )
             if engine.is_loaded():
                 self.set_status("Model loaded successfully.")
             else:
@@ -116,7 +173,7 @@ class ModelSettingsPage(BasePage):
         self.run_task("Model warmup", self.context.engine.warmup, lambda info: self.set_status(f"Warmup complete: {info['warmup_ms']:.1f} ms"))
 
     def refresh(self) -> None:
-        self._update_model_availability()
+        self._update_model_availability(sync_selection=True)
         self._update_provider_availability()
         self._update_swap_model_choices()
         self._update_gfpgan_model_choices()
@@ -147,14 +204,18 @@ class ModelSettingsPage(BasePage):
                 "this order: CoreML, CUDA, CPU."
             )
 
-    def _update_model_availability(self) -> None:
+    def _update_model_availability(self, *, sync_selection: bool = False) -> None:
         model = self.model_combo.model()
+        root = self.model_root.text().strip() or self.context.config.model_root
         for index, package in enumerate(self.model_packages):
             item = model.item(index)
             if item is None:
                 continue
-            installed = is_model_package_installed(package, self.context.config.model_root)
-            item.setEnabled(installed)
+            installed = is_model_package_installed(package, root)
+            # Missing packages remain selectable: the general GUI reports that
+            # a manual download is required, while PrivateFrame may download a
+            # selected Raccoon package on first use.
+            item.setEnabled(True)
             item.setText(package if installed else f"{package} (not downloaded)")
             item.setData(package, Qt.UserRole)
             if installed:
@@ -162,7 +223,7 @@ class ModelSettingsPage(BasePage):
             else:
                 item.setForeground(QBrush(QColor("#9ca3af")))
             item.setToolTip(
-                f"{package} is installed under {self.context.config.model_root}/models."
+                f"{package} is installed under {Path(root).expanduser() / 'models'}."
                 if installed
                 else f"{package} is not downloaded. Open Models > Downloads to install it."
             )
@@ -170,21 +231,26 @@ class ModelSettingsPage(BasePage):
         if custom_item is not None:
             custom_item.setEnabled(True)
             custom_item.setText("custom model directory")
-            custom_item.setData("custom model directory", Qt.UserRole)
-        current = self.context.config.model_name if self.context.config.model_name in self.model_packages else "custom model directory"
-        index = self.model_combo.findData(current)
-        if index >= 0:
-            self.model_combo.setCurrentIndex(index)
+            custom_item.setData(CUSTOM_MODEL_CHOICE, Qt.UserRole)
+        if sync_selection:
+            current = (
+                self.context.config.model_name
+                if self.context.config.model_name in self.model_packages
+                else CUSTOM_MODEL_CHOICE
+            )
+            index = self.model_combo.findData(current)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
         self._update_custom_dir_visibility()
 
     def _rebuild_model_combo(self) -> None:
         self.model_combo.clear()
         for package in self.model_packages:
             self.model_combo.addItem(package, package)
-        self.model_combo.addItem("custom model directory", "custom model directory")
+        self.model_combo.addItem("custom model directory", CUSTOM_MODEL_CHOICE)
 
     def _update_custom_dir_visibility(self) -> None:
-        is_custom = self.model_combo.currentData() == "custom model directory"
+        is_custom = self.model_combo.currentData() == CUSTOM_MODEL_CHOICE
         self.custom_dir.setVisible(is_custom)
         if hasattr(self, "custom_dir_label") and self.custom_dir_label is not None:
             self.custom_dir_label.setVisible(is_custom)

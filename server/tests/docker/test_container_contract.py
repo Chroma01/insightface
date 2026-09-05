@@ -66,23 +66,26 @@ def test_dockerfiles_are_pinned_non_root_and_model_free() -> None:
 
 def test_offline_license_public_key_is_packaged_but_private_issuer_is_excluded() -> None:
     public_key = (
-        SERVER_DIR
-        / "backend"
-        / "insightface_server"
-        / "licensing"
+        REPOSITORY_DIR
+        / "python-package"
+        / "insightface"
+        / "model_zoo"
         / "trusted_keys"
         / "insightface-model-license-public-ed25519.pem"
     )
     assert public_key.read_text(encoding="ascii").startswith("-----BEGIN PUBLIC KEY-----")
     for relative in ("server/docker/Dockerfile.cpu", "server/docker/Dockerfile.cuda12"):
-        assert "COPY server/backend /opt/insightface/server/backend" in _read(relative)
+        dockerfile = _read(relative)
+        assert "COPY server/backend /opt/insightface/server/backend" in dockerfile
+        assert "COPY python-package/insightface/model_zoo " in dockerfile
     dockerignore = _read(".dockerignore")
     assert ".private/" in dockerignore
     assert "**/*.pem" in dockerignore
     assert (
-        "!server/backend/insightface_server/licensing/trusted_keys/*.pem"
+        "!python-package/insightface/model_zoo/trusted_keys/*.pem"
         in dockerignore
     )
+    assert "!server/backend/insightface_server/licensing/trusted_keys/*.pem" not in dockerignore
     assert ".private/" in _read(".gitignore")
 
 

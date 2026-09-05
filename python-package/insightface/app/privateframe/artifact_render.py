@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import math
 import os
 import shutil
 import subprocess
@@ -102,7 +103,7 @@ def _debug_box(
     value = clip(item["box"], frame.shape[1] - 1, frame.shape[0] - 1)
     x1, y1, x2, y2 = np.rint(value).astype(int)
     color = _color(item["track_id"])
-    thickness = int(settings["debug_line_thickness"])
+    thickness = int(settings.get("debug_line_thickness", 2))
     if item["source"] == "detector":
         cv2.rectangle(
             frame,
@@ -291,14 +292,22 @@ def _identity_should_blur(
         return True, "fail_safe_invalid_recognition_policy"
     if (
         mode != "all"
-        and item.get("endpoint_repair_reason")
-        == "interpolate_unanchored_endpoint"
+        and (
+            item.get("force_blur") is True
+            # Backward compatibility for result documents produced before the
+            # public force_blur rendering semantic was introduced.
+            or item.get("endpoint_repair_reason")
+            == "interpolate_unanchored_endpoint"
+        )
     ):
-        # The parent track has identity evidence, but this tail is deliberately
-        # generated without SCRFD, Verifier, or ArcFace calls. It may extend a
-        # target exemption geometrically, never biometrically.
-        return True, "fail_safe_unreviewed_interpolate_endpoint"
-    if mode != "all" and (not isinstance(recognition, dict) or recognition.get("enabled") is not True):
+        # Sparse endpoint review proves that a geometrically propagated crop
+        # still contains a face, but it does not provide per-frame identity
+        # continuity. Never extend a selective exemption from geometry alone.
+        return True, "fail_safe_reduced_assurance_interpolate_endpoint"
+    if mode != "all" and (
+        not isinstance(recognition, dict)
+        or recognition.get("enabled") is not True
+    ):
         # ``render_streaming_artifacts`` rejects this mismatch. The lower-level
         # renderer remains privacy safe when called directly with an incomplete
         # result rather than trusting any stray track mappings.
@@ -641,7 +650,6 @@ def render_artifacts(
     targets: list[RenderTarget],
     settings: dict[str, Any],
     analysis_result: dict[str, Any],
-    verify_source: bool = True,
     progress: Callable[[int, int, str], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -658,8 +666,30 @@ def render_artifacts(
             raise ValueError(f"unsupported render mode: {target.mode}")
 
     expected_source = analysis_result["source_video"]
-    if verify_source and sha256_file(source_path) != expected_source["sha256"]:
-        raise ValueError("source video SHA256 does not match the analysis manifest")
+    metadata = expected_source["metadata"]
+    source_metadata = probe_video(source_path)
+    expected_width = int(metadata["width"])
+    expected_height = int(metadata["height"])
+    if (source_metadata.width, source_metadata.height) != (
+        expected_width,
+        expected_height,
+    ):
+        raise ValueError(
+            "source video dimensions do not match the PrivateFrame result: "
+            f"{source_metadata.width}x{source_metadata.height} != "
+            f"{expected_width}x{expected_height}"
+        )
+    expected_fps = float(metadata["fps"])
+    if not math.isclose(
+        source_metadata.fps,
+        expected_fps,
+        rel_tol=0.01,
+        abs_tol=0.01,
+    ):
+        raise ValueError(
+            "source video FPS does not match the PrivateFrame result: "
+            f"{source_metadata.fps:g} != {expected_fps:g}"
+        )
     _raise_if_cancelled(is_cancelled)
     observations = analysis_result["observations"]
     recognition = analysis_result.get("recognition")
@@ -678,9 +708,8 @@ def render_artifacts(
         else:
             kept_observations += 1
 
-    metadata = expected_source["metadata"]
-    width, height = int(metadata["width"]), int(metadata["height"])
-    fps = float(metadata["fps"])
+    width, height = expected_width, expected_height
+    fps = expected_fps
     expected_frames = int(metadata["frame_count"])
     if progress is not None:
         progress(0, expected_frames, "render")

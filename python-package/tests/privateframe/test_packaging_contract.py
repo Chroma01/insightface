@@ -51,9 +51,20 @@ def test_desktop_bundle_preserves_privateframe_config_paths(
         for source, destination in captured["analysis_kwargs"]["datas"]
         if destination == "insightface/app/privateframe/configs"
     }
+    trusted_key_dir = (
+        package_root / "insightface" / "model_zoo" / "trusted_keys"
+    )
+    expected_keys = {str(path) for path in trusted_key_dir.glob("*.pem")}
+    bundled_keys = {
+        source
+        for source, destination in captured["analysis_kwargs"]["datas"]
+        if destination == "insightface/model_zoo/trusted_keys"
+    }
 
     assert expected_sources
     assert bundled_configs == expected_sources
+    assert expected_keys
+    assert bundled_keys == expected_keys
 
 
 def test_privateframe_extra_and_yaml_are_packaged(
@@ -86,8 +97,13 @@ def test_privateframe_extra_and_yaml_are_packaged(
         "Pillow",
         "reportlab",
         "scikit-learn",
+        "cryptography>=42.0.0",
+        "rfc8785>=0.1.4",
         "av>=12",
         "PyYAML>=6.0",
+    ]
+    assert captured["package_data"]["insightface.model_zoo"] == [
+        "trusted_keys/*.pem"
     ]
     assert "PySide6-Essentials>=6.5" not in captured["extras_require"][
         "privateframe"

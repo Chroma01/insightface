@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from insightface.app.privateframe import streaming
+from insightface.app.privateframe.packet_cache import DecodedFrameStore
 from insightface.app.privateframe.video import VideoMetadata
 
 
@@ -80,17 +81,27 @@ def _engine(tmp_path: Path, *, reported_frame_count: int) -> streaming.Streaming
         duration=reported_frame_count / 25.0,
     )
     engine.config = {
-        "scan": {"pipeline_depth": 2},
+        "scan": {"pipeline_depth": 2, "max_analysis_fps": 6.25},
         "streaming": {
             "recent_frame_cache_max_bytes": 0,
             "progress_every_frames": 10_000,
             "eviction_interval_frames": 10_000,
         },
-        "tracking": {"fragment_stitching": {}},
+        "tracking": {
+            "between_scan_frames": "interpolate",
+            "fragment_stitching": {},
+        },
         "recognition": {"mode": "all"},
         "render": {"box_stabilization": {}},
     }
+    engine.fps = float(engine.metadata.fps)
+    engine.max_analysis_fps = 6.25
+    engine.analysis_fps_tolerance_multiplier = 1.05
+    engine.allowed_regular_analysis_fps = 6.5625
+    engine.nominal_regular_analysis_fps = 6.25
     engine.detector_frame_stride = 4
+    engine.between_scan_frames = "interpolate"
+    engine.interpolate_tracking = True
     engine.detector_scan_burst_frames = 1
     engine.forced_detector_scan_reasons = {}
     engine.max_retroactive_frames = 0
@@ -103,10 +114,8 @@ def _engine(tmp_path: Path, *, reported_frame_count: int) -> streaming.Streaming
     engine.candidates = []
     engine.evidence = []
     engine.endpoint_affine_candidates = []
-    engine.recent_frames = {}
-    engine.recent_frame_hits = 0
-    engine.recent_frame_bytes = 0
-    engine.peak_recent_frame_bytes = 0
+    engine.decoded_frame_store = DecodedFrameStore(0, 0)
+    engine.decoded_frame_bytes = 2 * 2 * 3
     engine.detector = object()
     engine.reviewer = SimpleNamespace(detector=engine.detector)
     engine.fast_review_mode = True
@@ -140,7 +149,9 @@ def _engine(tmp_path: Path, *, reported_frame_count: int) -> streaming.Streaming
     engine.process = lambda *_args: None
     engine._capture_recognition_candidate = lambda *_args: None
     engine._finalize_recognition = lambda _aliases: {}
-    engine._publish_endpoint_affine_candidates = lambda observations, _evidence: observations
+    engine._publish_endpoint_affine_candidates = (
+        lambda observations, _evidence: observations
+    )
     return engine
 
 
@@ -184,11 +195,15 @@ def test_run_uses_decoded_frame_count_before_draining_eof_pending_frames(
         lambda _source, _cache: iter(frames),
     )
     monkeypatch.setattr(streaming, "_fragment_aliases", lambda *_args: {})
-    monkeypatch.setattr(streaming, "_deduplicate", lambda *_args: ([], []))
+    monkeypatch.setattr(
+        streaming,
+        "_select_track_frame_candidates",
+        lambda *_args: [],
+    )
     monkeypatch.setattr(
         streaming,
         "finalize_precomputed",
-        lambda *_args: {"observations": [], "evidence": []},
+        lambda *_args, **_kwargs: {"observations": [], "evidence": []},
     )
     monkeypatch.setattr(
         streaming,
@@ -229,8 +244,80 @@ def test_run_uses_decoded_frame_count_before_draining_eof_pending_frames(
         result["detector_sampling"]["reason_counts"]["end_of_stream"]
         == expected_endpoint_scans
     )
+    expected_sampling = {
+        "source_fps": 25.0,
+        "max_analysis_fps": 6.25,
+        "tolerance_multiplier": 1.05,
+        "allowed_regular_analysis_fps": 6.5625,
+        "effective_frame_stride": 4,
+        "nominal_regular_analysis_fps": 6.25,
+    }
+    assert {
+        key: result["detector_sampling"][key] for key in expected_sampling
+    } == expected_sampling
+    assert (
+        result["local_review_sampling"]["effective_between_scan_frames"]
+        == "interpolate"
+    )
     assert engine.scanner.closed is True
     assert engine.cache.committed is True
+
+
+def test_run_uses_the_same_geometry_fail_safe_for_every_detector_stride(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unrepairable privacy hole is unsafe with or without sampling."""
+
+    frames = [(0, 0.0, np.zeros((2, 2, 3), dtype=np.uint8))]
+    monkeypatch.setattr(
+        streaming,
+        "iter_cached_frames",
+        lambda _source, _cache: iter(frames),
+    )
+    monkeypatch.setattr(streaming, "_fragment_aliases", lambda *_args: {})
+    monkeypatch.setattr(
+        streaming,
+        "_select_track_frame_candidates",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        streaming,
+        "finalize_precomputed",
+        lambda *_args, **_kwargs: {"observations": [], "evidence": []},
+    )
+    monkeypatch.setattr(
+        streaming,
+        "stabilize_observations",
+        lambda observations, *_args, **_kwargs: observations,
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_accepted_interval_coverage",
+        lambda *_args, **_kwargs: (1, 1, 0),
+    )
+
+    messages: list[str] = []
+    for detector_stride in (1, 4):
+        engine = _engine(tmp_path, reported_frame_count=1)
+        engine.states = []
+        engine.detector_frame_stride = detector_stride
+        engine.max_analysis_fps = 25.0 / detector_stride
+        engine.allowed_regular_analysis_fps = engine.max_analysis_fps * 1.05
+        engine.nominal_regular_analysis_fps = 25.0 / detector_stride
+        engine.config["scan"]["max_analysis_fps"] = engine.max_analysis_fps
+
+        with pytest.raises(
+            RuntimeError,
+            match="final geometry coverage invariant failed",
+        ) as error:
+            engine.run()
+        messages.append(str(error.value))
+
+        assert engine.scanner.closed is True
+        assert engine.cache.committed is True
+
+    assert messages[0] == messages[1]
 
 
 def test_run_rejects_a_video_that_decodes_no_frames(
