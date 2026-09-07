@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     # Set this before importing InsightFace/ONNX Runtime so a CLI diagnostic
     # never attempts to persist an ORT telemetry identifier.
-    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     try:
         # Third-party packages imported by InsightFace can still contain
         # legacy print calls. Keep the CLI's stdout reserved for its one JSON

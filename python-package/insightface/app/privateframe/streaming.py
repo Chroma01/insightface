@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import logging
 import math
-import sys
 import time
 from collections import Counter, deque
 from collections.abc import Callable
@@ -19,6 +19,7 @@ from .bidirectional_fusion import (
     soft_fuse_bidirectional_sequence,
 )
 from .box_stabilization import stabilize_observations
+from .endpoint_conflicts import EndpointConflictReview
 from .geometry import (
     area_ratio,
     clip,
@@ -60,6 +61,8 @@ from .scan import ScanRunner
 from .scene_cut import SceneCutDetector
 from .tracker import _select_track_frame_candidates
 from .video import probe_video
+
+logger = logging.getLogger(__name__)
 
 # Identity crops are biometric data and used to live until end-of-video without
 # a process-wide ceiling.  Keep this internal rather than adding another user
@@ -1228,6 +1231,9 @@ class StreamingEngine:
     ):
         self.source = source
         self.config = config
+        self._collect_developer_audits = config.get("output", {}).get(
+            "artifacts_level", "final"
+        ) in {"audit", "debug"}
         self.metadata = probe_video(source)
         self.fps = float(self.metadata.fps)
         self.max_analysis_fps = float(config["scan"]["max_analysis_fps"])
@@ -1407,6 +1413,62 @@ class StreamingEngine:
         self.long_gap_reanchors = 0
         self.detector_scan_opportunities = 0
         self.discarded_unanchored_tail_frames = 0
+        self.endpoint_conflicts = EndpointConflictReview(
+            config, self.fps, int(self.metadata.frame_count)
+        )
+        self._conflict_candidate_cursor = 0
+        self._conflict_detection_cursor = 0
+        self._conflict_evidence_cursor = 0
+        self._endpoint_conflict_aliases: dict[str, str] = {}
+
+    def _collect_endpoint_conflict_evidence(
+        self,
+        candidate: dict[str, Any],
+        image: np.ndarray,
+        origin: tuple[int, int],
+    ) -> None:
+        collector = getattr(self, "endpoint_conflicts", None)
+        if collector is None or not collector.enabled:
+            return
+        # These lists only append during streaming. Index each record once,
+        # rather than rescan the entire video for every endpoint frame.
+        for item in self.candidates[self._conflict_candidate_cursor:]:
+            frame_values = collector.core.setdefault(int(item["frame_idx"]), {})
+            prior = frame_values.get(str(item["track_id"]), {})
+            if prior.get("source") != "detector":
+                frame_values[str(item["track_id"])] = item
+        self._conflict_candidate_cursor = len(self.candidates)
+        # Detector anchors are stored separately from propagated candidates.
+        # A current scan may still be awaiting association inside process().
+        # Leave the cursor at that item until its track id is available.
+        for item in self.detections[self._conflict_detection_cursor:]:
+            if item.get("track_id") is None:
+                break
+            collector.core.setdefault(int(item["frame_idx"]), {})[
+                str(item["track_id"])
+            ] = item
+            self._conflict_detection_cursor += 1
+        for item in self.evidence[self._conflict_evidence_cursor:]:
+            collector.evidence[(str(item["track_id"]), int(item["frame_idx"]))] = item
+        self._conflict_evidence_cursor = len(self.evidence)
+        collector.collect(
+            candidate, image=image, origin=origin,
+            decode=self._decode_frames, reviewer=self.reviewer,
+        )
+
+    def _resolve_endpoint_conflicts(
+        self,
+        observations: list[dict[str, Any]],
+        evidence: list[dict[str, Any]],
+        endpoint_candidates: list[dict[str, Any]] | None = None,
+    ) -> set[tuple[str, int, int]]:
+        collector = getattr(self, "endpoint_conflicts", None)
+        if collector is None:
+            return set()
+        return collector.resolve(
+            observations, evidence, getattr(self, "_endpoint_conflict_aliases", {}),
+            endpoint_candidates=endpoint_candidates,
+        )
 
     def _force_detector_scan_range(self, first: int, last: int, reason: str) -> None:
         """Request real full-frame scans for a bounded future frame range."""
@@ -1832,23 +1894,12 @@ class StreamingEngine:
                 # RecognitionEngine owns the one final sampling operation so
                 # temporal-threshold evidence and the crops sent to ArcFace
                 # can never diverge.
-                try:
-                    decision = self.recognition_engine.identify_track(
-                        filtered,
-                        frames_per_second=self.fps,
-                    )
-                except MemoryError:
-                    raise
-                except Exception as error:
-                    # Keep the per-track boundary fail-safe even if a custom
-                    # engine or a future decision path bypasses the engine's
-                    # own recovery. UNKNOWN is blurred by both selective
-                    # policies; fatal process-control/resource failures still
-                    # propagate.
-                    decision = self.recognition_engine.unknown_decision(
-                        "track_recognition_error:"
-                        f"{type(error).__name__}"
-                    )
+                # Model failures must fail the task, rather than being treated
+                # as an ordinary unmatched person that blur_only would expose.
+                decision = self.recognition_engine.identify_track(
+                    filtered,
+                    frames_per_second=self.fps,
+                )
                 track_recognizer_calls += int(decision.selected_frame_count or 0)
             decision_record = decision.to_dict()
             decision_record["original_track_ids"] = list(track.get("stitched_track_ids", [track_id]))
@@ -1859,10 +1910,6 @@ class StreamingEngine:
         inference_seconds = time.perf_counter() - inference_started
         gallery = self.recognition_engine.gallery
         gallery_recognizer_calls = len(gallery.references)
-        gallery_people = sorted(str(value) for value in gallery.prototypes)
-        rejection_reasons: dict[str, int] = {}
-        for item in gallery.rejections:
-            rejection_reasons[str(item.reason)] = rejection_reasons.get(str(item.reason), 0) + 1
         retained_candidates = sum(len(values) for values in self.recognition_candidates.values())
         retained_candidate_bytes = int(getattr(self, "recognition_candidate_bytes", 0))
         artifact = {
@@ -1878,7 +1925,7 @@ class StreamingEngine:
                 "correlated_evidence_similarity_offset": (TEMPORAL_EVIDENCE_SIMILARITY_OFFSET),
                 "single_frame_similarity_offset": (SINGLE_FRAME_SIMILARITY_OFFSET),
             },
-            "target_persons": list(self.recognition_engine.target_persons),
+            "unknown_action": self.recognition_engine.unknown_action,
             "landmark_policy": {
                 "mode": "local_then_global_scrfd",
                 "priority": ["local_scrfd", "global_scrfd"],
@@ -1894,20 +1941,28 @@ class StreamingEngine:
                     "min_containment": LOCAL_LANDMARK_MIN_CONTAINMENT,
                 },
             },
-            "gallery_persons": gallery_people,
-            "gallery": {
-                "detection_policy": {
-                    "input_sizes": list(GALLERY_DETECTOR_INPUT_SIZES),
-                    "angles": [0],
-                    "confidence_threshold": (GALLERY_DETECTOR_CONFIDENCE_THRESHOLD),
-                    "landmark_source": "full_frame_scrfd",
-                    "local_revalidation": False,
-                },
+            "reference_detection_policy": {
+                "input_sizes": list(GALLERY_DETECTOR_INPUT_SIZES),
+                "angles": [0],
+                "confidence_threshold": GALLERY_DETECTOR_CONFIDENCE_THRESHOLD,
+                "landmark_source": "full_frame_scrfd",
+                "local_revalidation": False,
+                "face_selection": "largest",
+            },
+            "references": {
                 "fingerprint": getattr(gallery, "fingerprint", None),
-                "persons": gallery_people,
-                "reference_images": len(gallery.references),
-                "rejected_images": len(gallery.rejections),
-                "rejection_reasons": rejection_reasons,
+                "accepted_images": len(gallery.references),
+                "skipped_images": len(gallery.rejections),
+                "files": [
+                    {"file": item.relative_file_name,
+                     "detected_face_count": item.detected_face_count,
+                     "selected_box": list(item.selected_box)}
+                    for item in gallery.references
+                ],
+                "skipped": [
+                    {"file": item.relative_file_name, "reason": item.reason}
+                    for item in gallery.rejections
+                ],
             },
             "tracks": track_results,
             "statistics": {
@@ -1980,7 +2035,7 @@ class StreamingEngine:
                     )
                 ),
                 "track_recognizer_calls": track_recognizer_calls,
-                "gallery_recognizer_calls": gallery_recognizer_calls,
+                "reference_recognizer_calls": gallery_recognizer_calls,
                 "total_recognizer_calls": (track_recognizer_calls + gallery_recognizer_calls),
                 "status_counts": status_counts,
                 "setup_seconds": self.recognition_setup_seconds,
@@ -1993,6 +2048,8 @@ class StreamingEngine:
                 ),
             },
         }
+        if not status_counts.get("CONFIRMED", 0):
+            logger.warning("No specified people were matched in the video.")
         return artifact
 
     def _remember_frame(self, frame_idx: int, frame: np.ndarray) -> None:
@@ -2650,21 +2707,22 @@ class StreamingEngine:
             )
             if not anchor_consistent:
                 self.bidirectional_rejected_frames += 1
-                self.bidirectional_audits.append(
-                    {
-                        "track_id": track_id,
-                        "frame_idx": frame_idx,
-                        "left_frame": left_frame,
-                        "right_frame": right_frame,
-                        "mode": "symmetric_local_soft",
-                        "accepted": False,
-                        "decision": "detector_anchor_conflict",
-                        "forward_trusted": bool(forward["trusted"]),
-                        "reverse_trusted": bool(reverse["trusted"]),
-                        "pair_iou": iou(forward["box"], reverse["box"]),
-                        "pair_center_distance": normalized_center_distance(forward["box"], reverse["box"]),
-                    }
-                )
+                if self._collect_developer_audits:
+                    self.bidirectional_audits.append(
+                        {
+                            "track_id": track_id,
+                            "frame_idx": frame_idx,
+                            "left_frame": left_frame,
+                            "right_frame": right_frame,
+                            "mode": "symmetric_local_soft",
+                            "accepted": False,
+                            "decision": "detector_anchor_conflict",
+                            "forward_trusted": bool(forward["trusted"]),
+                            "reverse_trusted": bool(reverse["trusted"]),
+                            "pair_iou": iou(forward["box"], reverse["box"]),
+                            "pair_center_distance": normalized_center_distance(forward["box"], reverse["box"]),
+                        }
+                    )
                 continue
             geometry_box = (
                 interpolate_published_geometry(
@@ -2740,27 +2798,28 @@ class StreamingEngine:
             )
             reviewed.append((item, evidence))
             self.bidirectional_accepted_frames += 1
-            self.bidirectional_audits.append(
-                {
-                    "track_id": track_id,
-                    "frame_idx": frame_idx,
-                    "left_frame": left_frame,
-                    "right_frame": right_frame,
-                    "mode": "symmetric_local_soft",
-                    "accepted": True,
-                    "decision": decision_name,
-                    "forward_trusted": bool(forward["trusted"]),
-                    "reverse_trusted": bool(reverse["trusted"]),
-                    "pair_iou": item["bidirectional_pair_iou"],
-                    "pair_center_distance": item["bidirectional_pair_center_distance"],
-                    "reverse_weight": float(output["reverse_weight"]),
-                    "raw_bias": float(output["raw_bias"]),
-                    "smoothed_bias": float(output["bias"]),
-                    "flow_seed_box": flow_seed.tolist(),
-                    "geometry_box": geometry_box.tolist(),
-                    "geometry_bridge_accepted": bool(geometry_bridge_accepted),
-                }
-            )
+            if self._collect_developer_audits:
+                self.bidirectional_audits.append(
+                    {
+                        "track_id": track_id,
+                        "frame_idx": frame_idx,
+                        "left_frame": left_frame,
+                        "right_frame": right_frame,
+                        "mode": "symmetric_local_soft",
+                        "accepted": True,
+                        "decision": decision_name,
+                        "forward_trusted": bool(forward["trusted"]),
+                        "reverse_trusted": bool(reverse["trusted"]),
+                        "pair_iou": item["bidirectional_pair_iou"],
+                        "pair_center_distance": item["bidirectional_pair_center_distance"],
+                        "reverse_weight": float(output["reverse_weight"]),
+                        "raw_bias": float(output["raw_bias"]),
+                        "smoothed_bias": float(output["bias"]),
+                        "flow_seed_box": flow_seed.tolist(),
+                        "geometry_box": geometry_box.tolist(),
+                        "geometry_bridge_accepted": bool(geometry_bridge_accepted),
+                    }
+                )
         return reviewed
 
     def _finish_pending_consensus(
@@ -2791,17 +2850,18 @@ class StreamingEngine:
         if gap_frames > int(settings["max_gap_frames"]):
             self.bidirectional_skipped_jobs += 1
             fallback_available = bool(state.pending)
-            self.bidirectional_audits.append(
-                {
-                    "track_id": str(state.track["track_id"]),
-                    "left_frame": left_frame,
-                    "right_frame": right_frame,
-                    "status": ("pending_fallback" if fallback_available else "consensus_skipped"),
-                    "fallback_available": fallback_available,
-                    "reason": "gap_frame_limit",
-                    "gap_frames": gap_frames,
-                }
-            )
+            if self._collect_developer_audits:
+                self.bidirectional_audits.append(
+                    {
+                        "track_id": str(state.track["track_id"]),
+                        "left_frame": left_frame,
+                        "right_frame": right_frame,
+                        "status": ("pending_fallback" if fallback_available else "consensus_skipped"),
+                        "fallback_available": fallback_available,
+                        "reason": "gap_frame_limit",
+                        "gap_frames": gap_frames,
+                    }
+                )
             return False
         corridor = _consensus_corridor(
             [left_anchor, right_anchor],
@@ -2811,34 +2871,36 @@ class StreamingEngine:
         if corridor is None:
             self.bidirectional_skipped_jobs += 1
             fallback_available = bool(state.pending)
-            self.bidirectional_audits.append(
-                {
-                    "track_id": str(state.track["track_id"]),
-                    "left_frame": left_frame,
-                    "right_frame": right_frame,
-                    "status": ("pending_fallback" if fallback_available else "consensus_skipped"),
-                    "fallback_available": fallback_available,
-                    "reason": "corridor_limit",
-                    "gap_frames": gap_frames,
-                }
-            )
+            if self._collect_developer_audits:
+                self.bidirectional_audits.append(
+                    {
+                        "track_id": str(state.track["track_id"]),
+                        "left_frame": left_frame,
+                        "right_frame": right_frame,
+                        "status": ("pending_fallback" if fallback_available else "consensus_skipped"),
+                        "fallback_available": fallback_available,
+                        "reason": "corridor_limit",
+                        "gap_frames": gap_frames,
+                    }
+                )
             return False
         estimated_bytes = (corridor[2] - corridor[0]) * (corridor[3] - corridor[1]) * 3 * (gap_frames + 2)
         if estimated_bytes > int(settings["max_materialized_bytes"]):
             self.bidirectional_skipped_jobs += 1
             fallback_available = bool(state.pending)
-            self.bidirectional_audits.append(
-                {
-                    "track_id": str(state.track["track_id"]),
-                    "left_frame": left_frame,
-                    "right_frame": right_frame,
-                    "status": ("pending_fallback" if fallback_available else "consensus_skipped"),
-                    "fallback_available": fallback_available,
-                    "reason": "materialized_byte_limit",
-                    "gap_frames": gap_frames,
-                    "estimated_bytes": int(estimated_bytes),
-                }
-            )
+            if self._collect_developer_audits:
+                self.bidirectional_audits.append(
+                    {
+                        "track_id": str(state.track["track_id"]),
+                        "left_frame": left_frame,
+                        "right_frame": right_frame,
+                        "status": ("pending_fallback" if fallback_available else "consensus_skipped"),
+                        "fallback_available": fallback_available,
+                        "reason": "materialized_byte_limit",
+                        "gap_frames": gap_frames,
+                        "estimated_bytes": int(estimated_bytes),
+                    }
+                )
             return False
         origin = (corridor[0], corridor[1])
         decoded = self._decode_frames(
@@ -2884,16 +2946,17 @@ class StreamingEngine:
             settings=settings,
         )
         geometry_bridge_accepted = bool(geometry_bridge["accepted"])
-        self.bidirectional_audits.append(
-            {
-                "track_id": str(state.track["track_id"]),
-                "left_frame": left_frame,
-                "right_frame": right_frame,
-                "mode": "symmetric_local_soft",
-                "status": "geometry_bridge",
-                **geometry_bridge,
-            }
-        )
+        if self._collect_developer_audits:
+            self.bidirectional_audits.append(
+                {
+                    "track_id": str(state.track["track_id"]),
+                    "left_frame": left_frame,
+                    "right_frame": right_frame,
+                    "mode": "symmetric_local_soft",
+                    "status": "geometry_bridge",
+                    **geometry_bridge,
+                }
+            )
 
         reviewed = self._emit_soft_consensus_sequence(
             state,
@@ -3360,6 +3423,7 @@ class StreamingEngine:
                         (ox, oy),
                         local_review_reason="endpoint_affine",
                     )
+                    self._collect_endpoint_conflict_evidence(candidate, image, (ox, oy))
                     retain(candidate)
                     prior_global_box = np.asarray(
                         candidate["motion_box"], dtype=np.float64
@@ -3374,6 +3438,7 @@ class StreamingEngine:
                     }
                 )
                 candidate["_review_measurement"] = review
+                self._collect_endpoint_conflict_evidence(candidate, image, (ox, oy))
                 if not run_neural_review:
                     retain(candidate)
                     prior_global_box = global_box
@@ -4147,6 +4212,9 @@ class StreamingEngine:
             ):
                 unique[key] = item
 
+        duplicate_endpoints = self._resolve_endpoint_conflicts(
+            observations, evidence, list(unique.values())
+        )
         continuity = self.config["revalidation"]["policy"]["continuity"]
         maximum_center = float(continuity["segment_max_center_jump"])
         maximum_area = float(continuity["segment_max_area_ratio"])
@@ -4182,6 +4250,26 @@ class StreamingEngine:
                     or area_ratio(reference, value) > maximum_area
                 ):
                     break
+                # A confirmed duplicate still supplies geometric continuity
+                # within this isolated repair. Do not let a suppressed frame
+                # truncate later, independently supported endpoint frames.
+                boxes[key] = value
+                if (track_id, frame_idx, direction) in duplicate_endpoints:
+                    collector = getattr(self, "endpoint_conflicts", None)
+                    if collector is not None:
+                        collector.stats["suppressed_frames"] += 1
+                        coverage = collector.coverage_references.get((track_id, frame_idx, direction))
+                        if coverage is not None:
+                            # Admission is finished. Preserve the actual face
+                            # localization through smoothing and final dedup,
+                            # without treating the drifting endpoint box as
+                            # an additional face-sized coverage requirement.
+                            evidence.append(dict(coverage))
+                        evidence.extend(
+                            dict(reference)
+                            for reference in collector.additional_coverage_references.get((track_id, frame_idx, direction), [])
+                        )
+                    continue
                 final_item = dict(item)
                 endpoint_review = final_item.pop(
                     "_review_measurement",
@@ -4228,12 +4316,15 @@ class StreamingEngine:
                     )
 
                 track = track_map[track_id]
-                intervals = track.get("accepted_intervals", [])
-                for interval in intervals:
-                    if int(interval[0]) - 1 <= frame_idx <= int(interval[1]) + 1:
-                        interval[0] = min(int(interval[0]), frame_idx)
-                        interval[1] = max(int(interval[1]), frame_idx)
-                        break
+                intervals = [list(interval) for interval in track.get("accepted_intervals", [])]
+                intervals.append([frame_idx, frame_idx])
+                merged: list[list[int]] = []
+                for start, end in sorted(intervals):
+                    if merged and int(start) <= merged[-1][1] + 1:
+                        merged[-1][1] = max(merged[-1][1], int(end))
+                    else:
+                        merged.append([int(start), int(end)])
+                track["accepted_intervals"] = merged
         self.endpoint_affine_published_frames += len(published)
         evidence.sort(key=lambda item: (str(item["track_id"]), int(item["frame_idx"])))
         return sorted(
@@ -4356,43 +4447,44 @@ class StreamingEngine:
             confirmation["confirmation_basis"] = "rejected_bilateral_required"
         best_overlap = max(forward_overlap, reverse_overlap)
         best_distance = min(forward_distance, reverse_distance)
-        self.bidirectional_audits.append(
-            {
-                "track_id": str(state.track["track_id"]),
-                "frame_idx": int(frame_idx),
-                "left_frame": left_frame,
-                "right_frame": int(frame_idx),
-                "mode": "symmetric_local_soft",
-                "status": "association_rescue",
-                "accepted": accepted,
-                "confirmation_rule": (
-                    "bilateral_endpoint_confirmation"
-                    if self.fast_review_mode
-                    else "strong_iou_or_bilateral_center"
-                ),
-                "confirmation_basis": str(confirmation["confirmation_basis"]),
-                "decision": (
-                    "bidirectional_endpoint_confirmed" if accepted else "bidirectional_endpoint_rejected"
-                ),
-                "forward_endpoint_confirmed": forward_confirmed,
-                "reverse_endpoint_confirmed": reverse_confirmed,
-                "forward_endpoint_area_passed": bool(confirmation["forward_area_passed"]),
-                "reverse_endpoint_area_passed": bool(confirmation["reverse_area_passed"]),
-                "forward_endpoint_strong_iou": bool(confirmation["forward_strong_iou"]),
-                "reverse_endpoint_strong_iou": bool(confirmation["reverse_strong_iou"]),
-                "forward_endpoint_center_confirmed": bool(confirmation["forward_center_confirmed"]),
-                "reverse_endpoint_center_confirmed": bool(confirmation["reverse_center_confirmed"]),
-                "forward_endpoint_iou": float(forward_overlap),
-                "reverse_endpoint_iou": float(reverse_overlap),
-                "forward_endpoint_area_ratio": float(forward_metrics["area_ratio"]),
-                "reverse_endpoint_area_ratio": float(reverse_metrics["area_ratio"]),
-                "forward_endpoint_center_distance": float(forward_distance),
-                "reverse_endpoint_center_distance": float(reverse_distance),
-                "forward_endpoint_flow_trusted": bool(forward_result.get("flow_measurement_valid", False)),
-                "reverse_endpoint_flow_trusted": bool(reverse_result.get("flow_measurement_valid", False)),
-                "endpoint_center_speed": float(endpoint_distance / max(1, frame_idx - left_frame)),
-            }
-        )
+        if self._collect_developer_audits:
+            self.bidirectional_audits.append(
+                {
+                    "track_id": str(state.track["track_id"]),
+                    "frame_idx": int(frame_idx),
+                    "left_frame": left_frame,
+                    "right_frame": int(frame_idx),
+                    "mode": "symmetric_local_soft",
+                    "status": "association_rescue",
+                    "accepted": accepted,
+                    "confirmation_rule": (
+                        "bilateral_endpoint_confirmation"
+                        if self.fast_review_mode
+                        else "strong_iou_or_bilateral_center"
+                    ),
+                    "confirmation_basis": str(confirmation["confirmation_basis"]),
+                    "decision": (
+                        "bidirectional_endpoint_confirmed" if accepted else "bidirectional_endpoint_rejected"
+                    ),
+                    "forward_endpoint_confirmed": forward_confirmed,
+                    "reverse_endpoint_confirmed": reverse_confirmed,
+                    "forward_endpoint_area_passed": bool(confirmation["forward_area_passed"]),
+                    "reverse_endpoint_area_passed": bool(confirmation["reverse_area_passed"]),
+                    "forward_endpoint_strong_iou": bool(confirmation["forward_strong_iou"]),
+                    "reverse_endpoint_strong_iou": bool(confirmation["reverse_strong_iou"]),
+                    "forward_endpoint_center_confirmed": bool(confirmation["forward_center_confirmed"]),
+                    "reverse_endpoint_center_confirmed": bool(confirmation["reverse_center_confirmed"]),
+                    "forward_endpoint_iou": float(forward_overlap),
+                    "reverse_endpoint_iou": float(reverse_overlap),
+                    "forward_endpoint_area_ratio": float(forward_metrics["area_ratio"]),
+                    "reverse_endpoint_area_ratio": float(reverse_metrics["area_ratio"]),
+                    "forward_endpoint_center_distance": float(forward_distance),
+                    "reverse_endpoint_center_distance": float(reverse_distance),
+                    "forward_endpoint_flow_trusted": bool(forward_result.get("flow_measurement_valid", False)),
+                    "reverse_endpoint_flow_trusted": bool(reverse_result.get("flow_measurement_valid", False)),
+                    "endpoint_center_speed": float(endpoint_distance / max(1, frame_idx - left_frame)),
+                }
+            )
         if not accepted:
             return None
         # Keep rescue below a valid ordinary association score.  It competes
@@ -4675,6 +4767,9 @@ class StreamingEngine:
                 detection["source"] = "detector"
                 detection["detector_scan_rank"] = detector_scan_rank
                 self.detections.append(detection)
+            collector = getattr(self, "endpoint_conflicts", None)
+            if collector is not None and detector_scan_performed:
+                collector.register_scan(frame_idx, selected)
             self._remember_frame(frame_idx, frame)
             prior_track_count = len(self.tracks)
             self.process(
@@ -4698,16 +4793,23 @@ class StreamingEngine:
             processed += 1
             report_progress(processed)
             _raise_if_cancelled(is_cancelled)
-            if frame_idx and frame_idx % int(self.config["streaming"]["progress_every_frames"]) == 0:
-                print(
-                    f"[stream/onnx] {frame_idx}/{self.metadata.frame_count} frames "
-                    f"detections={len(self.detections)} tracks={len(self.tracks)} "
-                    f"live_cache={self.cache.live_payload_bytes() / 1048576:.1f}MiB",
-                    file=sys.stderr,
-                    flush=True,
+            if (
+                logger.isEnabledFor(logging.DEBUG)
+                and frame_idx
+                and frame_idx % int(self.config["streaming"]["progress_every_frames"]) == 0
+            ):
+                logger.debug(
+                    "[stream/onnx] %s/%s frames detections=%s tracks=%s live_cache=%.1fMiB",
+                    frame_idx,
+                    self.metadata.frame_count,
+                    len(self.detections),
+                    len(self.tracks),
+                    self.cache.live_payload_bytes() / 1048576,
                 )
             if frame_idx % int(self.config["streaming"]["eviction_interval_frames"]) == 0:
                 self.cache.evict_before_frame(frame_idx - self.max_retroactive_frames)
+                if collector is not None and collector.enabled:
+                    collector.prune_before(frame_idx - self.max_retroactive_frames)
 
         try:
             _raise_if_cancelled(is_cancelled)
@@ -4736,12 +4838,11 @@ class StreamingEngine:
                     frame_count=decoded_frame_count,
                     duration=decoded_frame_count / float(self.metadata.fps),
                 )
-                print(
-                    "[stream/onnx] decoded "
-                    f"{decoded_frame_count} frames; container metadata reported "
-                    f"{reported_frame_count}; using the decoded frame count",
-                    file=sys.stderr,
-                    flush=True,
+                logger.debug(
+                    "[stream/onnx] decoded %s frames; container metadata reported %s; "
+                    "using the decoded frame count",
+                    decoded_frame_count,
+                    reported_frame_count,
                 )
                 # Re-evaluate queued work after normalizing the end frame.  In
                 # sampled modes this submits the real final frame as the
@@ -4796,6 +4897,7 @@ class StreamingEngine:
                 track["detector_observations"] = len(track["detections"])
         for item in self.endpoint_affine_candidates:
             item["track_id"] = aliases.get(str(item["track_id"]), str(item["track_id"]))
+        self._endpoint_conflict_aliases = aliases
         published = _select_track_frame_candidates(self.candidates)
         scan = {
             "metadata": self.metadata.to_dict(),
@@ -4966,6 +5068,14 @@ class StreamingEngine:
             "recognition": recognition,
             "detector_sampling": detector_sampling,
             "local_review_sampling": local_review_sampling,
+            "endpoint_conflicts": (
+                self.endpoint_conflicts.summary()
+                if getattr(self, "endpoint_conflicts", None) is not None else {"enabled": False}
+            ),
+            "endpoint_conflict_decisions": (
+                self.endpoint_conflicts.decisions
+                if getattr(self, "endpoint_conflicts", None) is not None else []
+            ),
             "seconds": time.perf_counter() - started,
             "cache": {
                 "live_payload_bytes": self.cache.live_payload_bytes(),

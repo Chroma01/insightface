@@ -26,24 +26,35 @@ class ImageViewer(QGraphicsView):
         self.setObjectName("imageViewer")
         self.viewport().setObjectName("imageViewerViewport")
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.NoDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
         self.pixmap_item: Optional[QGraphicsPixmapItem] = None
         self.image: Optional[np.ndarray] = None
         self.faces: List[dict[str, Any]] = []
+        self._fit_on_resize = False
+        self._fitting_to_window = False
 
     def set_image(self, image: Optional[np.ndarray]) -> None:
         self.scene.clear()
         self.image = image
         self.faces = []
         self.pixmap_item = None
+        self._fit_on_resize = False
+        self.resetTransform()
+        # clear() removes items, but the explicit rectangle from the previous
+        # pixmap survives. Reset both scene and view overrides to the now-empty
+        # scene; otherwise its old extent continues to create scroll bars.
+        self.scene.setSceneRect(QRectF())
+        self.setSceneRect(QRectF())
         if image is None:
+            self.setDragMode(QGraphicsView.NoDrag)
             return
         pixmap = QPixmap.fromImage(numpy_to_qimage(image))
         self.pixmap_item = self.scene.addPixmap(pixmap)
         self.scene.setSceneRect(QRectF(pixmap.rect()))
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.draw_overlays()
         self.fit_to_window()
 
@@ -81,12 +92,29 @@ class ImageViewer(QGraphicsView):
             text.setData(0, index)
 
     def fit_to_window(self) -> None:
-        if self.pixmap_item is not None:
+        if self.pixmap_item is None or self._fitting_to_window:
+            return
+        self._fit_on_resize = True
+        self._fitting_to_window = True
+        try:
             self.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
+        finally:
+            self._fitting_to_window = False
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if getattr(self, "_fit_on_resize", False):
+            self.fit_to_window()
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        delta = event.angleDelta().y()
+        if self.pixmap_item is None or not delta:
+            event.ignore()
+            return
+        self._fit_on_resize = False
+        factor = 1.2 if delta > 0 else 1 / 1.2
         self.scale(factor, factor)
+        event.accept()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         scene_pos = self.mapToScene(event.pos())

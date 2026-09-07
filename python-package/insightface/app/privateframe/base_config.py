@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import unicodedata
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
@@ -26,13 +25,34 @@ from .model_catalog import (
 
 _RECOGNITION_DEFAULTS: dict[str, Any] = {
     "mode": "all",
-    "gallery_dir": None,
-    "target_persons": [],
+    "reference_dir": None,
+    "unknown_action": "auto",
     "profile": "balanced",
     "similarity_threshold": 0.40,
 }
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("configs") / "base.yaml"
+
+
+def read_default_config(path: str | Path | None = None) -> dict[str, Any]:
+    """Read base defaults without resolving providers or loading any models.
+
+    Each call returns an independent mapping. GUI defaults and reset actions
+    can share the pipeline's YAML values without running its startup work.
+    """
+
+    source = Path(path) if path is not None else DEFAULT_CONFIG_PATH
+    with source.expanduser().open("r", encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if (
+        not isinstance(config, dict)
+        or type(config.get("schema_version")) is not int
+        or config["schema_version"] != 1
+    ):
+        raise ValueError("Base defaults must be a schema_version: 1 mapping")
+    return config
+
+
 _OPTIONAL_CONFIG_SCHEMA: dict[str, Any] = {
     "recognition": {"max_frames_per_track": None},
     "scan": {
@@ -177,7 +197,7 @@ def resolve_runtime_provider(config: dict[str, Any]) -> None:
 
 
 def validate_recognition(config: dict[str, Any], root: Path) -> None:
-    """Normalize identity-selection settings without touching them in all mode."""
+    """Validate photo matching and the action for unconfirmed faces."""
 
     raw = config.setdefault("recognition", deepcopy(_RECOGNITION_DEFAULTS))
     if not isinstance(raw, dict):
@@ -191,7 +211,10 @@ def validate_recognition(config: dict[str, Any], root: Path) -> None:
     if mode not in {"all", "blur_only", "exempt"}:
         raise ValueError("recognition.mode must be all, blur_only, or exempt")
     raw["mode"] = mode
-    # The all policy is deliberately a highest-level early exit. Stale gallery
+    action = raw["unknown_action"]
+    if not isinstance(action, str) or action not in {"auto", "blur", "keep"}:
+        raise ValueError("recognition.unknown_action must be auto, blur, or keep")
+    # The all policy is deliberately a highest-level early exit. Reference
     # paths and selective settings must not cause filesystem access or model
     # loading when identity selection is not requested.
     if mode == "all":
@@ -215,29 +238,17 @@ def validate_recognition(config: dict[str, Any], root: Path) -> None:
         raise ValueError("recognition.similarity_threshold must be in [0, 1]")
     raw["similarity_threshold"] = threshold
 
-    gallery_text = str(raw.get("gallery_dir") or "").strip()
-    if not gallery_text:
-        raise ValueError("recognition.gallery_dir is required for selective modes")
-    unresolved = Path(gallery_text).expanduser()
+    reference_text = raw.get("reference_dir")
+    if not isinstance(reference_text, str) or not reference_text.strip():
+        raise ValueError("recognition.reference_dir is required for selective modes")
+    unresolved = Path(reference_text.strip()).expanduser()
     candidate = unresolved if unresolved.is_absolute() else root / unresolved
     if candidate.is_symlink():
-        raise ValueError("recognition.gallery_dir must not be a symlink")
-    gallery = candidate.resolve()
-    if not gallery.is_dir():
-        raise FileNotFoundError(f"Recognition gallery directory does not exist: {gallery}")
-    raw["gallery_dir"] = str(gallery)
-
-    targets = raw.get("target_persons")
-    if not isinstance(targets, list) or not targets:
-        raise ValueError("recognition.target_persons must be a non-empty list in selective modes")
-    normalized: list[str] = []
-    for target in targets:
-        if not isinstance(target, str) or not target.strip():
-            raise TypeError("recognition.target_persons entries must be non-empty strings")
-        normalized.append(unicodedata.normalize("NFC", target.strip()))
-    if len(set(normalized)) != len(normalized):
-        raise ValueError("recognition.target_persons contains duplicate NFC names")
-    raw["target_persons"] = normalized
+        raise ValueError("recognition.reference_dir must not be a symlink")
+    reference_dir = candidate.resolve()
+    if not reference_dir.is_dir():
+        raise FileNotFoundError(f"Reference photo directory does not exist: {reference_dir}")
+    raw["reference_dir"] = str(reference_dir)
 
 
 _SUPPORTED_DETECTION_ANGLES = frozenset({-90, 0, 90})
@@ -289,6 +300,66 @@ def _validate_scan_padding(value: Any, *, field: str) -> float:
     if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
         raise ValueError(f"{field} must be finite and in [0, 1]")
     return ratio
+
+
+def validate_endpoint_conflicts(config: dict[str, Any]) -> None:
+    """Validate endpoint-evidence gates and hardware-independent work limits."""
+
+    prefix = "tracking.endpoint_conflicts"
+    tracking = config.get("tracking")
+    settings = tracking.get("endpoint_conflicts") if isinstance(tracking, dict) else None
+    if not isinstance(settings, dict):
+        raise TypeError(f"{prefix} must be a mapping")
+    fractions = {
+        "nearby_iou", "match_min_iou", "match_min_confidence", "match_min_margin",
+    }
+    positive_numbers = {"nearby_center_distance", "match_max_center_distance"}
+    nonnegative_integers = {"max_calls_per_frame", "max_calls_total", "cache_entries"}
+    expected = {
+        "enabled", "angles", "equivalence_iou", "match_max_area_ratio",
+        "recheck_min_frame_gap", "max_calls_per_video_second",
+        *fractions, *positive_numbers, *nonnegative_integers,
+    }
+    unknown = set(settings) - expected
+    if unknown:
+        raise ValueError(f"unknown {prefix} settings: " + ", ".join(sorted(unknown)))
+    missing = expected - set(settings)
+    if missing:
+        raise ValueError(f"missing {prefix} settings: " + ", ".join(sorted(missing)))
+    if not isinstance(settings["enabled"], bool):
+        raise TypeError(f"{prefix}.enabled must be boolean")
+    _validate_detection_angles(settings["angles"], field=f"{prefix}.angles")
+    if len(set(settings["angles"])) != len(settings["angles"]):
+        raise ValueError(f"{prefix}.angles must not contain duplicates")
+    for key in sorted(fractions):
+        value = settings[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{prefix}.{key} must be a number")
+        if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{prefix}.{key} must be finite and in [0, 1]")
+    for key in sorted(positive_numbers):
+        _validate_positive_finite(settings[key], field=f"{prefix}.{key}")
+    for key, minimum, exclusive in (
+        ("equivalence_iou", 0.0, True),
+        ("match_max_area_ratio", 1.0, False),
+        ("max_calls_per_video_second", 0.0, False),
+    ):
+        value = settings[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{prefix}.{key} must be a number")
+        number = float(value)
+        if not math.isfinite(number) or (number <= minimum if exclusive else number < minimum):
+            bound = "greater than" if exclusive else "at least"
+            raise ValueError(f"{prefix}.{key} must be finite and {bound} {minimum:g}")
+        if key == "equivalence_iou" and number > 1.0:
+            raise ValueError(f"{prefix}.{key} must be in (0, 1]")
+    for key in sorted(nonnegative_integers | {"recheck_min_frame_gap"}):
+        value = settings[key]
+        minimum = 1 if key == "recheck_min_frame_gap" else 0
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{prefix}.{key} must be an integer")
+        if value < minimum:
+            raise ValueError(f"{prefix}.{key} must be at least {minimum}")
 
 
 def validate_revalidation_passes(config: dict[str, Any]) -> None:
@@ -1116,11 +1187,11 @@ def apply_config_overrides(
     _apply_prepared_config_overrides(config, prepared)
 
 
-def _prepared_overrides_gallery_dir(
+def _prepared_overrides_reference_dir(
     prepared: Sequence[tuple[str, tuple[_ConfigPathToken, ...], Any]],
 ) -> bool:
     for _path, tokens, _value in prepared:
-        if tokens == ("recognition", "gallery_dir"):
+        if tokens == ("recognition", "reference_dir"):
             return True
     return False
 
@@ -1220,7 +1291,7 @@ def _load_base_config(
         if not isinstance(derived_overrides, dict):
             raise TypeError("derived YAML overrides must be a mapping")
         recognition_override = derived_overrides.get("recognition")
-        if isinstance(recognition_override, dict) and "gallery_dir" in recognition_override:
+        if isinstance(recognition_override, dict) and "reference_dir" in recognition_override:
             recognition_root = derived_override_root
         _merge_config(config, derived_overrides)
     if dotted_overrides is not None:
@@ -1230,7 +1301,7 @@ def _load_base_config(
         if prepared:
             if dotted_override_root is None:
                 raise ValueError("config_override_root is required with config_overrides")
-            if _prepared_overrides_gallery_dir(prepared):
+            if _prepared_overrides_reference_dir(prepared):
                 recognition_root = dotted_override_root
             _apply_prepared_config_overrides(config, prepared)
     validate_current_config_contract(config)
@@ -1243,6 +1314,7 @@ def _load_base_config(
     if materialize_models:
         validate_model_package_contracts(config)
     validate_scan_passes(config)
+    validate_endpoint_conflicts(config)
     validate_scene_cut_detector(config["scan"])
     validate_revalidation_passes(config)
     validate_bidirectional_fusion(config)
@@ -1265,6 +1337,7 @@ __all__ = [
     "validate_config_keys",
     "validate_config_override_paths",
     "validate_current_config_contract",
+    "validate_endpoint_conflicts",
     "validate_model_package_contracts",
     "validate_recognition",
     "validate_revalidation_passes",

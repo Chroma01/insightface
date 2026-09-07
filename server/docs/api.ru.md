@@ -4,9 +4,14 @@
 
 Здесь описаны назначение, входные данные, работа сервера, успешный результат и ошибки каждого публичного API. Установка и первый поиск приведены в [руководстве пользователя](user-guide.ru.md), точная схема запущенной версии — в `/docs` и `/openapi.json`.
 
+
+Модели идентифицируются по `model_id`; отдельное поле `model_version` больше не возвращается. Существующие Collection сохраняют `embedding_contract_id`.
+
+Для проверки живого лица см. [настройку, установку модели и результаты](#необязательный-addon-проверки-живого-лица). В разделах операций также описано её влияние.
+
 ## Общие правила
 
-- Базовый путь `/v1`, JSON в `snake_case`, изображения JPEG/PNG/WebP как multipart.
+- Базовый путь `/v1`, JSON в `snake_case`, изображения JPEG/PNG/WebP/BMP как multipart.
 - Поставляемый Compose отключает авторизацию для изолированной оценки. Если она включена, всё кроме health требует `Authorization: Bearer <api_key>`; если выключена, заголовок нужно полностью убрать.
 - В каждом ответе есть `x-request-id`, а JSON повторяет его как `request_id`.
 - confidence/quality/threshold находятся в `0..1`. Similarity — не вероятность, а исходный cosine `[-1,1]`; порог по умолчанию `0.4`, совпадение при `similarity >= threshold`.
@@ -18,6 +23,60 @@ BASE_URL=http://127.0.0.1:18097
 AUTH_HEADER="Authorization: Bearer ${INSIGHTFACE_API_KEY}"
 curl -fsS "${BASE_URL}/v1/health"
 ```
+
+## Необязательный addon проверки живого лица
+
+В `server/config/server.toml` проверка живого лица по умолчанию отключена: `inference.addons` и `addons.auto_download` равны `[]`. Старые настройки без этих ключей также остаются отключёнными. Ниже пример ручного включения; установите модель до перезапуска.
+
+В разделе **Система → Проверка живого лица** загрузите модель и включите её для следующего запуска. После проверки SHA-256 оба списка сохраняются как `["liveness"]`; остальные настройки сохраняются. Проверенный файл используется повторно. Для применения **перезапустите Server вручную**. Ошибки допускают повтор; неудачная загрузка не включает проверку.
+
+[Монтирование и права для загрузки через Web](user-guide.ru.md#монтирование-и-права-для-загрузки-через-web).
+
+```toml
+[inference]
+addons = ["liveness"]
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = ["liveness"]
+```
+
+### Установка модели и запуск
+
+`inference.addons` управляет выполнением, а `addons.auto_download` — дополнительной загрузкой при установке базового пакета. С `["liveness"]` addon устанавливается и для уже кешированного пакета. При запуске Server загрузки нет. Установщик и Server читают один файл.
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+Отсутствующая включённая модель останавливает запуск с `addon_model_missing`, неверная — с `addon_model_invalid`. Addon не отключается незаметно.
+
+### Результаты проверки живого лица
+
+| Результат | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| Живое лицо | `ok` | `true` | `[0, 1]` |
+| Подделка | `ok` | `false` | `[0, 1]` |
+| Неподходящий вход | `input_rejected` | `null` | `null` |
+
+`normal` распознаёт только лица, прошедшие проверку; `observe` сохраняет результат и продолжает распознавание. Без проверки поле `liveness` отсутствует. Объект содержит только `status`, `is_live` и `live_score`: живое лицо и подделка получают `status: ok`, логическое значение и оценку; отклонённый вход — `status: input_rejected` и два значения `null`.
+
+`/v1/detect` возвращает HTTP 200 и для отрицательных результатов. В режиме `normal` embeddings, сравнение и поиск возвращают HTTP 422 `liveness_fake` или `liveness_input_rejected` с `error.details.liveness`; сравнение добавляет `details.side`. Сбой инференса возвращает HTTP 503 `liveness_unavailable`.
+
+При создании Person и добавлении FaceSample проверка по умолчанию пропускается: `[inference].liveness_on_registration=false` не запускает модель и не добавляет `liveness` к новым образцам. При `true` и включённом addon применяется режим `normal`/`observe`; отклонённые изображения содержат `reason` и `liveness`. Проверка качества по `review_mode` и валидация внешних эмбеддингов сохраняются. `review_mode=off` и `external_trusted` не обходят включённую проверку при регистрации. Запрос не может переопределить эту настройку запуска. Ранее сохранённые результаты остаются доступны.
+
+RTSP отличает `liveness_blocked` от `unknown` и использует счётчик `liveness_blocked_faces`. Заблокированные лица не создают события входа человека/неизвестного и сбрасывают подтверждение. При сбое инференса ранее показанные личности очищаются.
+
+`liveness_compare_scope` выбирает стороны `/v1/compare`: `both` (по умолчанию) проверяет обе, `source` — исходное изображение, `target` — целевое. Лицо признаётся живым при `live_score >= liveness_threshold`.
+
+`models addons install liveness` сохраняет опубликованную модель в `/models/addons/liveness.onnx`; на хосте Compose это `server/.models/addons/liveness.onnx`. Ошибки запуска: `addon_model_missing` и `addon_model_invalid`. `/v1/models` и `/v1/system` возвращают активные дополнения в `addons`.
+
+[Настройка и рабочие процессы](user-guide.ru.md#необязательный-addon-проверки-живого-лица).
 
 ## Система
 
@@ -31,11 +90,64 @@ curl -fsS "${BASE_URL}/v1/health"
 
 ### `GET /v1/models`
 
+`addons` сообщает активные дополнения отдельно от базовой модели. Проверьте `liveness` и действующие настройки в `safe_config` ответа системы. Эти интерфейсы только читают данные и не устанавливают модели.
+
 **Назначение/ввод:** проверенные detector/recognizer, Provider и лицензия; без параметров. **Результат:** 200 `models`, `execution_provider`, `license`. **Ошибка:** 401.
+
+Базовые пакеты `raccoon_s` и `raccoon_l` поддерживают CPU и CUDA и устанавливаются инструментом моделей до запуска. Этот API перечисляет используемые компоненты, а не каталог загрузок. Действие Web ниже управляет только проверкой живого лица. Collection привязана к модели распознавания и предобработке: смена пакета не преобразует существующие векторы и может вернуть `409 collection_model_mismatch`. Включение только проверки живого лица не меняет этот контракт.
+
+### `GET /v1/addons/liveness`
+
+**Назначение:** Прочитать состояние установки и настройки следующего запуска без загрузки или изменений. Это API управления, а не отдельный API инференса проверки живого лица.
+
+**Результат:** HTTP 200. `enabled` показывает состояние работающего процесса. `installed` означает, что файл прошёл проверку опубликованного SHA-256, а не что проверка включена. `configured_enabled` читает выбор для следующего запуска из текущего файла; `restart_required` означает отличие от `enabled`. До перезапуска `safe_config` в `/v1/system` продолжает описывать работающий процесс.
+
+`state` принимает `idle` (проверенного файла нет), `downloading` (идёт подготовка), `ready` (проверенный файл доступен) или `error` (ошибка подготовки, файла или настроек). Само по себе `ready` не означает сохранения включённой настройки или завершения перезапуска.
+
+`can_enable` показывает доступность подготовки через Web. Если она недоступна, `unavailable_code` содержит стабильный код причины, а `unavailable_reason` — пояснение; иначе оба равны `null`. `error` равен `null` или содержит `code` и `message`. `model_path` — локальный путь модели; `config_file` — выбранный путь TOML или `null`. Ответ также содержит `request_id`.
+
+Значения `unavailable_code`: `config_file_missing` (файл настроек не выбран), `config_file_not_regular` (не обычный файл), `config_file_mount` (файл смонтирован отдельно), `config_not_writable` (нет прав записи настроек), `addon_directory_not_writable` (нет прав записи в каталог дополнения), `addon_config_invalid` (неверные настройки), `addon_model_invalid` (неверная модель), `server_stopping` (сервер останавливается).
+
+```json
+{
+  "enabled": false,
+  "installed": true,
+  "configured_enabled": true,
+  "restart_required": true,
+  "can_enable": true,
+  "unavailable_code": null,
+  "unavailable_reason": null,
+  "state": "ready",
+  "error": null,
+  "model_path": "/models/addons/liveness.onnx",
+  "config_file": "/etc/insightface/server.toml",
+  "request_id": "3ed21e89-4595-4eed-a699-1df42ca62032"
+}
+```
+
+### `POST /v1/addons/liveness/enable`
+
+**Назначение:** Загрузить модель и сохранить её включение при следующем запуске. Отправить пустой JSON-объект `{}` с `Content-Type: application/json`. URL модели и другие параметры не принимаются.
+
+```bash
+curl -sS "${BASE_URL}/v1/addons/liveness" -H "${AUTH_HEADER}"
+curl -sS "${BASE_URL}/v1/addons/liveness/enable" -H "${AUTH_HEADER}" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+**Результат:** HTTP 202 возвращает те же поля, что GET, и подтверждает принятие задания, а не включение проверки. Опрашивайте `GET /v1/addons/liveness` до завершения. Повторные запросы используют выполняемое задание; закрытие браузера его не отменяет.
+
+Только после загрузки и проверки SHA-256 в `[inference].addons` и `[addons].auto_download` файла `config_file` добавляется `liveness`. Остальные значения и комментарии сохраняются, проверенный файл используется повторно. При `installed=true`, `configured_enabled=true` и `restart_required=true` перезапустите сервер вручную. Новый процесс вернёт `enabled=true` и `restart_required=false`. Горячей перезагрузки и API переключения базового пакета нет.
+
+**Ошибки:** Ошибки запроса имеют обычный формат: `400 invalid_addon_request`, если тело отличается от `{}`; `401 unauthorized` при ошибке аутентификации; `403 origin_not_allowed` для запрещённого источника браузера; `409 addon_management_unavailable` при неподходящих путях, правах или настройках; `415 json_required`, если тип содержимого не JSON. Браузер должен использовать тот же источник, что сервер, либо явно разрешённый CORS-источник.
+
+Принятое задание может завершиться ошибкой позднее: GET по-прежнему возвращает HTTP 200 с `state=error` и `error.code`. `addon_download_failed` не меняет настройки: проверьте сеть или прокси сервера. При `addon_config_save_failed` исправьте настройки или права каталога; проверенный файл можно использовать повторно. `addon_config_invalid` означает неверный TOML на диске. При `addon_model_invalid` замените или удалите повреждённый файл; он не перезаписывается незаметно. `addon_job_in_progress` означает подготовку другим процессом: подождите и обновите состояние. Повторяйте POST после устранения причины.
 
 ## Stateless-операции
 
 ### `POST /v1/detect`
+
+Каждое проверенное лицо содержит `liveness.status`, `liveness.is_live` и `liveness.live_score`. Результаты подделки и `input_rejected` также возвращают HTTP 200 без извлечения признаков распознавания. `input_rejected` означает неподходящий ввод, например лицо слишком близко к краю. Если `liveness` отсутствует, проверки не было.
 
 **Ввод:** multipart `image` обязателен, `max_faces` 1–100, необязательный `collection_id`. **Работа/результат:** объединяет разрешения, делает общую NMS и сортирует по площади; 200 `faces` с рамками/5 точками/score/quality и `processing_ms`. Нет лица — корректный пустой список. **Ошибки:** 400 старый min_score, 404 Collection, 413, 422 invalid_image, 503.
 
@@ -45,9 +157,13 @@ curl -sS "${BASE_URL}/v1/detect" -H "${AUTH_HEADER}" -F 'image=@group.jpg' -F 'm
 
 ### `POST /v1/compare`
 
+`liveness_compare_scope` (`both`, `source`, `target`) выбирает стороны для проверки перед распознаванием. В `normal` отказ возвращает HTTP 422 `liveness_fake` / `liveness_input_rejected`, `error.details.liveness` и `error.details.side`, без сходства. `observe` продолжает сравнение и возвращает результаты у проверенных лиц.
+
 **Ввод:** multipart `source`, `target`, необязательные `threshold` 0–1 и `collection_id`. **Результат:** выбирает одно лицо из каждого изображения; 200 `matched`, cosine `similarity`, фактический threshold, оба face и время. **Ошибки:** 404, 413, 422 invalid_image/face_not_found, 503.
 
 ### `POST /v1/embeddings`
+
+При включённой проверке в `normal` подделка или неподходящий ввод возвращает HTTP 422 `liveness_fake` / `liveness_input_rejected` и `error.details.liveness`; эмбеддинг не извлекается. `observe` возвращает эмбеддинг и результат проверки лица.
 
 **Ввод:** multipart `image`, необязательный `collection_id`. **Результат:** 200 с выбранным face, L2-нормированным embedding, моделью и временем. Для обычной регистрации не нужен; в лог не записывается. **Ошибки:** 400 старый face_selection, 404, 413, 422, 503.
 
@@ -81,6 +197,8 @@ curl -sS "${BASE_URL}/v1/collections" -H "${AUTH_HEADER}" -H 'Content-Type: appl
 
 ### `POST /v1/collections/{collection_id}/persons`
 
+Создание Person и добавление FaceSamples по умолчанию пропускают проверку (`liveness_on_registration=false`). После включения `normal` отклоняет подделки и неподходящие изображения, а `observe` сохраняет результат и продолжает. Проверка качества следует выбранному `review_mode`. Список отказов отдельно показывает фактический `reason` и результат проверки живого лица.
+
 **Ввод:** Collection; multipart повторяемые `images`, необязательные id/name/external_id, metadata как JSON-строка, `review_mode=off|standard|strict`, `embedding_mode=server|external_trusted`; внешнему режиму нужны векторы и contract ID. **Работа/результат:** проверяет каждое изображение; 201 `person`, принятые `faces`, `rejected_images`; частичный успех разрешён, все отклонены — 422 без Person. **Ошибки:** 400, 404, 409 ID/контракт/ёмкость, 413, 422, 503.
 
 ```bash
@@ -105,6 +223,8 @@ curl -sS "${BASE_URL}/v1/collections/employees/persons" -H "${AUTH_HEADER}" -F '
 
 ### `POST /v1/collections/{collection_id}/persons/{person_id}/faces`
 
+Создание Person и добавление FaceSamples по умолчанию пропускают проверку (`liveness_on_registration=false`). После включения `normal` отклоняет подделки и неподходящие изображения, а `observe` сохраняет результат и продолжает. Проверка качества следует выбранному `review_mode`. Список отказов отдельно показывает фактический `reason` и результат проверки живого лица.
+
 **Ввод:** IDs; повторяемые images и те же review/embedding-поля, что при создании Person. **Результат:** 201 `faces`, `rejected_images`, возможен частичный успех. **Ошибки:** ошибки регистрации плюс 404 Person.
 
 ### `GET /v1/collections/{collection_id}/persons/{person_id}/faces`
@@ -122,6 +242,8 @@ curl -sS "${BASE_URL}/v1/collections/employees/persons" -H "${AUTH_HEADER}" -F '
 ## Поиск
 
 ### `POST /v1/collections/{collection_id}/search`
+
+При включённой проверке в `normal` подделка или неподходящий запрос возвращает HTTP 422 `liveness_fake` / `liveness_input_rejected` и `error.details.liveness`; поиск не выполняется. Это отличается от успешного пустого списка совпадений. `observe` продолжает поиск и возвращает результат у лица запроса.
 
 **Ввод:** Collection; multipart `image`, `limit` 1–100 (5), необязательный threshold или значение Collection. **Работа/результат:** сравнивает выбранное лицо со всеми samples, берёт максимум по Person; 200 `searched_face`, отсортированные `matches`, threshold и время. Нет совпадений — пустой список. **Ошибки:** 404, 409 модель, 413, 422 изображение/лицо, 503 индекс/timeout.
 
@@ -154,6 +276,8 @@ curl -sS "${BASE_URL}/v1/collections/employees/search" -H "${AUTH_HEADER}" -F 'i
 **Назначение:** Навсегда удалить Monitor. **Ввод:** `monitor_id` в пути. **Результат:** останавливает декодер, инференс и RTSP, удаляет события из памяти и возвращает 204; Collection остаётся. **Ошибки:** 401, 404.
 
 ### `GET /v1/monitors/{monitor_id}/state`
+
+При включённой проверке в `normal` заблокированные лица имеют `status: liveness_blocked` и отдельный результат. Они учитываются в `liveness_blocked_faces`, а не в `unknown_faces`, и не создают события входа. `observe` продолжает распознавание. Неподходящий ввод и подделка отображаются раздельно.
 
 **Назначение:** Опросить текущее состояние из headless-клиента. **Ввод:** ID Monitor. **Результат:** 200 со связью, фактическим FPS, задержкой, пропусками, текущими известными/неизвестными лицами, preview, переподключениями и безопасной ошибкой, без embeddings. **Ошибки:** 401, 404.
 

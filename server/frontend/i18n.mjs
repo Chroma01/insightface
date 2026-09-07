@@ -1,4 +1,4 @@
-import { SHARED_UI_MESSAGES, UI_CATALOGS } from "./ui-translations.mjs?v=0.2.0-r14";
+import { SHARED_UI_MESSAGES, UI_CATALOGS } from "./ui-translations.mjs?v=0.3.0-r1";
 
 export const LANGUAGES = Object.freeze([
   { code: "en", label: "English", htmlLang: "en" },
@@ -47,7 +47,7 @@ const catalogs = {
     "Edit collection": "编辑人员库", Cancel: "取消", "Save changes": "保存修改", README: "README", "User guide": "用户指南",
     "Open document": "打开文档", "Documentation": "文档", "Could not load documentation.": "无法加载文档。",
     "The key stays in this tab's memory and is never saved by the UI.": "Key 仅保留在当前标签页内存中，UI 不会保存它。",
-    "Similarity is not a probability.": "相似度不是概率。", "No files selected": "未选择文件", "JPEG, PNG, or WebP": "JPEG、PNG 或 WebP",
+    "Similarity is not a probability.": "相似度不是概率。", "No files selected": "未选择文件", "JPEG, PNG, WebP, or BMP": "JPEG、PNG、WebP 或 BMP",
     "Detector input sizes": "检测输入尺寸", "Detection threshold": "检测阈值", "NMS threshold": "NMS 阈值", "Single-face selection": "单脸挑选策略",
     "Largest face": "最大脸", "Center-weighted largest": "中心加权最大脸", "Detection profile": "检测配置", "Off · collection selection": "关闭 · 使用人员库策略",
   },
@@ -79,7 +79,7 @@ const catalogs = {
     "Clear key": "キーをクリア", "Use for this tab": "このタブで使用", "Edit collection": "コレクションを編集", Cancel: "キャンセル",
     "Save changes": "変更を保存", README: "README", "User guide": "ユーザーガイド", Documentation: "ドキュメント", "Open document": "ドキュメントを開く",
     "Could not load documentation.": "ドキュメントを読み込めませんでした。", "Similarity is not a probability.": "類似度は確率ではありません。",
-    "No files selected": "ファイル未選択", "JPEG, PNG, or WebP": "JPEG、PNG、または WebP",
+    "No files selected": "ファイル未選択", "JPEG, PNG, WebP, or BMP": "JPEG、PNG、WebP、または BMP",
     "Detector input sizes": "検出入力サイズ", "Detection threshold": "検出しきい値", "NMS threshold": "NMS しきい値", "Single-face selection": "単一顔の選択",
     "Largest face": "最大の顔", "Center-weighted largest": "中心重み付き最大", "Detection profile": "検出プロファイル", "Off · collection selection": "オフ · Collection の選択",
   },
@@ -110,7 +110,7 @@ const catalogs = {
     "API key": "API-Schlüssel", "Paste API key": "API-Schlüssel einfügen", "Clear key": "Schlüssel löschen", "Use for this tab": "Für diesen Tab verwenden",
     "Edit collection": "Sammlung bearbeiten", Cancel: "Abbrechen", "Save changes": "Änderungen speichern", README: "README", "User guide": "Benutzerhandbuch",
     Documentation: "Dokumentation", "Open document": "Dokument öffnen", "Could not load documentation.": "Dokumentation konnte nicht geladen werden.",
-    "Similarity is not a probability.": "Ähnlichkeit ist keine Wahrscheinlichkeit.", "No files selected": "Keine Dateien ausgewählt", "JPEG, PNG, or WebP": "JPEG, PNG oder WebP",
+    "Similarity is not a probability.": "Ähnlichkeit ist keine Wahrscheinlichkeit.", "No files selected": "Keine Dateien ausgewählt", "JPEG, PNG, WebP, or BMP": "JPEG, PNG, WebP oder BMP",
     "Detector input sizes": "Detektor-Eingabegrößen", "Detection threshold": "Erkennungsschwelle", "NMS threshold": "NMS-Schwelle", "Single-face selection": "Ein-Gesicht-Auswahl",
     "Largest face": "Größtes Gesicht", "Center-weighted largest": "Zentrumsgewichtet größtes", "Detection profile": "Erkennungsprofil", "Off · collection selection": "Aus · Collection-Auswahl",
   },
@@ -142,7 +142,7 @@ const catalogs = {
     "Use for this tab": "Usar en esta pestaña", "Edit collection": "Editar colección", Cancel: "Cancelar", "Save changes": "Guardar cambios",
     README: "README", "User guide": "Guía de usuario", Documentation: "Documentación", "Open document": "Abrir documento",
     "Could not load documentation.": "No se pudo cargar la documentación.", "Similarity is not a probability.": "La similitud no es una probabilidad.",
-    "No files selected": "No hay archivos seleccionados", "JPEG, PNG, or WebP": "JPEG, PNG o WebP",
+    "No files selected": "No hay archivos seleccionados", "JPEG, PNG, WebP, or BMP": "JPEG, PNG, WebP o BMP",
     "Detector input sizes": "Tamaños de entrada del detector", "Detection threshold": "Umbral de detección", "NMS threshold": "Umbral NMS", "Single-face selection": "Selección de un rostro",
     "Largest face": "Rostro mayor", "Center-weighted largest": "Mayor ponderado por centro", "Detection profile": "Perfil de detección", "Off · collection selection": "Desactivada · selección de Collection",
   },
@@ -174,7 +174,7 @@ const catalogs = {
     "Use for this tab": "Utiliser dans cet onglet", "Edit collection": "Modifier la collection", Cancel: "Annuler", "Save changes": "Enregistrer",
     README: "README", "User guide": "Guide utilisateur", Documentation: "Documentation", "Open document": "Ouvrir le document",
     "Could not load documentation.": "Impossible de charger la documentation.", "Similarity is not a probability.": "La similarité n’est pas une probabilité.",
-    "No files selected": "Aucun fichier sélectionné", "JPEG, PNG, or WebP": "JPEG, PNG ou WebP",
+    "No files selected": "Aucun fichier sélectionné", "JPEG, PNG, WebP, or BMP": "JPEG, PNG, WebP ou BMP",
     "Detector input sizes": "Tailles d’entrée du détecteur", "Detection threshold": "Seuil de détection", "NMS threshold": "Seuil NMS", "Single-face selection": "Sélection mono-visage",
     "Largest face": "Plus grand visage", "Center-weighted largest": "Plus grand pondéré par le centre", "Detection profile": "Profil de détection", "Off · collection selection": "Désactivé · sélection Collection",
   },
@@ -206,7 +206,7 @@ const catalogs = {
     "Clear key": "Очистить ключ", "Use for this tab": "Использовать в этой вкладке", "Edit collection": "Изменить коллекцию", Cancel: "Отмена",
     "Save changes": "Сохранить", README: "README", "User guide": "Руководство", Documentation: "Документация", "Open document": "Открыть документ",
     "Could not load documentation.": "Не удалось загрузить документацию.", "Similarity is not a probability.": "Сходство не является вероятностью.",
-    "No files selected": "Файлы не выбраны", "JPEG, PNG, or WebP": "JPEG, PNG или WebP",
+    "No files selected": "Файлы не выбраны", "JPEG, PNG, WebP, or BMP": "JPEG, PNG, WebP или BMP",
     "Detector input sizes": "Входные размеры детектора", "Detection threshold": "Порог детекции", "NMS threshold": "Порог NMS", "Single-face selection": "Выбор одного лица",
     "Largest face": "Крупнейшее лицо", "Center-weighted largest": "Наибольшее с весом центра", "Detection profile": "Профиль детекции", "Off · collection selection": "Выкл. · выбор Collection",
   },
@@ -238,7 +238,7 @@ const catalogs = {
     "Use for this tab": "Usar neste separador", "Edit collection": "Editar coleção", Cancel: "Cancelar", "Save changes": "Guardar alterações",
     README: "README", "User guide": "Guia do utilizador", Documentation: "Documentação", "Open document": "Abrir documento",
     "Could not load documentation.": "Não foi possível carregar a documentação.", "Similarity is not a probability.": "A similaridade não é uma probabilidade.",
-    "No files selected": "Nenhum ficheiro selecionado", "JPEG, PNG, or WebP": "JPEG, PNG ou WebP",
+    "No files selected": "Nenhum ficheiro selecionado", "JPEG, PNG, WebP, or BMP": "JPEG, PNG, WebP ou BMP",
     "Detector input sizes": "Tamanhos de entrada do detetor", "Detection threshold": "Limiar de deteção", "NMS threshold": "Limiar NMS", "Single-face selection": "Seleção de um rosto",
     "Largest face": "Maior rosto", "Center-weighted largest": "Maior com peso central", "Detection profile": "Perfil de deteção", "Off · collection selection": "Desativado · seleção da Collection",
   },
@@ -270,7 +270,7 @@ const catalogs = {
     "Use for this tab": "이 탭에서 사용", "Edit collection": "컬렉션 편집", Cancel: "취소", "Save changes": "변경 저장",
     README: "README", "User guide": "사용자 가이드", Documentation: "문서", "Open document": "문서 열기",
     "Could not load documentation.": "문서를 불러올 수 없습니다.", "Similarity is not a probability.": "유사도는 확률이 아닙니다.",
-    "No files selected": "선택된 파일 없음", "JPEG, PNG, or WebP": "JPEG, PNG 또는 WebP",
+    "No files selected": "선택된 파일 없음", "JPEG, PNG, WebP, or BMP": "JPEG, PNG, WebP 또는 BMP",
     "Detector input sizes": "검출기 입력 크기", "Detection threshold": "검출 임계값", "NMS threshold": "NMS 임계값", "Single-face selection": "단일 얼굴 선택",
     "Largest face": "가장 큰 얼굴", "Center-weighted largest": "중심 가중 최대 얼굴", "Detection profile": "검출 프로필", "Off · collection selection": "끄기 · Collection 선택",
   },
@@ -279,7 +279,7 @@ const catalogs = {
 const supplementalCatalogs = {
   zh: {
     Language: "语言", "Version-matched documentation is bundled with this server and works without internet access.": "与当前版本匹配的文档已内置，无需联网即可阅读。",
-    "InsightFace Server dashboard": "InsightFace Server 仪表盘", "Detect, compare, enroll, and search without sending images outside your server.": "无需将图片发送到服务器之外，即可完成检测、比对、注册和搜索。",
+    "InsightFace Server dashboard": "InsightFace Server 仪表盘", "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "无需将图片发送到服务器之外，即可完成人脸检测、活体检测、比对、注册和搜索。",
     "separate identity spaces": "独立身份空间", "enrolled identities": "已注册身份", "stored embeddings": "已存特征", "API readiness": "API 就绪状态", Database: "数据库",
     "API failures from this browser tab will appear here.": "此浏览器标签页中的 API 错误会显示在这里。", "tab memory only": "仅保留在标签页内存",
     "The displayed language follows the console language selector.": "文档语言跟随控制台语言选择。", "Loading documentation…": "正在加载文档…",
@@ -292,7 +292,7 @@ const supplementalCatalogs = {
   ja: {
     Language: "言語", "Version-matched documentation is bundled with this server and works without internet access.": "このサーバーと同じバージョンのドキュメントが内蔵され、オフラインで利用できます。",
     "InsightFace Server dashboard": "InsightFace Server ダッシュボード", "The key stays in this tab's memory and is never saved by the UI.": "Key はこのタブのメモリだけに保持され、UI には保存されません。",
-    "Detect, compare, enroll, and search without sending images outside your server.": "画像をサーバー外へ送信せずに、検出、比較、登録、検索を実行できます。", "separate identity spaces": "独立した ID 空間", "enrolled identities": "登録済み ID",
+    "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "画像をサーバー外へ送信せずに、検出、生体検知、比較、登録、検索を実行できます。", "separate identity spaces": "独立した ID 空間", "enrolled identities": "登録済み ID",
     "stored embeddings": "保存済み特徴量", "API readiness": "API 準備状態", Database: "データベース", "API failures from this browser tab will appear here.": "このタブの API エラーがここに表示されます。", "tab memory only": "タブのメモリのみ",
     "The displayed language follows the console language selector.": "文書の言語はコンソールの言語設定に従います。", "Loading documentation…": "ドキュメントを読み込み中…",
     "API key configured": "API キー設定済み", Configured: "設定済み", "Ready to compare": "比較できます", Close: "閉じる",
@@ -304,7 +304,7 @@ const supplementalCatalogs = {
   de: {
     Language: "Sprache", "Version-matched documentation is bundled with this server and works without internet access.": "Zur Serverversion passende Dokumentation ist enthalten und offline verfügbar.",
     "InsightFace Server dashboard": "InsightFace Server Übersicht", "The key stays in this tab's memory and is never saved by the UI.": "Der Key bleibt nur im Speicher dieses Tabs und wird von der UI nicht gespeichert.",
-    "Detect, compare, enroll, and search without sending images outside your server.": "Erkennen, vergleichen, registrieren und suchen, ohne Bilder vom Server zu übertragen.", "separate identity spaces": "getrennte Identitätsräume", "enrolled identities": "registrierte Identitäten",
+    "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "Erkennen, Lebenderkennung durchführen, vergleichen, registrieren und suchen, ohne Bilder vom Server zu übertragen.", "separate identity spaces": "getrennte Identitätsräume", "enrolled identities": "registrierte Identitäten",
     "stored embeddings": "gespeicherte Embeddings", "API readiness": "API-Bereitschaft", Database: "Datenbank", "API failures from this browser tab will appear here.": "API-Fehler dieses Browser-Tabs erscheinen hier.", "tab memory only": "nur Tab-Speicher",
     "The displayed language follows the console language selector.": "Die Dokumentsprache folgt der Sprachauswahl der Konsole.", "Loading documentation…": "Dokumentation wird geladen…",
     "API key configured": "API-Schlüssel konfiguriert", Configured: "Konfiguriert", "Ready to compare": "Bereit zum Vergleichen", Close: "Schließen",
@@ -316,7 +316,7 @@ const supplementalCatalogs = {
   es: {
     Language: "Idioma", "Version-matched documentation is bundled with this server and works without internet access.": "La documentación correspondiente a esta versión está integrada y funciona sin internet.",
     "InsightFace Server dashboard": "Panel de InsightFace Server", "The key stays in this tab's memory and is never saved by the UI.": "La clave solo permanece en la memoria de esta pestaña y la UI no la guarda.",
-    "Detect, compare, enroll, and search without sending images outside your server.": "Detecte, compare, registre y busque sin enviar imágenes fuera de su servidor.", "separate identity spaces": "espacios de identidad separados", "enrolled identities": "identidades registradas",
+    "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "Detecte, realice pruebas de vida, compare, registre y busque sin enviar imágenes fuera de su servidor.", "separate identity spaces": "espacios de identidad separados", "enrolled identities": "identidades registradas",
     "stored embeddings": "vectores guardados", "API readiness": "disponibilidad API", Database: "Base de datos", "API failures from this browser tab will appear here.": "Los errores API de esta pestaña aparecerán aquí.", "tab memory only": "solo memoria de pestaña",
     "The displayed language follows the console language selector.": "El idioma del documento sigue el selector de la consola.", "Loading documentation…": "Cargando documentación…",
     "API key configured": "Clave API configurada", Configured: "Configurada", "Ready to compare": "Listo para comparar", Close: "Cerrar",
@@ -328,7 +328,7 @@ const supplementalCatalogs = {
   fr: {
     Language: "Langue", "Version-matched documentation is bundled with this server and works without internet access.": "La documentation correspondant à cette version est intégrée et disponible hors ligne.",
     "InsightFace Server dashboard": "Tableau de bord InsightFace Server", "The key stays in this tab's memory and is never saved by the UI.": "La clé reste uniquement en mémoire dans cet onglet et n'est pas enregistrée par l'interface.",
-    "Detect, compare, enroll, and search without sending images outside your server.": "Détectez, comparez, inscrivez et recherchez sans envoyer les images hors de votre serveur.", "separate identity spaces": "espaces d'identité séparés", "enrolled identities": "identités inscrites",
+    "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "Détectez, contrôlez le caractère vivant, comparez, inscrivez et recherchez sans envoyer les images hors de votre serveur.", "separate identity spaces": "espaces d'identité séparés", "enrolled identities": "identités inscrites",
     "stored embeddings": "embeddings enregistrés", "API readiness": "disponibilité API", Database: "Base de données", "API failures from this browser tab will appear here.": "Les erreurs API de cet onglet apparaîtront ici.", "tab memory only": "mémoire de l'onglet uniquement",
     "The displayed language follows the console language selector.": "La langue du document suit le sélecteur de la console.", "Loading documentation…": "Chargement de la documentation…",
     "API key configured": "Clé API configurée", Configured: "Configurée", "Ready to compare": "Prêt à comparer", Close: "Fermer",
@@ -340,7 +340,7 @@ const supplementalCatalogs = {
   ru: {
     Language: "Язык", "Version-matched documentation is bundled with this server and works without internet access.": "Документация этой версии встроена в сервер и доступна без интернета.",
     "InsightFace Server dashboard": "Панель InsightFace Server", "The key stays in this tab's memory and is never saved by the UI.": "Ключ хранится только в памяти вкладки и не сохраняется интерфейсом.",
-    "Detect, compare, enroll, and search without sending images outside your server.": "Детектируйте, сравнивайте, регистрируйте и ищите, не отправляя изображения за пределы сервера.", "separate identity spaces": "отдельные пространства идентичностей", "enrolled identities": "зарегистрированные личности",
+    "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "Выполняйте детекцию, проверку живого лица, сравнение, регистрацию и поиск, не отправляя изображения за пределы сервера.", "separate identity spaces": "отдельные пространства идентичностей", "enrolled identities": "зарегистрированные личности",
     "stored embeddings": "сохранённые векторы", "API readiness": "готовность API", Database: "База данных", "API failures from this browser tab will appear here.": "Ошибки API этой вкладки появятся здесь.", "tab memory only": "только память вкладки",
     "The displayed language follows the console language selector.": "Язык документа соответствует выбору в консоли.", "Loading documentation…": "Загрузка документации…",
     "API key configured": "API-ключ настроен", Configured: "Настроено", "Ready to compare": "Готово к сравнению", Close: "Закрыть",
@@ -352,7 +352,7 @@ const supplementalCatalogs = {
   pt: {
     Language: "Idioma", "Version-matched documentation is bundled with this server and works without internet access.": "A documentação desta versão está incluída e funciona sem internet.",
     "InsightFace Server dashboard": "Painel do InsightFace Server", "The key stays in this tab's memory and is never saved by the UI.": "A chave fica apenas na memória deste separador e não é guardada pela interface.",
-    "Detect, compare, enroll, and search without sending images outside your server.": "Detete, compare, registe e pesquise sem enviar imagens para fora do seu servidor.", "separate identity spaces": "espaços de identidade separados", "enrolled identities": "identidades registadas",
+    "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "Detete, verifique a vivacidade, compare, registe e pesquise sem enviar imagens para fora do seu servidor.", "separate identity spaces": "espaços de identidade separados", "enrolled identities": "identidades registadas",
     "stored embeddings": "vetores guardados", "API readiness": "disponibilidade da API", Database: "Base de dados", "API failures from this browser tab will appear here.": "Os erros API deste separador aparecerão aqui.", "tab memory only": "apenas memória do separador",
     "The displayed language follows the console language selector.": "O idioma do documento segue o seletor da consola.", "Loading documentation…": "A carregar documentação…",
     "API key configured": "Chave API configurada", Configured: "Configurada", "Ready to compare": "Pronto para comparar", Close: "Fechar",
@@ -364,7 +364,7 @@ const supplementalCatalogs = {
   ko: {
     Language: "언어", "Version-matched documentation is bundled with this server and works without internet access.": "현재 서버 버전에 맞는 문서가 내장되어 오프라인에서도 작동합니다.",
     "InsightFace Server dashboard": "InsightFace Server 대시보드", "The key stays in this tab's memory and is never saved by the UI.": "Key는 현재 탭의 메모리에만 있으며 UI에 저장되지 않습니다.",
-    "Detect, compare, enroll, and search without sending images outside your server.": "이미지를 서버 밖으로 보내지 않고 검출, 비교, 등록, 검색할 수 있습니다.", "separate identity spaces": "분리된 신원 공간", "enrolled identities": "등록된 신원",
+    "Detect, check liveness, compare, enroll, and search without sending images outside your server.": "이미지를 서버 밖으로 보내지 않고 검출, 라이브니스 검사, 비교, 등록, 검색을 수행할 수 있습니다.", "separate identity spaces": "분리된 신원 공간", "enrolled identities": "등록된 신원",
     "stored embeddings": "저장된 임베딩", "API readiness": "API 준비 상태", Database: "데이터베이스", "API failures from this browser tab will appear here.": "이 브라우저 탭의 API 오류가 여기에 표시됩니다.", "tab memory only": "탭 메모리에만 저장",
     "The displayed language follows the console language selector.": "문서 언어는 콘솔 언어 선택을 따릅니다.", "Loading documentation…": "문서를 불러오는 중…",
     "API key configured": "API 키 설정됨", Configured: "설정됨", "Ready to compare": "비교 준비 완료", Close: "닫기",
@@ -519,7 +519,13 @@ function translateAttributes(element) {
   }
 }
 
+function translationExcluded(node) {
+  const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  return Boolean(element?.closest?.('[translate="no"], script, style, code, pre, textarea'));
+}
+
 export function translateTree(root = document) {
+  if (translationExcluded(root)) return;
   if (root.nodeType === Node.TEXT_NODE) {
     translateTextNode(root);
     return;
@@ -529,9 +535,13 @@ export function translateTree(root = document) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
   let node = walker.nextNode();
   while (node) {
+    if (translationExcluded(node)) {
+      node = walker.nextNode();
+      continue;
+    }
     if (node.nodeType === Node.TEXT_NODE) {
       const parent = node.parentElement;
-      if (parent && !["SCRIPT", "STYLE", "CODE", "PRE", "TEXTAREA"].includes(parent.tagName)) translateTextNode(node);
+      if (parent) translateTextNode(node);
     } else {
       translateAttributes(node);
     }
@@ -543,7 +553,9 @@ export function setLocale(language, { persist = true, announce = true } = {}) {
   activeLocale = normalizeLocale(language);
   const metadata = LANGUAGES.find((item) => item.code === activeLocale) ?? LANGUAGES[0];
   document.documentElement.lang = metadata.htmlLang;
-  if (persist) window.localStorage.setItem("insightface.locale", activeLocale);
+  if (persist) {
+    try { window.localStorage.setItem("insightface.locale", activeLocale); } catch { /* The language still applies in this tab. */ }
+  }
   translateTree(document);
   const selector = document.querySelector("#language-select");
   if (selector) selector.value = activeLocale;

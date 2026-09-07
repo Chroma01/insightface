@@ -1,9 +1,9 @@
 SHELL := /bin/sh
 PYTHON ?= python3.11
 PYTHONPATH_VALUE := backend:../python-package
-CPU_IMAGE ?= ghcr.io/deepinsight/insightface-server:0.2.0-cpu
-CUDA_IMAGE ?= ghcr.io/deepinsight/insightface-server:0.2.0-cuda12
-SERVER_VERSION ?= 0.2.0
+CPU_IMAGE ?= ghcr.io/deepinsight/insightface-server:0.3.0-cpu
+CUDA_IMAGE ?= ghcr.io/deepinsight/insightface-server:0.3.0-cuda12
+SERVER_VERSION ?= 0.3.0
 NATIVE_CPU_BUILD_DIR ?= build/native-search-cpu
 DOCKER_BUILD_ARGS ?= --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
 	--build-arg http_proxy --build-arg https_proxy \

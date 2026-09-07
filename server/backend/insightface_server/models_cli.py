@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+from .addons import install_addon, require_installed_addon
+from .config import SUPPORTED_ADDONS, load_server_config
 from .licensing import ModelLicense
 from .models.packages import (
     PACKAGES,
@@ -40,7 +42,7 @@ def _confirm_license(package: ModelPackage, accepted: bool) -> None:
 
 def _print_package(package: ModelPackage, installed: str | None) -> None:
     status = "installed" if installed == package.name else "not installed"
-    print(f"{package.name}\t{package.release}\t{status}")
+    print(f"{package.name}\t{status}")
 
 
 def _print_verified_license(license_info: ModelLicense) -> None:
@@ -68,9 +70,15 @@ def _print_verified_license(license_info: ModelLicense) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="models", description=__doc__)
     parser.add_argument("--models-dir", help="Override INSIGHTFACE_MODELS_DIR")
+    parser.add_argument("--config-file", help="Override INSIGHTFACE_CONFIG_FILE")
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("list", help="List supported packages and installation status")
+    addons = commands.add_parser("addons", help="Install or verify flat addon models")
+    addon_commands = addons.add_subparsers(dest="addon_command", required=True)
+    for operation in ("install", "verify"):
+        command = addon_commands.add_parser(operation)
+        command.add_argument("addon", choices=SUPPORTED_ADDONS)
     install = commands.add_parser("install", help="Download and install a verified package")
     install.add_argument(
         "model",
@@ -95,8 +103,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     models_dir = _models_dir(args.models_dir)
     try:
+        config_path = args.config_file or os.environ.get("INSIGHTFACE_CONFIG_FILE")
+        config = load_server_config(Path(config_path).expanduser() if config_path else None)
+        if args.command == "addons":
+            operation = install_addon if args.addon_command == "install" else require_installed_addon
+            path = operation(args.addon, models_dir)
+            print(f"Addon {args.addon} is installed and verified: {path}")
+            return 0
         if args.command == "list":
-            print("NAME\tRELEASE\tSTATUS")
+            print("NAME\tSTATUS")
             installed = installed_package_name(models_dir)
             for package in PACKAGES.values():
                 _print_package(package, installed)
@@ -104,7 +119,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "info":
             package = package_for_name(args.model)
             print(f"Name: {package.name}")
-            print(f"Release: {package.release}")
             print(f"Source: {package.url}")
             print(f"Archive SHA-256: {package.archive_sha256}")
             for item in package.files:
@@ -116,6 +130,16 @@ def main(argv: list[str] | None = None) -> int:
             if installed_package_name(models_dir) != package.name:
                 _confirm_license(package, args.accept_license)
             status = install_package(package, models_dir)
+            for addon in config.auto_download_addons:
+                try:
+                    path = install_addon(addon, models_dir)
+                except (OSError, RuntimeError) as exc:
+                    raise ModelPackageError(
+                        f"Base model package {package.name} is installed, but addon "
+                        f"{addon} installation failed: {exc}. Rerun the same install "
+                        "command to reuse the base package and complete the addons."
+                    ) from exc
+                print(f"Addon {addon} is installed and verified: {path}")
             print(
                 f"Model package {package.name} is installed and verified in "
                 f"{models_dir.expanduser().resolve()}."
@@ -136,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_verified_license(license_info)
             return 0
         parser.error("unknown command")
-    except (ModelPackageError, RuntimeError, OSError) as exc:
+    except (ModelPackageError, RuntimeError, OSError, ValueError) as exc:
         print(f"models: error: {exc}", file=sys.stderr)
         return 2
     return 2

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -162,14 +163,23 @@ def _engine(tmp_path: Path, *, reported_frame_count: int) -> streaming.Streaming
         pytest.param(82, 2, id="under-reported"),
     ],
 )
+@pytest.mark.parametrize("debug_logging", [False, True])
 def test_run_uses_decoded_frame_count_before_draining_eof_pending_frames(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     reported_frame_count: int,
     expected_endpoint_scans: int,
+    debug_logging: bool,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    caplog.set_level(
+        logging.DEBUG if debug_logging else logging.WARNING,
+        logger=streaming.__name__,
+    )
     actual_frame_count = 83
     engine = _engine(tmp_path, reported_frame_count=reported_frame_count)
+    engine.config["streaming"]["progress_every_frames"] = 1
     closed_with: list[tuple[int, float, str]] = []
     state = SimpleNamespace(active=True)
     engine.states = [state]
@@ -219,6 +229,16 @@ def test_run_uses_decoded_frame_count_before_draining_eof_pending_frames(
 
     result = engine.run(progress=lambda *update: progress.append(update))
 
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    diagnostics = [record for record in caplog.records if record.name == streaming.__name__]
+    if debug_logging:
+        assert all(record.levelno == logging.DEBUG for record in diagnostics)
+        assert any("live_cache=" in record.getMessage() for record in diagnostics)
+        assert any("container metadata reported" in record.getMessage() for record in diagnostics)
+    else:
+        assert diagnostics == []
     assert engine.metadata.frame_count == actual_frame_count
     assert engine.metadata.duration == pytest.approx(actual_frame_count / 25.0)
     assert result["scan"]["frame_count"] == actual_frame_count

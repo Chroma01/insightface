@@ -490,7 +490,7 @@ def _patch_streaming_init(
     monkeypatch.setattr(
         streaming,
         "probe_video",
-        lambda _source: SimpleNamespace(fps=10.0),
+        lambda _source: SimpleNamespace(fps=10.0, frame_count=100),
     )
 
     class Scanner:
@@ -554,6 +554,56 @@ def _streaming_config(mode: str) -> dict[str, Any]:
         "models": {"detection": {"max_detections": 7}},
         "runtime": {"providers": ["CPUExecutionProvider"]},
     }
+
+
+@pytest.mark.parametrize("artifacts_level", [None, "final", "audit", "debug"])
+def test_streaming_keeps_optional_consensus_audits_out_of_final_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifacts_level: str | None,
+) -> None:
+    analysis = _FakeAnalysis()
+    _patch_streaming_init(monkeypatch, {})
+    config = _streaming_config("all")
+    config["tracking"]["kalman_optical_flow"] = {
+        "bidirectional_fusion": {"max_gap_frames": 1}
+    }
+    if artifacts_level is not None:
+        config["output"] = {"artifacts_level": artifacts_level}
+    engine = streaming.StreamingEngine(
+        tmp_path / "input.mp4",
+        tmp_path,
+        config,
+        analysis.detector,
+        face_analysis=analysis,
+    )
+    box = np.asarray([10.0, 10.0, 30.0, 30.0])
+    pending = [{"frame_idx": 1}]
+    state = SimpleNamespace(
+        track={"track_id": "face"},
+        last_detection_frame=0,
+        last_consensus_anchor_box=box,
+        last_detection_box=box,
+        pending=pending,
+    )
+
+    accepted = engine._finish_pending_consensus(
+        state,
+        anchor_frame=3,
+        right_consensus_anchor=box,
+        right_geometry_anchor=box,
+        right_geometry_source="detector",
+    )
+
+    # Optional diagnostics must not alter gap rejection or pending geometry.
+    assert accepted is False
+    assert engine.bidirectional_skipped_jobs == 1
+    assert state.pending == [{"frame_idx": 1}]
+    if artifacts_level in {"audit", "debug"}:
+        assert len(engine.bidirectional_audits) == 1
+        assert engine.bidirectional_audits[0]["reason"] == "gap_frame_limit"
+    else:
+        assert engine.bidirectional_audits == []
 
 
 def test_streaming_selective_holds_underlying_get_feat_recognizer(
@@ -653,7 +703,7 @@ def test_streaming_derives_stride_and_endpoint_coverage_without_mutating_config(
     monkeypatch.setattr(
         streaming,
         "probe_video",
-        lambda _source: SimpleNamespace(fps=240.0),
+        lambda _source: SimpleNamespace(fps=240.0, frame_count=2400),
     )
     monkeypatch.setattr(
         streaming,

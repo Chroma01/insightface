@@ -34,7 +34,7 @@ def test_user_observations_keep_only_render_and_editor_fields() -> None:
             "box": [10.0, 20.0, 30.0, 40.0],
             "source": "repaired",
             "reduced_assurance": True,
-            "force_blur": True,
+            "identity_unconfirmed": True,
         }
     ]
 
@@ -56,28 +56,25 @@ def test_internal_tracking_sources_are_normalized_for_users() -> None:
     )
 
 
-def test_user_recognition_keeps_only_render_decisions() -> None:
+def test_user_recognition_keeps_reference_audit_and_render_decisions() -> None:
+    references = {
+        "accepted_images": 1, "skipped_images": 1,
+        "files": [{"file": "photo.jpg", "detected_face_count": 2,
+                   "selected_box": [1, 2, 31, 42]}],
+        "skipped": [{"file": "empty.png", "reason": "no_face"}],
+        "fingerprint": "abc",
+    }
+    record = {"status": "CONFIRMED", "matched_reference_files": ["photo.jpg"],
+              "similarity": 0.83, "reason": "confirmed_reference_set"}
     value = {
-        "enabled": True,
-        "gallery_persons": ["alice", "bob"],
+        "enabled": True, "references": references,
         "statistics": {"recognizer_calls": 8},
-        "tracks": {
-            "t00001": {
-                "status": "CONFIRMED",
-                "person_id": "alice",
-                "top1_similarity": 0.83,
-                "frame_indices": [1, 20, 40],
-            }
-        },
+        "tracks": {"t00001": {**record, "frame_indices": [1, 20, 40]}},
     }
-
-    assert pipeline._export_recognition(value) == {
-        "enabled": True,
-        "gallery_persons": ["alice", "bob"],
-        "tracks": {
-            "t00001": {"status": "CONFIRMED", "person_id": "alice"}
-        },
-    }
+    exported = pipeline._export_recognition(value)
+    assert exported == {"enabled": True, "references": references,
+                        "tracks": {"t00001": record}}
+    assert exported["references"] is not references
     assert pipeline._export_recognition(
         {"enabled": False, "reason": "policy_all"}
     ) == {"enabled": False}

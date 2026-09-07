@@ -82,6 +82,7 @@ RUN python /opt/insightface/server/scripts/verify_runtime.py \
 
 COPY python-package/insightface/__init__.py /opt/insightface/python-package/insightface/__init__.py
 COPY python-package/insightface/app /opt/insightface/python-package/insightface/app
+COPY python-package/insightface/addons /opt/insightface/python-package/insightface/addons
 COPY python-package/insightface/model_zoo /opt/insightface/python-package/insightface/model_zoo
 COPY python-package/insightface/utils /opt/insightface/python-package/insightface/utils
 COPY python-package/insightface/data/__init__.py \
@@ -111,7 +112,7 @@ RUN groupadd --gid 10001 insightface \
     && chown -R root:insightface /opt/insightface \
     && chmod -R u=rwX,g=rX,o= /opt/insightface
 
-ARG INSIGHTFACE_SERVER_VERSION=0.2.0
+ARG INSIGHTFACE_SERVER_VERSION=0.3.0
 LABEL org.opencontainers.image.version="${INSIGHTFACE_SERVER_VERSION}"
 
 WORKDIR /opt/insightface/server

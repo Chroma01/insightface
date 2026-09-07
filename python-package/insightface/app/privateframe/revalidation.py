@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import sys
+import logging
+import math
 from bisect import bisect_right
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -15,6 +17,7 @@ from .geometry import (
     inverse_cardinal_points,
     iou,
     median,
+    nms_records,
     normalized_center_distance,
 )
 from .model_catalog import DETECTION_TASK, VERIFICATION_TASK
@@ -25,6 +28,8 @@ from .models import (
     padded_square_crop,
     rotate_image,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _inverse_box(value: np.ndarray, angle: int, width: int, height: int) -> np.ndarray:
@@ -76,6 +81,7 @@ class LocalReviewer:
     ):
         settings = config["revalidation"]
         self.settings = settings
+        self.region_scan_settings = dict(config.get("scan", {}))
         self.max_detections = detector_max_detections(config)
         self.face_analysis = face_analysis or make_face_analysis(
             config,
@@ -91,6 +97,96 @@ class LocalReviewer:
         )
         if detector is not None and self.detector is not detector:
             raise ValueError("injected detector does not match FaceAnalysis detection task model")
+
+    def detect_region(
+        self,
+        image: np.ndarray,
+        *,
+        origin: tuple[int, int] = (0, 0),
+        input_size: int | None = None,
+        max_calls: int | None = None,
+        nms_iou: float | None = None,
+        angles: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
+        """Detect every face in an explicitly supplied shared image region.
+
+        ``origin`` maps the region to the complete oriented video frame. No
+        target-specific crop, geometric filter, or best-face selection is
+        applied. ``angles`` selects this call's complete detection round;
+        omitting it uses the original local-review angles without changing
+        their configuration. Each selected angle consumes one invocation;
+        partial angle coverage is explicitly marked incomplete. Detector
+        exceptions propagate, so failure cannot masquerade as an empty region.
+        """
+
+        if not isinstance(image, np.ndarray) or image.ndim != 3 or image.shape[2] != 3 or not image.shape[0] or not image.shape[1]:
+            raise ValueError("region image must be a nonempty BGR image")
+        if len(origin) != 2 or any(not math.isfinite(float(value)) for value in origin):
+            raise ValueError("region origin must contain two finite coordinates")
+        if max_calls is not None and (isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls < 0):
+            raise ValueError("max_calls must be a nonnegative integer or None")
+        size = self.settings["input_size"] if input_size is None else input_size
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            raise ValueError("region input_size must be a positive integer")
+        requested_angles = self.settings["angles"] if angles is None else angles
+        if (not isinstance(requested_angles, Sequence)
+                or isinstance(requested_angles, (str, bytes))
+                or not requested_angles):
+            raise ValueError("region angles must be a nonempty sequence of integers")
+        if any(isinstance(angle, bool) or not isinstance(angle, (int, np.integer))
+               or angle not in (0, 90, -90) for angle in requested_angles):
+            raise ValueError("region angles must contain only integer values 0, 90, or -90")
+        selected_angles = [int(angle) for angle in requested_angles]
+        if len(set(selected_angles)) != len(selected_angles):
+            raise ValueError("region angles must not contain duplicates")
+        overlap_threshold = self.region_scan_settings["global_nms_iou"] if nms_iou is None else nms_iou
+        containment_threshold = float(self.region_scan_settings["containment_threshold"])
+        if not 0.0 < float(overlap_threshold) <= 1.0:
+            raise ValueError("region nms_iou must be in (0, 1]")
+        calls = 0
+        candidates = []
+        ox, oy = (float(value) for value in origin)
+        for angle in selected_angles:
+            if max_calls is not None and calls >= max_calls:
+                break
+            rotated = rotate_image(image, angle)
+            calls += 1
+            found = detect_faces(
+                self.face_analysis,
+                rotated,
+                input_sizes=[size],
+                confidence_threshold=float(self.settings["confidence_threshold"]),
+                max_detections=self.max_detections,
+            )
+            for raw in found:
+                value = _inverse_box(np.asarray(raw["box"]), angle, image.shape[1], image.shape[0])
+                value += np.asarray([ox, oy, ox, oy])
+                confidence = float(raw["confidence"])
+                if not np.all(np.isfinite(value)) or value[2] <= value[0] or value[3] <= value[1] or not math.isfinite(confidence):
+                    raise ValueError("region detector returned invalid face geometry or confidence")
+                candidate = {"box": value.tolist(), "confidence": confidence, "angle": angle}
+                if raw.get("landmarks") is not None:
+                    landmarks = inverse_cardinal_points(raw["landmarks"], angle, image.shape[1], image.shape[0])
+                    landmarks += np.asarray([ox, oy], dtype=np.float64)
+                    if not np.all(np.isfinite(landmarks)):
+                        raise ValueError("region detector returned invalid landmarks")
+                    candidate["landmarks"] = landmarks.tolist()
+                candidates.append(candidate)
+        # Use the established full-scan suppression policy for duplicate views.
+        # The stronger independent-localization equivalence threshold belongs
+        # to endpoint matching, not to multi-angle detector NMS.
+        selected = nms_records(candidates, float(overlap_threshold), containment_threshold)
+        selected.sort(key=lambda item: (tuple(item["box"]), -item["confidence"], item["angle"]))
+        for index, item in enumerate(selected):
+            item["detection_id"] = f"region_face_{index:03d}"
+        return {
+            "detections": selected,
+            "roi": [ox, oy, ox + image.shape[1], oy + image.shape[0]],
+            "detector_calls": calls,
+            "complete": calls == len(selected_angles),
+            "input_size": size,
+            "angles": selected_angles[:calls],
+        }
 
     def _match_crop(
         self,
@@ -829,15 +925,14 @@ def finalize_precomputed(
                     for segment in segments
                     if segment
                 ]
-        print(
-            f"[admission/onnx] {track['track_id']} "
-            f"detector={summary['detector_source_frames']} "
-            f"local={summary['local_match_fraction']:.3f} "
-            f"conf={summary['confidence_p50']} "
-            f"verifier={summary['verifier_p50']} "
-            f"accepted={track['accepted']}",
-            file=sys.stderr,
-            flush=True,
+        logger.debug(
+            "[admission/onnx] %s detector=%s local=%.3f conf=%s verifier=%s accepted=%s",
+            track["track_id"],
+            summary["detector_source_frames"],
+            summary["local_match_fraction"],
+            summary["confidence_p50"],
+            summary["verifier_p50"],
+            track["accepted"],
         )
     observations = _finalize(tracks, scan, tracking, evidence)
     return {

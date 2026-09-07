@@ -67,4 +67,5 @@ def face_result(
         "landmarks": landmarks,
         "detection_score": clamp01(face.confidence),
         "quality": quality(face),
+        **({"liveness": dict(face.liveness)} if face.liveness is not None else {}),
     }

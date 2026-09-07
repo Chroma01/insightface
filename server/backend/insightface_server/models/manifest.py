@@ -32,7 +32,6 @@ class ModelSpec:
     """
 
     model_id: str
-    model_version: str
     task: str
     path: Path
     input_size: tuple[int, int]
@@ -46,7 +45,6 @@ class ModelSpec:
     def public_summary(self) -> dict[str, object]:
         return {
             "model_id": self.model_id,
-            "model_version": self.model_version,
             "task": self.task,
             "file": self.path.name,
             "input_size": list(self.input_size),
@@ -59,7 +57,6 @@ class ModelSpec:
 @dataclass(frozen=True, slots=True)
 class ModelBundle:
     model_id: str
-    model_version: str
     display_name: str
     license_path: Path
     detector: ModelSpec
@@ -165,7 +162,7 @@ def _manifest_v1(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     allowed = {
         "manifest_version",
         "model_id",
-        "model_version",
+        "model_version",  # Accepted and ignored in older manifests.
         "display_name",
         "files",
         "recognition",
@@ -184,7 +181,6 @@ def _manifest_v1(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     model_id = _required_string(raw, "model_id", context="manifest.json")
     if not _MODEL_ID.fullmatch(model_id):
         raise RuntimeError("manifest model_id has an invalid format")
-    model_version = _required_string(raw, "model_version", context="manifest.json")
     display = _display_name(raw, model_id)
 
     files = raw.get("files")
@@ -216,7 +212,6 @@ def _manifest_v1(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
 
     detector = ModelSpec(
         model_id=model_id,
-        model_version=model_version,
         task=DETECTION_TASK,
         path=detector_path,
         # Active SCRFD resolutions are startup configuration, not manifest data.
@@ -229,7 +224,6 @@ def _manifest_v1(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     )
     recognizer = ModelSpec(
         model_id=model_id,
-        model_version=model_version,
         task=RECOGNITION_TASK,
         path=recognizer_path,
         input_size=recognition_size,
@@ -241,7 +235,6 @@ def _manifest_v1(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     )
     return ModelBundle(
         model_id=model_id,
-        model_version=model_version,
         display_name=display,
         license_path=_license_path(raw, models_dir),
         detector=detector,
@@ -346,7 +339,6 @@ def _manifest_v2(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
 
     detector = ModelSpec(
         model_id=model_id,
-        model_version=model_id,
         task=DETECTION_TASK,
         path=detector_path,
         input_size=(640, 640),
@@ -364,7 +356,6 @@ def _manifest_v2(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     )
     recognizer = ModelSpec(
         model_id=model_id,
-        model_version=model_id,
         task=RECOGNITION_TASK,
         path=recognizer_path,
         input_size=recognition_size,
@@ -382,7 +373,6 @@ def _manifest_v2(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     )
     return ModelBundle(
         model_id=model_id,
-        model_version=model_id,
         display_name=display,
         license_path=_license_path(raw, models_dir),
         detector=detector,
@@ -415,7 +405,6 @@ def _legacy_spec(raw: object, models_dir: Path) -> ModelSpec:
         raise RuntimeError(f"Invalid input_mean/input_std for {filename}")
     return ModelSpec(
         model_id=_required_string(raw, "model_id", context=filename),
-        model_version=_required_string(raw, "model_version", context=filename),
         task=task,
         path=path,
         input_size=size,
@@ -453,11 +442,6 @@ def _legacy_manifest(raw: dict[str, Any], models_dir: Path) -> ModelBundle:
     license_path = parents.pop() / LICENSE_FILENAME
     return ModelBundle(
         model_id=model_id,
-        model_version=(
-            str(package.get("release"))
-            if isinstance(package, dict) and package.get("release")
-            else recognizer.model_version
-        ),
         display_name=model_id,
         license_path=license_path,
         detector=by_task[DETECTION_TASK],

@@ -91,26 +91,27 @@ def test_describe_is_a_machine_readable_public_contract(capsys):
     assert "--json" not in public_options
     assert "--no-verify-source" not in public_options
     dotted_options = payload["config"]["dotted_options"]
-    assert dotted_options["models.root"] == {
-        "option": "--models.root",
-        "type": "string",
-        "has_default": True,
-        "default": "~/.insightface",
-        "nullable": False,
-        "format": "local_directory_path",
-        "description": (
-            "InsightFace root containing models/<package>; the selected root is "
-            "authoritative and no alternate root is searched."
-        ),
-        "authoritative_validation": "command --dry-run",
-    }
+    sampling = dotted_options["scan.max_analysis_fps"]
+    assert sampling["default"] == 30
+    assert sampling["type"] == "number"
+    assert sampling["unit"] == "frames_per_second_of_input_video"
+    assert "wall-clock processing speed" in sampling["description"]
+    assert "5%" in sampling["description"]
+    assert "briefly visible faces" in sampling["tuning_guidance"]["increase"]
+    assert "risk of missing faces" in sampling["tuning_guidance"]["decrease"]
+    model_root = dotted_options["models.root"]
+    assert model_root["option"] == "--models.root"
+    assert model_root["type"] == "string"
+    assert model_root["default"] == "~/.insightface"
+    assert model_root["format"] == "local_directory_path"
+    assert "authoritative" in model_root["description"]
+    assert payload["config"]["validation"][
+        "semantic_and_cross_field_constraints"
+    ] == "authoritative command --dry-run"
     assert "render.debug_line_thickness" not in dotted_options
     assert "render.video_output.audio.debug" not in dotted_options
-    assert dotted_options["scan.session_sharing"]["enum"] == [
-        "single_session_parallel",
-        "single_session_serial",
-    ]
-    assert dotted_options["recognition.max_frames_per_track"]["nullable"] is True
+    assert "scan.session_sharing" not in dotted_options
+    assert "recognition.max_frames_per_track" not in dotted_options
     analyze_parameters = {
         item["name"]: item for item in payload["commands"]["analyze"]["parameters"]
     }
@@ -150,6 +151,19 @@ def test_describe_is_a_machine_readable_public_contract(capsys):
         "manual",
     ]
     assert result_schema["observations"]["items"]["box"]["length"] == 4
+    recognition_schema = result_schema["recognition"]
+    assert recognition_schema["type"] == "object"
+    assert recognition_schema["required"] == ["enabled"]
+    assert recognition_schema["enabled"] == {"type": "boolean"}
+    selective = recognition_schema["fields_when_enabled"]
+    assert selective["references"]["accepted_images"]["minimum"] == 1
+    assert selective["tracks"]["values"]["status"]["enum"] == [
+        "CONFIRMED", "UNKNOWN", "CONFLICT",
+    ]
+    policy = result_schema["render_defaults"]["recognition_policy"]
+    assert policy["unknown_action"]["enum"] == ["blur", "keep"]
+    assert "identity_unconfirmed" in result_schema["observations"]["items"]
+    assert "force_blur" not in result_schema["observations"]["items"]
     assert payload["artifacts"]["result_json"]["source_compatibility"] == {
         "checks": ["width", "height", "fps", "decoded_frame_count"],
         "content_hash_required": False,
@@ -171,12 +185,12 @@ def test_describe_teaches_an_unfamiliar_automation_client_how_to_use_the_tool(
 
     payload = _single_compact_json(capsys.readouterr().out)
     assert exit_code == 0
-    assert payload["contract_schema_version"] == 1
+    assert payload["contract_schema_version"] == 2
 
     tool = payload["tool"]
     assert tool["purpose_id"] == "video_face_privacy_redaction"
     assert tool["summary"] == cli.command_parser().description
-    assert {"face", "video", "blur", "mosaic"}.issubset(
+    assert {"faces", "video", "blur", "mosaic"}.issubset(
         set(tool["summary"].lower().replace(".", "").split())
     )
     assert tool["primary_input"] == "source_video"
@@ -205,7 +219,7 @@ def test_describe_teaches_an_unfamiliar_automation_client_how_to_use_the_tool(
     }
     assert discovery["defaults"]["redaction_style"] == "gaussian"
     assert discovery["defaults"]["redaction_style"] == (
-        payload["config"]["defaults"]["render"]["redaction"]["method"]
+        payload["config"]["dotted_options"]["render.redaction.method"]["default"]
     )
     assert discovery["defaults"]["mosaic_override"] == [
         "--render.redaction.method",
@@ -357,7 +371,62 @@ def test_describe_teaches_an_unfamiliar_automation_client_how_to_use_the_tool(
     assert "diagnostics are excluded" in success["summary_semantics"]
     assert "counted separately" in success["summary_field_semantics"]["face_regions"]
     assert "null for render" in success["runtime_provider_semantics"]
+    assert "not the complete CLI process wall time" in success["timing_semantics"]
     assert status_output["dry_run"]["artifact_paths_field"] == "plan.artifacts"
+
+    config = payload["config"]
+    assert config["scope"] == "common_and_intermediate"
+    assert config["unlisted_options_supported"] is True
+    assert "common_options" not in payload
+    assert "schema" not in config
+    assert "defaults" not in config
+    groups = config["groups"]
+    assert groups
+    assert all(group["id"] and group["description"] for group in groups)
+    paths = [path for group in groups for path in group["fields"]]
+    assert len(paths) == len(set(paths))
+    assert {
+        "models.name",
+        "runtime.provider",
+        "recognition.mode",
+        "recognition.reference_dir",
+        "recognition.unknown_action",
+        "scan.max_analysis_fps",
+        "render.redaction.method",
+        "render.redaction.box_scale",
+        "render.video_output.rate_control.quality",
+        "render.video_output.preset",
+        "render.video_output.audio.redacted",
+    } <= set(paths)
+    assert set(paths) == set(config["dotted_options"])
+    assert len(paths) == 30
+    for path, specification in config["dotted_options"].items():
+        assert specification["option"] == f"--{path}"
+        assert specification["type"]
+        assert "default" in specification
+        assert specification["description"]
+        assert specification["when_to_use"]
+        assert specification["tradeoff"]
+        assert "debug" not in path
+        assert path != "output.artifacts_level"
+    # Advanced settings must not leak back through another configuration tree.
+    serialized_config = json.dumps(config)
+    for internal_name in (
+        "kalman_optical_flow", "bidirectional_fusion", "candidate_filter",
+        "revalidation", "session_sharing", "progress_every_frames",
+        "debug_line_thickness", "artifacts_level",
+    ):
+        assert internal_name not in serialized_config
+    reference = config["full_reference"]
+    assert reference["format"] == "markdown"
+    assert reference["scope"] == "all_supported_configuration"
+    reference_path = Path(reference["path"])
+    assert reference_path.is_absolute()
+    assert reference_path.is_file()
+    assert reference_path.name == "configuration.md"
+    assert "tracking.kalman_optical_flow.roi_size" in reference_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_recommended_workflow_argv_templates_are_accepted_by_the_real_parser(
@@ -674,10 +743,16 @@ def test_jsonl_progress_uses_stderr_without_polluting_stdout(
     assert progress["total"] == 10
 
 
+@pytest.mark.parametrize(
+    ("override", "value"),
+    [("scan.max_analysis_fps", 15), ("tracking.kalman_optical_flow.roi_size", 256)],
+)
 def test_dry_run_returns_a_resolved_plan_without_calling_the_pipeline(
     monkeypatch,
     tmp_path,
     capsys,
+    override,
+    value,
 ):
     source = _source(tmp_path)
 
@@ -693,8 +768,8 @@ def test_dry_run_returns_a_resolved_plan_without_calling_the_pipeline(
             str(source),
             "--output-dir",
             str(tmp_path / "exports"),
-            "--scan.max_analysis_fps",
-            "15",
+            f"--{override}",
+            str(value),
             "--dry-run",
         ]
     )
@@ -709,7 +784,7 @@ def test_dry_run_returns_a_resolved_plan_without_calling_the_pipeline(
     assert set(
         ("config", "input", "workdir", "artifacts", "config_overrides")
     ).issubset(payload["plan"])
-    assert payload["plan"]["config_overrides"] == {"scan.max_analysis_fps": 15}
+    assert payload["plan"]["config_overrides"] == {override: value}
 
 
 def test_existing_artifact_is_protected_unless_overwrite_is_explicit(

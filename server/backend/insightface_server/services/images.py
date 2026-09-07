@@ -58,10 +58,10 @@ class ImageLoader:
                 pixels = cv2.cvtColor(np.asarray(oriented), cv2.COLOR_RGB2BGR)
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
             raise ApiError("invalid_image", "The image could not be decoded.", 422) from exc
-        if image_format not in {"JPEG", "PNG", "WEBP"}:
+        if image_format not in {"JPEG", "PNG", "WEBP", "BMP"}:
             raise ApiError(
                 "invalid_image",
-                "Only JPEG, PNG, and WebP images are supported.",
+                "Only JPEG, PNG, WebP, and BMP images are supported.",
                 422,
             )
         if pixels is None or pixels.ndim != 3 or pixels.shape[2] != 3:

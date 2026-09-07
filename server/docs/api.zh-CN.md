@@ -7,12 +7,14 @@
 [分步用户指南](user-guide.zh-CN.md)。实时OpenAPI Schema位于`/docs`和
 `/openapi.json`；本文负责解释“怎么用”和“结果代表什么”。
 
+活体检测的使用方法请查看[活体配置、模型安装和返回值说明](#可选活体检测-addon)；下方各操作章节也说明了活体对该流程的影响。
+
 ## 通用约定
 
 - API基础路径为`/v1`，JSON字段统一使用`snake_case`。
 - Collection/PATCH请求使用`application/json`；图片和注册使用
   `multipart/form-data`；裁剪图返回`image/jpeg`；摄像头预览返回MJPEG流。
-- JPEG、PNG和WebP均支持。默认压缩图片上限10 MiB、解码像素上限4000万、整个请求
+- JPEG、PNG、WebP和BMP均支持。默认压缩图片上限10 MiB、解码像素上限4000万、整个请求
   上限64 MiB；实际值以`GET /v1/system`为准。
 - 每个响应都有`x-request-id`响应头；JSON响应还包含同一个`request_id`。排错时记录
   这个ID，但不要记录图片、embedding、API Key或RTSP凭据。
@@ -70,6 +72,100 @@ curl -sS "${BASE_URL}/v1/collections/employees/search" -H "${AUTH_HEADER}" \
 
 认证关闭时从后三条命令中删除`-H "${AUTH_HEADER}"`。
 
+## 可选活体检测 addon
+
+### 启用与模型安装
+
+`server/config/server.toml` 默认关闭活体：`inference.addons` 和 `addons.auto_download` 均为 `[]`。旧配置缺少这些键时也保持关闭。以下是手动启用的配置示例；请先安装模型，再重启：
+
+在 **系统 → 活体检测** 点击 **下载并在重启后启用**。Server 下载发布的模型并校验 SHA-256 后，自动把同一份配置文件的上述两个列表设为 `["liveness"]`，保留其他设置；已校验的缓存直接复用。当前进程保持原状态，必须**手动重启 Server**后才启用。下载或配置保存失败会显示错误并允许重试；下载失败不会启用活体。仅有模型文件不代表已启用。
+
+```toml
+[inference]
+addons = ["liveness"]
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = ["liveness"]
+```
+
+`inference.addons` 控制运行时启用；`addons.auto_download` 独立控制模型安装时的附带下载。将后者设为 `["liveness"]` 后，安装任意受支持的基础包时都会补齐 addon，基础包已缓存也一样。**启动 Server 时不下载模型。** 安装工具和 Server 读取同一份配置文件。
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l --accept-license
+# 或者只安装 addon：
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+CUDA 部署改用 `compose.cuda12.yml`。独立 CLI 也支持
+`models --config-file PATH --models-dir ROOT addons install liveness`。
+模型来自[指定的 Release](https://github.com/deepinsight/insightface-model-addons/releases/download/addons/liveness.onnx)，
+下载后校验固定 SHA-256。宿主机路径为 `server/.models/addons/liveness.onnx`，
+容器路径为 `/models/addons/liveness.onnx`；所有 addon 平铺在同一 `addons/` 目录。
+基础模型目录继续只读挂载；addon 子目录和配置目录允许 Web 管理写入。
+
+Docker 镜像只包含代码和依赖，不包含预训练权重。重建镜像不会给用户原有挂载目录补充
+模型。默认关闭活体，旧用户升级无需额外下载。若用户手动启用活体但未安装模型，启动会报 `addon_model_missing`，并显示
+完整路径和安装命令；文件损坏或无法读取则报 `addon_model_invalid`。不会静默关闭
+活体。执行安装工具补齐模型后重新启动；损坏文件需要替换为经过校验的发布文件。
+只升级代码、未启用活体的用户保持原有行为。数据库迁移为增量添加字段，不重算历史
+embedding，也不改变识别模型摘要或 `embedding_contract_id`。
+
+### 读取活体结果
+
+每张已执行活体的人脸增加 `liveness`，其中只保留三个字段：
+
+| 结果 | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| 活体通过 | `ok` | `true` | `[0, 1]` 分数 |
+| 非活体 | `ok` | `false` | `[0, 1]` 分数 |
+| 输入不合格，例如太靠近图像边缘 | `input_rejected` | `null` | `null` |
+
+`live_score >= liveness_threshold` 判为通过。未启用、注册跳过活体或比对范围未选中的一侧不返回
+`liveness`；这与 `is_live: null` 表示输入被拒绝有明确区别。
+
+- `normal`（默认）：先检测并选择人脸，再做活体，通过后才提取识别特征。选中的人脸
+  不通过时，不会换用背景中另一张通过的人脸。
+- `observe`：记录活体结果，fake 或输入不合格也继续识别；推理故障仍返回错误。
+- `liveness_compare_scope` 支持 `both`（默认）、`source`、`target`，只决定
+  `/v1/compare` 哪一侧做活体。注册使用下述独立开关。请求参数不能覆盖这些启动配置。
+
+### 检测、识别和错误返回
+
+`/v1/detect` 始终不提取 embedding，fake 和输入不合格都以 HTTP 200 返回逐脸结果。
+`normal` 下，embedding、比对和 Collection 搜索在活体不通过时返回 HTTP 422：
+错误码分别为 `liveness_fake` 和 `liveness_input_rejected`，
+`error.details.liveness` 包含上述三个字段；比对还提供 `error.details.side`
+（`source` 或 `target`）。被拦截的操作不返回相似度或匹配结果。
+推理故障返回 HTTP 503 `liveness_unavailable`，不归类为 fake。
+
+### 注册默认跳过活体
+
+注册默认跳过活体。`[inference].liveness_on_registration = false` 时，新建人员和
+追加 FaceSample 均不运行活体模型，新样本不包含 `liveness`。人脸检测、识别特征提取或
+外部特征校验，以及所选 `review_mode` 的审核仍正常执行。此开关只能通过启动配置设置，
+请求参数不能覆盖。
+
+活体 addon 已启用时，设为 `liveness_on_registration = true`，注册才遵循
+`normal`/`observe` 策略。`normal` 下活体拒绝项包含对应 `reason` 和 `liveness`，
+批量注册允许部分成功；新建人员时全部被拒绝，仍返回 `registration_failed`，
+其 `details.rejected_images` 提供逐图结果。`review_mode=off` 和
+`embedding_mode=external_trusted` 不能绕过已开启的注册活体检查。
+`observe` 下注册继续并保存活体结果。历史已保存的结果仍可查询，未做过活体的样本不包含该字段。
+
+### RTSP 和 Web UI
+
+RTSP 在 `normal` 下把未通过的人脸标为外层 `status: liveness_blocked`，不返回身份，
+单独计入 `liveness_blocked_faces`，不计入 `unknown_faces`，不触发人员或陌生人进入事件，
+并重新累计身份确认帧数。活体推理异常会清除过期的识别展示；`observe` 继续匹配。
+Web UI 展示活体结果和明确的拒绝状态；`/v1/models` 与 `/v1/system` 在基础模型之外
+单独列出已启用的 addon。
+
 ## 系统接口
 
 ### `GET /v1/health`
@@ -108,6 +204,8 @@ curl -sS "${BASE_URL}/v1/system" -H "${AUTH_HEADER}"
 
 ### `GET /v1/models`
 
+`addons` 列表单独返回当前启用的 addon，可检查其中是否有 `liveness`；系统响应的 `safe_config` 还返回实际生效的活体设置。这些接口只读，不负责安装模型。
+
 **用途：** 查看当前已验证的检测/识别模型、实际Provider和模型授权摘要。
 
 **参数：** 无。
@@ -121,9 +219,60 @@ curl -sS "${BASE_URL}/v1/models" -H "${AUTH_HEADER}"
 
 **常见错误：** `401 unauthorized`。
 
+支持 `raccoon_s`、`raccoon_l` 基础模型包及 CPU、CUDA 运行，应在启动前用模型工具安装。此接口列出正在使用的模型组件，不是可下载模型目录。下面的网页操作只管理活体。Collection 与识别模型及预处理契约绑定，换基础包不会转换已有特征，可能返回 `409 collection_model_mismatch`；仅启用活体不会改变这一契约。
+
+### `GET /v1/addons/liveness`
+
+**用途:** 只读检查模型安装状态和下次启动配置，不下载、不修改设置。这是管理接口，不是单独的活体推理接口。
+
+**返回:** HTTP 200. `enabled` 表示当前进程是否启用活体；`installed` 表示本地文件通过发布模型的 SHA-256 校验，不代表活体已启用。`configured_enabled` 读取当前配置文件，表示下次启动的选择；`restart_required` 表示它与 `enabled` 不同。重启前，`/v1/system` 的 `safe_config` 仍反映当前进程的设置。
+
+`state` 为 `idle`（没有已校验模型）、`downloading`（正在准备）、`ready`（已有校验通过的模型）或 `error`（准备、文件或配置出错）。仅有 `ready` 不能说明已保存启用设置或已完成重启。
+
+`can_enable` 表示网页准备操作是否可用。不可用时，`unavailable_code` 提供稳定的原因代码，`unavailable_reason` 提供说明；可用时两者均为 `null`。`error` 为 `null` 或含 `code`、`message` 的对象。`model_path` 为本地模型路径，`config_file` 为选中的 TOML 路径或 `null`。响应还包含 `request_id`。
+
+`unavailable_code` 的值包括 `config_file_missing`（未指定配置文件）、`config_file_not_regular`（不是普通文件）、`config_file_mount`（单独挂载配置文件）、`config_not_writable`（配置或所在目录不可写）、`addon_directory_not_writable`（addon 目录不可写）、`addon_config_invalid`（配置无效）、`addon_model_invalid`（模型无效）和 `server_stopping`（正在关闭）。
+
+```json
+{
+  "enabled": false,
+  "installed": true,
+  "configured_enabled": true,
+  "restart_required": true,
+  "can_enable": true,
+  "unavailable_code": null,
+  "unavailable_reason": null,
+  "state": "ready",
+  "error": null,
+  "model_path": "/models/addons/liveness.onnx",
+  "config_file": "/etc/insightface/server.toml",
+  "request_id": "3ed21e89-4595-4eed-a699-1df42ca62032"
+}
+```
+
+### `POST /v1/addons/liveness/enable`
+
+**用途:** 下载活体模型并保存下次启动配置。发送 `Content-Type: application/json` 和空对象 `{}`；不接受模型 URL 或其他参数。
+
+```bash
+curl -sS "${BASE_URL}/v1/addons/liveness" -H "${AUTH_HEADER}"
+curl -sS "${BASE_URL}/v1/addons/liveness/enable" -H "${AUTH_HEADER}" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+**返回:** HTTP 202 返回与 GET 相同的状态字段，表示任务已接受，不代表活体已启用。轮询 `GET /v1/addons/liveness`，直到准备结束。重复请求共用正在执行的任务，关闭浏览器不会取消下载。
+
+下载并通过 SHA-256 校验后，任务才向 `config_file` 的 `[inference].addons` 和 `[addons].auto_download` 添加 `liveness`，保留其他值和注释；已有合格缓存直接复用。当 `installed=true`、`configured_enabled=true`、`restart_required=true` 时，手动重启 Server。新进程应返回 `enabled=true`、`restart_required=false`。不会热加载，也不提供基础模型包切换接口。
+
+**错误:** 请求错误使用统一错误对象：请求体不是 `{}` 时为 `400 invalid_addon_request`；需要认证但未通过时为 `401 unauthorized`；浏览器来源不允许时为 `403 origin_not_allowed`；路径、权限或配置不支持操作时为 `409 addon_management_unavailable`；非 JSON 类型为 `415 json_required`。浏览器来源必须与 Server 同源，或位于明确配置的 CORS 允许列表中。
+
+任务接受后仍可能失败：GET 继续返回 HTTP 200，通过 `state=error` 和 `error.code` 表示失败。`addon_download_failed` 不修改配置，应检查 Server 的网络或代理后重试；`addon_config_save_failed` 需要修复配置或目录权限，下载成功的模型可复用；`addon_config_invalid` 表示磁盘 TOML 配置无效；`addon_model_invalid` 需要替换或删除损坏的缓存，系统不会静默覆盖；`addon_job_in_progress` 表示另一进程正在准备，应等待并刷新。修复原因后再重新 POST。
+
 ## 无状态人脸接口
 
 ### `POST /v1/detect`
+
+启用活体后，每张执行过活体的人脸会包含 `liveness.status`、`liveness.is_live`、`liveness.live_score`。检测对 fake 和 `input_rejected` 都返回 HTTP 200，且不提取识别特征。`input_rejected` 表示图片不满足评估条件，例如人脸太靠近边缘；应换用人脸周围留有空间的图片。缺少 `liveness` 表示这张脸未执行活体。
 
 **用途：** 检测一张图片中的所有可用人脸，不写数据库。
 
@@ -144,6 +293,8 @@ curl -sS "${BASE_URL}/v1/detect" -H "${AUTH_HEADER}" \
 
 ### `POST /v1/compare`
 
+活体在识别前执行，`liveness_compare_scope` 决定检查 `both`、`source` 或 `target`。`normal` 下任一被检查侧未通过时，返回 HTTP 422 `liveness_fake` 或 `liveness_input_rejected`，并提供 `error.details.liveness` 和 `error.details.side`，不返回相似度。`observe` 继续比对，并在执行过检查的人脸上返回活体结果。
+
 **用途：** 比对两张图片中按策略选中的单张脸，不持久化。
 
 **表单参数：** `source`和`target`必填；`threshold`可选0～1，默认0.4；
@@ -162,6 +313,8 @@ curl -sS "${BASE_URL}/v1/compare" -H "${AUTH_HEADER}" \
 `503 request_timeout`。
 
 ### `POST /v1/embeddings`
+
+启用活体且为 `normal` 时，fake 或输入不合格返回 HTTP 422 `liveness_fake` 或 `liveness_input_rejected`，详情为 `error.details.liveness`，不提取 embedding。`observe` 继续提取，并随人脸返回活体结果。
 
 **用途：** 为可信集成方抽取一张选中脸的特征；普通注册/搜索不需要调用它。
 
@@ -202,7 +355,7 @@ curl -sS "${BASE_URL}/v1/collections" -H "${AUTH_HEADER}" \
   }'
 ```
 
-**执行与结果：** 分配索引并固定当前模型ID、版本、digest、512维特征与预处理版本。
+**执行与结果：** 分配索引并固定当前模型ID、digest、512维特征与预处理版本。
 HTTP 201返回完整`collection`、解析后的默认值、计数和时间戳。
 
 **常见错误：** `400 invalid_detection_profile`、`unsupported_search_profile`或
@@ -266,6 +419,8 @@ curl -sS -X DELETE "${BASE_URL}/v1/collections/employees?force=true" \
 ## Person与FaceSample接口
 
 ### `POST /v1/collections/{collection_id}/persons`
+
+新建人员和追加 FaceSample 默认跳过活体（`liveness_on_registration=false`）。管理员开启后，`normal` 拒绝 fake 和输入不合格的图片，`observe` 保留结果并继续注册；原有入库审查仍然执行。拒绝列表分别显示实际 `reason` 和活体结果，活体通过不代表质量审查通过。
 
 **用途：** 一次创建Person并注册一张或多张FaceSample。
 
@@ -344,6 +499,8 @@ curl -sS -X DELETE "${BASE_URL}/v1/collections/employees/persons/employee-001" \
 
 ### `POST /v1/collections/{collection_id}/persons/{person_id}/faces`
 
+新建人员和追加 FaceSample 默认跳过活体（`liveness_on_registration=false`）。管理员开启后，`normal` 拒绝 fake 和输入不合格的图片，`observe` 保留结果并继续注册；原有入库审查仍然执行。拒绝列表分别显示实际 `reason` 和活体结果，活体通过不代表质量审查通过。
+
 **用途：** 给已有Person增量加入FaceSample。
 
 **路径参数：** `collection_id`、`person_id`。**表单参数：** 可重复`images`、
@@ -404,6 +561,8 @@ curl -sS -X DELETE "${BASE_URL}/v1/collections/employees/persons/employee-001/fa
 ## 搜索接口
 
 ### `POST /v1/collections/{collection_id}/search`
+
+启用活体且为 `normal` 时，查询图片的 fake 或输入不合格返回 HTTP 422 `liveness_fake` 或 `liveness_input_rejected`，详情为 `error.details.liveness`，不会执行搜索；这与搜索成功但匹配列表为空不同。`observe` 继续搜索，并在查询人脸上返回活体结果。
 
 **用途：** 用一张查询图片在指定人员库中执行1:N Person搜索。
 
@@ -520,6 +679,8 @@ curl -sS -X DELETE "${BASE_URL}/v1/monitors/front-gate" \
 
 ### `GET /v1/monitors/{monitor_id}/state`
 
+启用活体且为 `normal` 时，未通过的人脸显示外层 `status: liveness_blocked` 和独立活体结果，计入 `liveness_blocked_faces`，不计入 `unknown_faces`，也不触发人员或陌生人进入事件。`observe` 继续识别。界面会区分“输入被拒绝”和“活体未通过”。
+
 **用途：** 供无界面客户端或Web UI轮询当前运行状态。**返回字段：** 包含连接状态、
 源分辨率/FPS、配置与实际推理频率、耗时、跳帧、当前已识别与陌生人脸、预览查看者、
 重连次数和安全的最近错误；不会包含embedding或源凭据。
@@ -565,3 +726,6 @@ preview_disabled`、`503 stream_unavailable`、`404 monitor_not_found`、401。
 - `429`和临时`503`可使用带抖动的有界指数退避；其他4xx应修正请求而不是重试。
 - 升级前保存当前镜像digest、模型ID/digest、数据库备份和API版本。不要让两个Server
   进程同时写同一个`/data`目录。
+
+
+模型、模型组件、Collection 和 FaceSample 的响应均不再包含 `model_version`，模型包以 `model_id` 标识。已有 Collection 的 `embedding_contract_id` 保持不变；新建 Collection 使用不含模型版本号的契约。外部特征调用方应读取并使用目标 Collection 返回的契约 ID。

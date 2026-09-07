@@ -401,14 +401,14 @@ def test_cli_forwards_dotted_overrides_and_invocation_root(
         _analyze_args(
             "--scan.workers",
             "8",
-            "--recognition.target_persons=[alice, bob]",
+            "--recognition.unknown_action=keep",
         )
     )
 
     assert exit_code == 0
     assert captured["config_overrides"] == {
         "scan.workers": 8,
-        "recognition.target_persons": ["alice", "bob"],
+        "recognition.unknown_action": "keep",
     }
     assert captured["config_override_root"] == Path(tmp_path)
     assert _status(capsys, "analyze")["ok"] is True

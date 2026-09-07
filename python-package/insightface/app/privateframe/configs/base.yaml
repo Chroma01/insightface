@@ -34,12 +34,16 @@ runtime:
 
 recognition:
   # The default all policy omits recognition from FaceAnalysis.allowed_modules,
-  # so it never loads the recognizer or reads a gallery. Selective modes load
-  # recognition with the other selected modules and use one first-level folder
-  # per person.
+  # so it never loads the recognizer or reads reference photos. Selective modes
+  # read images directly from reference_dir; no names or per-person folders.
+  # Each photo contributes only its largest detected face. If that face is
+  # unusable the photo is skipped; no usable photos is an error.
   mode: all
-  gallery_dir: null
-  target_persons: []
+  reference_dir: null
+  # auto keeps unconfirmed faces visible in blur_only and blurs them in exempt.
+  # blur / keep explicitly override this fallback for selective modes. The all
+  # mode always blurs all detected faces. Inference failures stop the task.
+  unknown_action: auto
   # fast / balanced / accurate select at most 1 / 3 / 5 eligible SCRFD
   # landmark candidates per canonical track. Local-review landmarks take
   # priority; the paired full-frame detector landmarks are the fallback. A
@@ -47,13 +51,14 @@ recognition:
   profile: balanced
   # Shared raccoon_s/raccoon_l cosine threshold for temporally independent
   # multi-frame evidence. Every selected quality-qualified sample must
-  # independently clear Gallery threshold+margin for the same person; cluster
-  # prototypes must agree too. Any uncertainty remains blurred.
+  # independently match the reference face set; appearance clusters must match
+  # too. Unconfirmed faces follow unknown_action. Reference photos never compete
+  # against one another as named identities.
   # Video recognition alignment first uses already-computed local SCRFD
   # five-points at confidence >=0.70 with strict same-face and alignment-quality
   # gates. A detector observation can fall back to its paired original
   # full-frame SCRFD box/five-points under the same confidence and quality
-  # gates. Gallery still images instead use fixed upright 640/128 full-frame
+  # gates. Reference still images instead use fixed upright 640/128 full-frame
   # SCRFD detections and their original five-points, with no local review. These
   # policies are internal and do not add user YAML. Detector and tracking-only
   # video reviews share one bounded candidate pool. The profile controls only
@@ -61,23 +66,34 @@ recognition:
   # frames whose every adjacent gap is >=1 second use this calibrated 0.40
   # threshold. Shorter/correlated evidence internally adds 0.10; a one-frame
   # decision additionally keeps the existing +0.05 guard. These internal rules
-  # do not add user YAML. Revalidate the base value for each deployment Gallery.
+  # do not add user YAML. Adjust only when reference matching needs calibration.
   similarity_threshold: 0.40
 
 scan:
-  # Cap regular full-frame detector sampling at approximately this many frames
-  # per second. The runtime derives one uniform integer stride for each video,
-  # with a 5% tolerance for nominal rates such as 30.02 FPS. Scene boundaries,
-  # video endpoints, and new-track admission bursts may force additional real
-  # detector scans. The output video always retains its source frame rate.
+  # Approximate ceiling on regular full-frame face detection samples per second
+  # of INPUT VIDEO. Default 30 favors temporal coverage.
+  # This is a sampling control, not a wall-clock processing speed target; the
+  # output video keeps every source frame and its original frame rate.
+  # Sampling uses a uniform integer stride with a 5% rate tolerance. At 30,
+  # 25/30 FPS input is scanned every frame and 60 FPS every 2 frames (30/s).
+  # Lowering to 15 scans 30 FPS input every 2 frames (15/s), 60 FPS every 4
+  # (15/s), and 25 FPS every 2 (12.5/s).
+  # Scene boundaries, endpoints, and new-track bursts may add scans, so the
+  # total detector rate can exceed this soft ceiling.
+  # Lower to 15 (or e.g. 10) to reduce detector work when faster processing
+  # matters more, especially with limited motion. Wider gaps can miss briefly
+  # visible faces. Keep 30 for fast motion, frequent occlusion, or greater
+  # detection coverage; on higher-FPS input, raise to the source FPS to scan
+  # every frame. More sampling costs more work and cannot guarantee detection.
+  # Review representative output when changing the sampling rate.
   max_analysis_fps: 30
   # Skipped frames always run decode and scene-cut detection. When the resulting
   # stride is greater than 1, the default interpolate policy reviews real
   # detector anchors and publishes reduced-assurance geometry between them
   # without per-frame flow/SCRFD/Verifier work. Explicitly select visual to run
-  # the optical-flow/review path between scans. On constrained devices, start
-  # with 15 FPS; either sampled policy is an explicit recall/privacy tradeoff
-  # and can miss a face that exists only between sampled full-frame detections.
+  # the optical-flow/review path between scans. Either sampled policy is an
+  # explicit recall/privacy tradeoff and can miss a face that exists only
+  # between sampled full-frame detections.
   # By default SCRFD uses one fixed-input-shape Session per resolution for the
   # 800/256 full-frame views, while all angles at the same resolution share it.
   # Local revalidation owns an independent detector host/Session pool. The
@@ -85,8 +101,7 @@ scan:
   # Session. The following session_sharing option controls concurrency only
   # among full-frame scan views.
   session_sharing: single_session_parallel
-  # RTX 5090 full-video sweep: 18 workers / depth 6 was stable at ~70 scan
-  # fps and beat the 14/5 and 16/6 neighboring profiles on repeated runs.
+  # Concurrent scan workers and the number of frames queued for scanning.
   workers: 18
   pipeline_depth: 6
   passes:
@@ -202,6 +217,51 @@ tracking:
   reliable_endpoint_extension: 45
   reliable_pre_roll_extension: 150
   reliable_endpoint_min_detector_frames: 20
+  endpoint_conflicts:
+    # Resolve duplicate unanchored endpoint boxes from same-frame face evidence.
+    # First-stage behavior applies only to recognition.mode=all; selective
+    # photo policies keep their existing per-track identity decisions.
+    # Set false for an A/B comparison. This does not stop tracking early.
+    enabled: true
+    # Extra duplicate-box review uses upright SCRFD only. Each requested ROI
+    # runs once per listed angle; a frame can still need multiple ROIs.
+    # Ordinary tracking review keeps revalidation.angles. Upright-only review
+    # can retain tilted-face duplicates or change which overlapping boxes are
+    # removed and how far their blur extends around the face.
+    angles: [0]
+    # Nearby geometry proposes a conflict; overlap alone never proves that
+    # two boxes represent the same face. Center distances are normalized by
+    # sqrt(the smaller box area).
+    nearby_iou: 0.10
+    nearby_center_distance: 1.0
+    # These gates associate independently measured local faces with shared
+    # same-frame detections. Matching a predicted box to its own local face
+    # uses revalidation.match_* geometry, including IoU OR containment;
+    # confidence and uniqueness margin below apply to both selections.
+    match_min_iou: 0.30
+    match_max_center_distance: 0.50
+    match_max_area_ratio: 2.5
+    # Positive-claim threshold only: a weaker second face returned by the
+    # detector still blocks removal when no accepted core box covers it.
+    match_min_confidence: 0.35
+    match_min_margin: 0.10
+    # Strong equivalence applies only to independently detected locations,
+    # never final blurred boxes or predicted geometry by itself.
+    equivalence_iou: 0.90
+    # Reuse complete same-frame evidence before requesting local inference.
+    # One call means one SCRFD angle/view, not an entire multi-angle review.
+    # The total allowance is min(max_calls_total,
+    # ceil(source_video_duration_seconds * max_calls_per_video_second)).
+    # A zero frame/total/rate budget allows reuse but no added inference.
+    recheck_min_frame_gap: 1
+    max_calls_per_frame: 12
+    max_calls_total: 4096
+    max_calls_per_video_second: 90.0
+    # Cache only same-frame detection geometry, including empty results;
+    # do not copy video pixels or reuse evidence from another frame. Zero
+    # disables the cache. Missing/incomplete/ambiguous evidence is preserved,
+    # not treated as proof of a duplicate when a budget is exhausted.
+    cache_entries: 256
   fragment_stitching:
     enabled: true
     resolve_duplicate_candidates_before_stabilization: true
@@ -325,6 +385,9 @@ revalidation:
   edge_fallback:
     enabled: true
     shift_fraction: 0.05
+  # Also used to select an endpoint conflict's independent target-local
+  # detection and to verify that it supports the current predicted geometry.
+  # Either IoU or containment may pass; center distance and area must both pass.
   match_min_iou: 0.08
   match_min_containment: 0.35
   match_max_center_distance: 0.85
@@ -397,9 +460,7 @@ render:
       # working image for CPU speed. exact remains available as a fallback.
       algorithm: pyramid
       max_side: 64
-      # Four times the original 0.25 / 31 profile and twice the immediately
-      # preceding 0.50 / 61 profile. Keep sigma automatic so the
-      # effective blur continues to scale with the face region.
+      # Keep sigma automatic so blur strength scales with the face region.
       kernel_ratio: 1.00
       min_kernel: 121
       sigma: 0.0
@@ -419,7 +480,9 @@ render:
     preset: medium
     rate_control:
       mode: crf
-      quality: 18
+      # Balanced quality and file size for sharing; 18 keeps more detail,
+      # while 28 favors smaller files. This does not change face analysis.
+      quality: 23
     keyframe_interval: 60
     faststart: true
     audio:

@@ -9,10 +9,10 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'"
     >
-    <meta name="description" content="Self-hosted InsightFace detection, comparison, enrollment, and search.">
+    <meta name="description" content="Self-hosted InsightFace detection, optional liveness checks, comparison, enrollment, and search.">
     <title>InsightFace Server</title>
     <link rel="icon" href="/assets/insightface-mark.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=0.2.0-r14">
+    <link rel="stylesheet" href="/assets/styles.css?v=0.3.0-r1">
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
@@ -105,7 +105,7 @@
               <div>
                 <p class="eyebrow">LOCAL FACE INTELLIGENCE</p>
                 <h2 id="dashboard-heading">Your face recognition service, <span class="gradient-text">at a glance.</span></h2>
-                <p>Detect, compare, enroll, and search without sending images outside your server.</p>
+                <p>Detect, check liveness, compare, enroll, and search without sending images outside your server.</p>
               </div>
               <div class="hero-provider">
                 <span>Execution provider</span>
@@ -117,7 +117,7 @@
               <article class="metric-card"><span>Collections</span><strong id="metric-collections">—</strong><small>separate identity spaces</small></article>
               <article class="metric-card"><span>People</span><strong id="metric-people">—</strong><small>enrolled identities</small></article>
               <article class="metric-card"><span>Face samples</span><strong id="metric-faces">—</strong><small>stored embeddings</small></article>
-              <article class="metric-card"><span>Model</span><strong class="metric-text" id="metric-model">—</strong><small id="metric-model-version">not loaded</small></article>
+              <article class="metric-card"><span>Model</span><strong class="metric-text" id="metric-model">—</strong><small><button class="text-button" id="metric-model-liveness" data-route="system" type="button">Liveness status unknown</button></small></article>
             </div>
 
             <div class="two-column">
@@ -201,10 +201,10 @@
               </div>
               <label>Metadata (JSON)<textarea name="metadata" rows="3" spellcheck="false">{}</textarea></label>
               <label class="drop-zone" id="person-drop-zone">
-                <input name="images" type="file" accept="image/jpeg,image/png,image/webp" multiple required>
+                <input name="images" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,.bmp" multiple required>
                 <span class="drop-icon" aria-hidden="true">＋</span>
                 <strong>Drop registration photos here</strong>
-                <span>or choose one or more JPEG, PNG, or WebP images</span>
+                <span>or choose one or more JPEG, PNG, WebP, or BMP images</span>
                 <small class="file-summary">No files selected</small>
               </label>
               <p class="hint">Off uses the Collection single-face selection strategy. Standard and strict require exactly one clear, usable face.</p>
@@ -229,8 +229,8 @@
             <div class="tool-layout">
               <form class="panel tool-controls" id="detect-form">
                 <label class="drop-zone compact-drop" id="detect-drop-zone">
-                  <input name="image" type="file" accept="image/jpeg,image/png,image/webp" required>
-                  <span class="drop-icon" aria-hidden="true">⌗</span><strong>Drop an image</strong><span>JPEG, PNG, or WebP</span><small class="file-summary">No file selected</small>
+                  <input name="image" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,.bmp" required>
+                  <span class="drop-icon" aria-hidden="true">⌗</span><strong>Drop an image</strong><span>JPEG, PNG, WebP, or BMP</span><small class="file-summary">No file selected</small>
                 </label>
                 <div class="form-grid two">
                   <label><span class="field-caption">Maximum faces</span><input name="max_faces" type="number" min="1" max="100" placeholder="All"></label>
@@ -252,12 +252,12 @@
               <div class="compare-grid">
                 <article class="panel media-panel">
                   <div class="panel-heading"><h3>Source image</h3></div>
-                  <label class="drop-zone compact-drop" id="compare-source-drop"><input name="source" type="file" accept="image/jpeg,image/png,image/webp" required><strong>Choose source</strong><span>JPEG, PNG, or WebP</span><span class="file-summary">No file selected</span></label>
+                  <label class="drop-zone compact-drop" id="compare-source-drop"><input name="source" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,.bmp" required><strong>Choose source</strong><span>JPEG, PNG, WebP, or BMP</span><span class="file-summary">No file selected</span></label>
                   <div class="canvas-stage empty"><canvas id="compare-source-canvas" aria-label="Source image face overlay"></canvas><span class="canvas-placeholder">Source preview</span></div>
                 </article>
                 <article class="panel media-panel">
                   <div class="panel-heading"><h3>Target image</h3></div>
-                  <label class="drop-zone compact-drop" id="compare-target-drop"><input name="target" type="file" accept="image/jpeg,image/png,image/webp" required><strong>Choose target</strong><span>JPEG, PNG, or WebP</span><span class="file-summary">No file selected</span></label>
+                  <label class="drop-zone compact-drop" id="compare-target-drop"><input name="target" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,.bmp" required><strong>Choose target</strong><span>JPEG, PNG, WebP, or BMP</span><span class="file-summary">No file selected</span></label>
                   <div class="canvas-stage empty"><canvas id="compare-target-canvas" aria-label="Target image face overlay"></canvas><span class="canvas-placeholder">Target preview</span></div>
                 </article>
               </div>
@@ -275,7 +275,7 @@
             <div class="tool-layout">
               <form class="panel tool-controls" id="search-form">
                 <label>Collection<select name="collection" id="search-collection" required><option value="">Select a collection</option></select></label>
-                <label class="drop-zone compact-drop" id="search-drop-zone"><input name="image" type="file" accept="image/jpeg,image/png,image/webp" required><span class="drop-icon" aria-hidden="true">⌕</span><strong>Drop a query image</strong><span>JPEG, PNG, or WebP</span><small class="file-summary">No file selected</small></label>
+                <label class="drop-zone compact-drop" id="search-drop-zone"><input name="image" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,.bmp" required><span class="drop-icon" aria-hidden="true">⌕</span><strong>Drop a query image</strong><span>JPEG, PNG, WebP, or BMP</span><small class="file-summary">No file selected</small></label>
                 <div class="form-grid two search-parameters">
                   <label><span class="field-caption">Top results</span><input name="limit" type="number" min="1" max="100" value="5" required></label>
                   <label><span class="field-caption">Threshold <span class="optional">blank = collection default</span></span><input name="threshold" type="number" min="0" max="1" step="0.01" placeholder="Default"></label>
@@ -373,6 +373,21 @@
               <article class="metric-card"><span>Accelerator</span><strong class="metric-text" id="system-gpu">—</strong><small id="system-driver">—</small></article>
               <article class="metric-card" data-auth-ui hidden><span>API key in UI</span><strong class="metric-text" id="system-auth">Not configured</strong><small>tab memory only</small></article>
             </div>
+            <article class="panel liveness-management" id="system-liveness">
+              <div class="panel-heading"><h3>Liveness</h3><span class="badge" id="system-liveness-runtime">Liveness status unknown</span></div>
+              <p class="muted">Download the liveness model and save its startup setting here. Enabling it requires a manual Server restart.</p>
+              <dl class="diagnostic-list" id="system-liveness-details"></dl>
+              <p class="liveness-notice" id="system-liveness-notice" role="status" hidden></p>
+              <p class="liveness-error" id="system-liveness-error" role="alert" hidden></p>
+              <button class="button secondary" id="system-liveness-refresh" type="button" hidden>Refresh</button>
+              <button class="button primary" id="system-liveness-enable" type="button" hidden disabled>Download and enable after restart</button>
+              <div id="system-liveness-manual" hidden>
+                <p class="muted" id="system-liveness-unavailable"></p>
+                <p>Install the addon with the model download command, add liveness to inference.addons in the existing startup configuration, then restart Server.</p>
+                <pre><code>docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness</code></pre>
+                <p class="muted">Use the Compose file for your deployment.</p>
+              </div>
+            </article>
             <div class="two-column">
               <article class="panel"><div class="panel-heading"><div><p class="eyebrow">RUNTIME</p><h3>Hardware &amp; software</h3></div></div><dl class="diagnostic-list" id="system-runtime"></dl></article>
               <article class="panel"><div class="panel-heading"><div><p class="eyebrow">STORAGE</p><h3>Database &amp; mounts</h3></div></div><dl class="diagnostic-list" id="system-storage"></dl></article>
@@ -455,6 +470,6 @@
     </dialog>
 
     <div class="toast-region" id="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
-    <script type="module" src="/assets/app.mjs?v=0.2.0-r14"></script>
+    <script type="module" src="/assets/app.mjs?v=0.3.0-r1"></script>
   </body>
 </html>

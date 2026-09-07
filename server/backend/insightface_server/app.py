@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
+from .addon_management import LivenessManager, require_management_request
 from .api.auth import ApiKeyAuthenticator
 from .api.responses import (
     CollectionPageResponse,
@@ -34,6 +35,7 @@ from .api.responses import (
     FacePageResponse,
     FaceRegistrationResponse,
     HealthResponse,
+    LivenessManagementResponse,
     ModelsResponse,
     MonitorEventPageResponse,
     MonitorPageResponse,
@@ -225,6 +227,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         search_indexes: SearchIndexManager | None = None
         monitors: MonitorManager | None = None
+        liveness_manager: LivenessManager | None = None
         engine = None
         app.state.ready = False
         database.acquire_process_lock()
@@ -275,6 +278,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.image_loader = image_loader
             app.state.service = service
             app.state.monitors = monitors
+            liveness_manager = LivenessManager(configured, enabled="liveness" in configured.addons)
+            app.state.liveness_manager = liveness_manager
             app.state.ready = True
             LOGGER.info(
                 "server_ready version=%s provider=%s inference_max_concurrency=%s "
@@ -293,6 +298,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             app.state.ready = False
+            if liveness_manager is not None:
+                await liveness_manager.close()
             if monitors is not None:
                 monitors.close()
             if search_indexes is not None:
@@ -304,7 +311,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="InsightFace Server",
         version=__version__,
-        description="Simple self-hosted face detection, comparison, registration, and search.",
+        description=(
+            "Simple self-hosted face detection, optional liveness checks, comparison, registration, and search. "
+            "Image upload endpoints accept JPEG, PNG, WebP, and BMP. "
+            "Liveness is disabled by default in server.toml, including in legacy configurations that omit "
+            "inference.addons. Use the Web UI to download and enable liveness for the next "
+            "startup, or set inference.addons = [\"liveness\"] and install the addon manually. "
+            "Set inference.addons = [] to disable it. "
+            "Setting addons.auto_download = [\"liveness\"] includes it when running "
+            "models install <package>, even when the base package is cached. Mode, threshold, "
+            "compare scope, and registration policy are server configuration, not request "
+            "parameters. When evaluated, liveness has "
+            "exactly status, is_live, and live_score. An input_rejected status means the "
+            "input could not be evaluated, with both values null; a missing liveness "
+            "field means no evaluation was performed. In normal mode, failed or rejected "
+            "liveness blocks recognition; observe mode continues recognition. "
+            "Registration skips liveness by default. Install the selected addon before "
+            "starting the Server; startup does not download models."
+        ),
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -522,6 +546,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "inference_max_concurrency": (
                         configured.effective_inference_max_concurrency
                     ),
+                    "addons": list(configured.addons),
+                    "auto_download_addons": list(configured.auto_download_addons),
+                    "liveness_mode": configured.liveness_mode,
+                    "liveness_threshold": configured.liveness_threshold,
+                    "liveness_compare_scope": configured.liveness_compare_scope,
+                    "liveness_on_registration": configured.liveness_on_registration,
                     "save_face_crops": configured.save_face_crops,
                     "default_similarity_threshold": configured.default_threshold,
                     "default_search_profile": configured.default_search_profile,
@@ -555,10 +585,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request,
             {
                 "models": [dict(model) for model in app.state.engine.summary.models],
+                **({"addons": [dict(addon) for addon in app.state.engine.summary.addons]}
+                   if app.state.engine.summary.addons else {}),
                 "execution_provider": app.state.engine.summary.provider,
                 "license": app.state.engine.summary.license,
             },
         )
+
+    @app.get("/v1/addons/liveness", tags=["system"], response_model=LivenessManagementResponse)
+    async def liveness_status(request: Request):
+        """Inspect active liveness, the verified local model, and saved restart settings.
+
+        This is a management endpoint, not a standalone liveness inference API.
+        Read-only or single-file config mounts report can_enable=false with an
+        actionable unavailable_reason. Checking status never downloads a model.
+        """
+        await authorize(request)
+        return _json(request, await _blocking(app.state.liveness_manager.status))
+
+    @app.post(
+        "/v1/addons/liveness/enable", tags=["system"],
+        response_model=LivenessManagementResponse, status_code=202,
+        openapi_extra={"requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": {
+                "type": "object", "additionalProperties": False,
+            }}},
+        }},
+    )
+    async def enable_liveness(request: Request):
+        """Download and verify liveness, then save its next-startup configuration.
+
+        Send an empty JSON object. The background job continues after the request
+        or browser tab closes; poll GET /v1/addons/liveness for completion. A
+        verified cached model is reused. Only after successful verification does
+        the job add liveness to inference.addons and addons.auto_download in the
+        configured server.toml, preserving other values and comments. Current
+        inference does not change: the operator must manually restart Server.
+        Repeated requests share the active job. Auth follows other /v1 APIs;
+        browser requests must originate from this Server or an allowed CORS origin.
+        """
+        await authorize(request)
+        require_management_request(request, configured.cors_origins)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            raise bad_request("Provide an empty JSON object.", code="invalid_addon_request") from None
+        if not isinstance(body, dict) or body:
+            raise bad_request("Provide an empty JSON object.", code="invalid_addon_request")
+        return _json(request, await app.state.liveness_manager.enable(), status_code=202)
 
     @app.post("/v1/detect", tags=["faces"], response_model=DetectResponse)
     async def detect(
@@ -568,6 +643,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         collection_id: str | None = Form(default=None),
         min_score: float | None = Form(default=None, ge=0.0, le=1.0, deprecated=True),
     ):
+        """Detect faces without generating recognition embeddings.
+
+        When the liveness addon is enabled, faces[].liveness contains status,
+        is_live, and live_score. HTTP 200 also includes fake faces (status=ok,
+        is_live=false) and unsuitable input (status=input_rejected, is_live=null,
+        live_score=null); neither is a detection error. An omitted liveness field
+        means no evaluation. Model execution failure returns HTTP 503
+        liveness_unavailable. There is no separate liveness endpoint.
+        """
         await authorize(request)
         if min_score is not None:
             raise bad_request(
@@ -596,6 +680,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         threshold: float | None = Form(default=None, ge=0.0, le=1.0),
         collection_id: str | None = Form(default=None),
     ):
+        """Compare the selected face in each image.
+
+        Configured liveness_compare_scope selects both, source, or target for
+        liveness evaluation. In normal mode, a fake or input rejection stops
+        recognition and returns HTTP 422 liveness_fake or liveness_input_rejected;
+        error.details includes liveness and side (source or target). In observe
+        mode, comparison continues and each evaluated face includes liveness.
+        Unevaluated sides omit liveness. Runtime faults return HTTP 503
+        liveness_unavailable. These policies cannot be overridden per request.
+        """
         await authorize(request)
         started = time.perf_counter()
         source_image, target_image = await asyncio.gather(
@@ -603,16 +697,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.image_loader.from_upload(target),
         )
         profile = await _blocking(app.state.service.detection_profile, collection_id)
-        source_face = await _blocking(
-            app.state.service.selected_face,
-            source_image,
-            detection_profile=profile,
-        )
-        target_face = await _blocking(
-            app.state.service.selected_face,
-            target_image,
-            detection_profile=profile,
-        )
+        comparison_faces = []
+        for side, loaded_image in (("source", source_image), ("target", target_image)):
+            options = {}
+            if "liveness" in configured.addons:
+                options["apply_liveness"] = configured.liveness_compare_scope in ("both", side)
+            try:
+                comparison_faces.append(await _blocking(
+                    app.state.service.selected_face, loaded_image,
+                    detection_profile=profile, **options,
+                ))
+            except ApiError as exc:
+                if exc.code.startswith("liveness_"):
+                    exc.details["side"] = side
+                raise
+        source_face, target_face = comparison_faces
         assert source_face.embedding is not None and target_face.embedding is not None
         from .services.core import similarity
 
@@ -639,6 +738,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         collection_id: str | None = Form(default=None),
         face_selection: str | None = Form(default=None, deprecated=True),
     ):
+        """Generate the selected face's recognition embedding.
+
+        With liveness enabled in normal mode, fake faces and unsuitable input
+        stop before recognition: HTTP 422 liveness_fake or liveness_input_rejected,
+        with the three-field result in error.details.liveness. Observe mode
+        continues recognition and returns faces[].liveness beside the embedding.
+        Without evaluation, liveness is omitted. Runtime faults return HTTP 503
+        liveness_unavailable in either mode.
+        """
         await authorize(request)
         started = time.perf_counter()
         if face_selection is not None:
@@ -725,7 +833,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     else payload.save_face_crops
                 ),
                 "model_id": summary.model_id,
-                "model_version": summary.model_version,
                 "model_digest": summary.model_digest,
                 "embedding_dimension": summary.embedding_dimension,
                 "preprocessing_version": summary.preprocessing_version,
@@ -863,6 +970,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         external_embeddings: str | None = Form(default=None),
         embedding_contract_id: str | None = Form(default=None, max_length=256),
     ):
+        """Register a person from one or more images, allowing partial success.
+
+        Liveness is skipped by default (liveness_on_registration=false), and new
+        samples omit liveness. When enabled in server.toml, normal mode rejects
+        fake or unsuitable images with reason liveness_fake or
+        liveness_input_rejected and a separate liveness result in rejected_images.
+        Observe mode continues normal registration checks and stores the result
+        with accepted samples. review_mode=off and external_trusted embeddings do
+        not bypass enabled liveness. HTTP 201 may contain accepted faces and
+        rejected_images; if all images are rejected, HTTP 422 registration_failed
+        contains error.details.rejected_images. Model faults return HTTP 503
+        liveness_unavailable, not a fake verdict.
+        """
         await authorize(request)
         try:
             person_id = validate_id(id) if id else str(uuid.uuid4())
@@ -1023,6 +1143,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         external_embeddings: str | None = Form(default=None),
         embedding_contract_id: str | None = Form(default=None, max_length=256),
     ):
+        """Add images to an existing person, allowing partial success.
+
+        Liveness is skipped by default (liveness_on_registration=false). When
+        enabled, normal mode rejects fake or unsuitable images with reason
+        liveness_fake or liveness_input_rejected and a separate liveness result
+        in rejected_images. Observe mode continues other registration checks.
+        review_mode=off and external_trusted embeddings do not bypass enabled
+        liveness. HTTP 201 can contain an empty faces list and only rejected_images.
+        Accepted samples retain their evaluated liveness result; unevaluated
+        samples omit it. Model faults return HTTP 503 liveness_unavailable.
+        """
         await authorize(request)
         if len(images) > configured.max_registration_images:
             raise bad_request(
@@ -1176,6 +1307,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         threshold: float | None = Form(default=None, ge=0.0, le=1.0),
         face_selection: str | None = Form(default=None, deprecated=True),
     ):
+        """Search the Collection using the selected face.
+
+        With liveness enabled in normal mode, HTTP 422 liveness_fake or
+        liveness_input_rejected stops recognition and index search; the result is
+        in error.details.liveness. This is distinct from a valid query with no
+        identity matches. Observe mode continues search and includes liveness in
+        searched_face. Without evaluation, liveness is omitted. Model faults
+        return HTTP 503 liveness_unavailable in either mode.
+        """
         await authorize(request)
         if face_selection is not None:
             raise bad_request(
@@ -1335,6 +1475,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=MonitorStateResponse,
     )
     async def monitor_state(request: Request, monitor_id: str):
+        """Read the current RTSP detection and recognition state.
+
+        Evaluated faces include the same three-field liveness result as image
+        endpoints. In normal mode, blocked faces have status=liveness_blocked and
+        contribute to liveness_blocked_faces, not unknown_faces. They do not run
+        identity search or emit person_enter events. Observe mode continues
+        recognition and identity events. Runtime liveness failures are inference
+        errors and must not be interpreted as fake faces.
+        """
         await authorize(request)
         try:
             state = await _blocking(app.state.monitors.state, monitor_id)

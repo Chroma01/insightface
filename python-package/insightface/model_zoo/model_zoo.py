@@ -8,6 +8,7 @@ import os
 import os.path as osp
 import glob
 import hashlib
+import logging
 import platform
 import warnings
 from collections.abc import Mapping
@@ -41,6 +42,8 @@ from .package_manifest import (
 from ..utils import download_onnx
 
 __all__ = ["get_model"]
+
+logger = logging.getLogger(__name__)
 
 _UNSET = object()
 _COREML_PROVIDER = "CoreMLExecutionProvider"
@@ -116,8 +119,10 @@ class ModelRouter:
             )
         else:
             session = PickableInferenceSession(self.onnx_file, **kwargs)
-        print(
-            f"Applied providers: {session._providers}, with options: {session._provider_options}"
+        logger.debug(
+            "Applied providers: %s, with options: %s",
+            session._providers,
+            session._provider_options,
         )
         inputs = session.get_inputs()
         input_cfg = inputs[0]

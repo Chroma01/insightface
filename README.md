@@ -40,8 +40,8 @@ and examples.
 ## InsightFace Server
 
 The new [InsightFace Server](server/) provides a simple self-hosted Web UI,
-snake_case REST API, and Python client for detection, comparison,
-registration, and Person search. A single Linux x86_64 CPU or NVIDIA GPU
+snake_case REST API, and Python client for detection, optional liveness checks,
+comparison, registration, and Person search. A single Linux x86_64 CPU or NVIDIA GPU
 container runs local ONNX Runtime inference and SQLite with operator-supplied,
 manifest-verified models. It is a simple AWS Rekognition alternative with 
 accuracy-preserving INT8 embedding quantization and 50M+ image search on one RTX 5090 GPU.

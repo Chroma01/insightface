@@ -18,7 +18,7 @@ def _analysis_result():
     defaults = deepcopy(raw["render"])
     defaults["recognition_policy"] = {
         "mode": "all",
-        "target_persons": [],
+        "unknown_action": "blur",
     }
     return {
         "render_defaults": defaults,
@@ -26,8 +26,10 @@ def _analysis_result():
     }
 
 
-def test_default_video_encoder_preset_is_medium():
-    assert _analysis_result()["render_defaults"]["video_output"]["preset"] == "medium"
+def test_default_video_encoding_balances_quality_and_file_size():
+    output = _analysis_result()["render_defaults"]["video_output"]
+    assert output["preset"] == "medium"
+    assert output["rate_control"] == {"mode": "crf", "quality": 23}
 
 
 def test_render_dotted_override_is_above_render_config_yaml(tmp_path):

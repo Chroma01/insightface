@@ -53,7 +53,7 @@ class UploadPreview(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedLayout()
-        self.stack.setStackingMode(QStackedLayout.StackAll)
+        self.stack.setStackingMode(QStackedLayout.StackOne)
         self.viewer = ImageViewer()
         self.viewer.setAcceptDrops(True)
         self.viewer.setMouseTracking(True)
@@ -68,6 +68,7 @@ class UploadPreview(QFrame):
         self.placeholder.setWordWrap(True)
         self.stack.addWidget(self.viewer)
         self.stack.addWidget(self.placeholder)
+        self.stack.setCurrentWidget(self.placeholder)
         layout.addLayout(self.stack, 1)
 
         self.file_label = QLabel("")
@@ -81,7 +82,8 @@ class UploadPreview(QFrame):
         self.remove_button.setObjectName("removeUpload")
         set_button_tooltip(self.remove_button)
         self.remove_button.setFixedSize(22, 22)
-        self.remove_button.clicked.connect(self.clear)
+        # clicked(bool) carries the checked state, not clear()'s emit option.
+        self.remove_button.clicked.connect(lambda _checked=False: self.clear())
         self.remove_button.hide()
 
         for watched in (self, self.viewer, self.viewer.viewport(), self.placeholder):
@@ -94,6 +96,9 @@ class UploadPreview(QFrame):
         if not self._accepts_path(path):
             return
         self._path = str(Path(path).expanduser())
+        # A newly selected file has no thumbnail yet. Do not leave the old
+        # preview (including its zoom and scroll bars) beneath the prompt.
+        self.viewer.set_image(None)
         self._show_selected()
         if emit:
             self.pathChanged.emit(self._path)
@@ -101,14 +106,15 @@ class UploadPreview(QFrame):
     def set_image(self, image: Optional[np.ndarray], path: str | None = None) -> None:
         if path:
             self._path = str(Path(path).expanduser())
-        self.viewer.set_image(image)
         if image is None:
+            self.viewer.set_image(None)
             if self._path:
                 self._show_selected()
             else:
                 self.clear(emit=False)
         else:
             self._show_selected(has_preview=True)
+            self.viewer.set_image(image)
 
     def set_faces(self, faces) -> None:
         self.viewer.set_faces(faces)
@@ -121,7 +127,7 @@ class UploadPreview(QFrame):
         self.viewer.set_image(None)
         self.viewer.set_faces([])
         self.placeholder.setText(self._placeholder_text())
-        self.placeholder.show()
+        self.stack.setCurrentWidget(self.placeholder)
         self.file_label.clear()
         self.file_label.hide()
         self.remove_button.hide()
@@ -195,18 +201,20 @@ class UploadPreview(QFrame):
     def _show_selected(self, has_preview: bool = False) -> None:
         self._set_property("hasFile", True)
         self.remove_button.show()
-        self.remove_button.raise_()
         if has_preview:
-            self.placeholder.hide()
+            self.stack.setCurrentWidget(self.viewer)
         else:
             name = Path(self._path).name if self._path else self.title
             self.placeholder.setText(
                 f"{tr(self.title, self._language())}\n{name}\n{tr('Drop another file to replace it', self._language())}"
             )
-            self.placeholder.show()
+            self.stack.setCurrentWidget(self.placeholder)
         if self._path:
             self.file_label.setText(str(self._path))
             self.file_label.show()
+        # Switching a stacked page raises it above sibling widgets. Keep the
+        # floating remove button above the newly visible preview or prompt.
+        self.remove_button.raise_()
 
     def _placeholder_text(self) -> str:
         language = self._language()

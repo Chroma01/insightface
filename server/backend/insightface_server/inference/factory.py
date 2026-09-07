@@ -29,6 +29,8 @@ def create_engine(settings: object) -> InferenceEngine:
         else int(configured_concurrency)
     )
     if mode == "mock":
+        if _setting(settings, "addons", ()):
+            raise ValueError("Model addons require INSIGHTFACE_INFERENCE_MODE=onnx")
         default_profile = getattr(settings, "detection_profile", None)
         if not isinstance(default_profile, DetectionProfile):
             default_profile = None

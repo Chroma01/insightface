@@ -9,6 +9,8 @@
 !python-package/insightface/__init__.py
 !python-package/insightface/app/
 !python-package/insightface/app/**
+!python-package/insightface/addons/
+!python-package/insightface/addons/**
 !python-package/insightface/model_zoo/
 !python-package/insightface/model_zoo/**
 !python-package/insightface/utils/

@@ -8,6 +8,8 @@ result. The same operations are available through the Web UI, `/v1` API, and
 Python SDK. For every HTTP field and response, open the
 [API usage guide](api.md).
 
+For liveness, see [configuration, model installation and result meanings](#optional-liveness-addon). The workflow sections below also explain how it affects each operation.
+
 ## Start here: from zero to a working server
 
 You need a Linux x86_64 host with Docker Engine and Docker Compose. A CUDA
@@ -47,11 +49,153 @@ different image of that Person. A successful no-match is an empty list; it is
 not a server failure. Stop with `docker compose ... down` without `-v`; adding
 `-v` permanently removes the named data volume.
 
+## Optional liveness addon
+
+### Enable and install the model
+
+Liveness is disabled by default in `server/config/server.toml`: both `inference.addons` and `addons.auto_download` are `[]`. Existing configurations that omit these keys also remain disabled. The following is an example for enabling it manually; install the model before restarting:
+
+In **System → Liveness**, choose **Download and enable after restart**. The Server downloads the published model, verifies its SHA-256, then saves `["liveness"]` in both configuration lists while preserving other settings. A verified cached file is reused. The current process stays unchanged: **manually restart the Server** to enable liveness. Download or configuration errors are shown with a retry action; a failed download does not enable liveness. A downloaded file alone does not activate it.
+
+System distinguishes verified installation (`installed`), current execution (`enabled`), saved next-start configuration (`configured_enabled`) and pending restart (`restart_required`). Downloading or saving does not change running inference. To disable, save `inference.addons=[]` and `addons.auto_download=[]` in the same file and manually restart. The Web action leaves the enrollment setting unchanged; its default remains `liveness_on_registration=false`.
+
+```toml
+[inference]
+addons = ["liveness"]
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = ["liveness"]
+```
+
+`inference.addons` controls runtime use; `addons.auto_download` independently controls installation. Setting the latter to `["liveness"]` installs the addon alongside any supported base package, including a cached base package. Server startup never downloads models. Installer and Server read the same configuration file.
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l --accept-license
+# Or install only the addon:
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+For CUDA use `compose.cuda12.yml`. The file is stored at
+`server/.models/addons/liveness.onnx` on the Compose host and is visible at
+`/models/addons/liveness.onnx` in the container. All addon models share this flat
+`addons/` directory. The installer verifies the pinned SHA-256 of the
+[published model](https://github.com/deepinsight/insightface-model-addons/releases/download/addons/liveness.onnx).
+Base model mounts remain read-only; the addon subdirectory and configuration directory are writable for Web management. Images contain code and dependencies, not pretrained weights. Upgrading with the default disabled configuration needs no addon download.
+
+If an existing deployment enables liveness without installing it, startup fails
+with `addon_model_missing`, the required path and an installation command.
+A corrupt/unreadable file produces `addon_model_invalid`. Neither case silently
+disables the addon. Run the writable installer and restart; if verification
+reports corruption, replace the invalid file with the verified published model.
+Upgrading code alone with liveness disabled keeps existing collections and
+embeddings usable. Database migrations preserve existing samples and embeddings; liveness
+does not change the recognition model digest or `embedding_contract_id`.
+
+### Web download permissions
+
+Compose keeps `/models` read-only and mounts only `server/.models/addons` at
+`/models/addons` writable. It mounts the whole `server/config` directory at
+`/etc/insightface` writable so the Server can atomically save `server.toml`.
+On Linux, prepare these host paths for the Server user (UID/GID 10001), from the
+repository root, before using the Web action:
+
+```bash
+mkdir -p server/.models/addons
+sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
+sudo chmod g+rws server/.models/addons server/config
+sudo chmod g+rw server/config/server.toml
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+Use your mounted paths if customized, and `compose.cuda12.yml` for CUDA.
+Old read-only mounts still run with liveness disabled; the Web action explains
+why it is unavailable. You may instead use the CLI installer and edit the
+configuration manually. Do not enable liveness merely because the file exists.
+After a successful Web action, `docker compose -f server/deploy/compose.cpu.yml restart server`
+applies the saved settings. Changing mounts or proxy environment requires
+container recreation. Set `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` before
+creation if downloads need a proxy; Compose passes them to Server and model tool.
+Use a proxy LAN address reachable from the container; its `127.0.0.1` does not refer to the Mac.
+The action uses existing API-key authentication. Without authentication, users
+who can reach the API can also prepare liveness. The action uses the fixed published model; it accepts no custom download URL and does not switch base models.
+
+### Read liveness results
+
+Each evaluated face exposes exactly these three fields inside `liveness`:
+
+| Result | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| Live | `ok` | `true` | Number in `[0, 1]` |
+| Fake | `ok` | `false` | Number in `[0, 1]` |
+| Input unsuitable, e.g. insufficient image coverage near an edge | `input_rejected` | `null` | `null` |
+
+`is_live` uses `live_score >= liveness_threshold`. The field `liveness` is
+omitted when disabled, skipped for enrollment, or excluded by compare scope. A missing field therefore
+means the face was not evaluated; `is_live: null` means its input was rejected.
+
+- `normal` (default): detect/select the face, evaluate liveness, then extract
+  recognition features only if it passes. A failed selected face is not replaced
+  with another live face in the background.
+- `observe`: evaluate liveness and continue recognition for fake/rejected input.
+  Inference failures still return an error.
+- `liveness_compare_scope` is `both` (default), `source`, or `target`; it only
+  changes which `/v1/compare` image receives liveness evaluation. Requests cannot
+  override these startup settings. Enrollment has its own opt-in setting below.
+
+### Detection, recognition and errors
+
+`/v1/detect` returns HTTP 200 with per-face liveness, including negative results,
+and never extracts embeddings. In `normal`, `/v1/embeddings`, `/v1/compare` and
+Collection search return HTTP 422 with `liveness_fake` or
+`liveness_input_rejected`; `error.details.liveness` contains the three fields.
+Compare adds `error.details.side` (`source` or `target`). No similarity or match
+is returned for a blocked operation. A runtime failure returns HTTP 503
+`liveness_unavailable`, rather than a fake classification.
+
+### Enrollment defaults
+
+Enrollment skips liveness by default. With
+`[inference].liveness_on_registration = false`, creating a Person and adding
+FaceSamples do not run the liveness model or include `liveness` in new samples.
+Detection, recognition/external-embedding validation, and the selected
+`review_mode` still apply. This startup setting cannot be overridden per request.
+
+Set `liveness_on_registration = true` to apply the configured `normal`/`observe`
+policy during enrollment when the addon is enabled. In `normal`, rejected images
+have `reason: liveness_fake` or `liveness_input_rejected`, plus `liveness`;
+partial success is preserved. If none pass when creating a Person, the existing
+`registration_failed` error contains `rejected_images`. `review_mode=off` and
+`embedding_mode=external_trusted` do not bypass an enabled enrollment check.
+In `observe`, enrollment continues and saves the liveness result. Previously
+saved snapshots remain visible; samples never evaluated omit the field.
+
+In the Web UI, both new-person enrollment and adding samples display the actual
+rejection `reason` first, with any liveness result on a separate line. For
+example, `low_quality` can appear alongside a passed liveness result; passing
+liveness does not bypass enrollment quality checks.
+
+### RTSP and Web UI
+
+RTSP faces blocked in `normal` have outer `status: liveness_blocked` and no
+identity. They count toward `liveness_blocked_faces`, not `unknown_faces`, do not
+emit person/unknown-enter events, and restart identity confirmation. Runtime
+liveness errors clear stale displayed identities. `observe` continues matching.
+The Web UI displays liveness and distinct rejection states; `/v1/models` and
+`/v1/system` report enabled addons separately from the base model files.
+
 ## 1. Sign in and check readiness
 
 Open `http://SERVER:18097/` for CPU or `http://SERVER:18098/` for CUDA 12. If authentication is enabled, choose **Configure API key**, paste the key supplied by the operator, and select **Use for this tab**. The browser keeps it only in memory; reloading or closing the tab clears it.
 
 Check **Dashboard** or **System** before enrolling data. The service, database, model and provider must be ready. A CUDA deployment must report `CUDAExecutionProvider`; it never silently falls back to CPU.
+
+The Dashboard always shows **Liveness enabled** or **Liveness disabled** beneath the model name. System displays the installed model, current runtime state and any pending restart separately.
 
 ## 2. Create a Collection
 
@@ -70,7 +214,7 @@ A Collection is pinned to the active model identity, digest, embedding dimension
 
 ## 3. Register a Person
 
-Open **People**, select a Collection, then **Register person**. Provide an optional stable person ID, name, external ID and JSON metadata. Drop one or more JPEG, PNG, or WebP images.
+Open **People**, select a Collection, then **Register person**. Provide an optional stable person ID, name, external ID and JSON metadata. Drop one or more JPEG, PNG, WebP, or BMP images.
 
 Enrollment review modes are:
 
@@ -85,17 +229,25 @@ stored—not the original upload or the aligned recognition input.
 
 Trusted systems may send a precomputed, L2-normalized embedding using `external_trusted`. An image is still required for detection and quality review, but the server does not re-extract the embedding. The embedding contract must exactly match the Collection.
 
+Liveness is skipped by default for new Persons and added FaceSamples (`liveness_on_registration=false`). When the administrator enables it, `normal` rejects fake or unsuitable input; `observe` keeps the result and continues. Enrollment quality review follows the selected `review_mode`. Rejection lists show the actual `reason` and any liveness result separately.
+
 ## 4. Detect and compare
 
 Use **Detect** to upload one image and inspect boxes, five landmarks, confidence and heuristic quality. No face is a successful result with an empty list.
 
 Use **Compare** to upload source and target images. Select the system or a Collection detection profile; its strategy chooses one usable face in each image. The result contains raw cosine `similarity`, the selected `threshold`, and `matched`. Similarity is not a probability. If either image has no usable face, the API returns `422 face_not_found`.
 
+With liveness enabled, each evaluated face includes `liveness.status`, `liveness.is_live` and `liveness.live_score`. Detect returns HTTP 200 for fake and `input_rejected` results as well; it does not extract recognition features. `input_rejected` means the image cannot be evaluated, for example because the face is too close to an edge; provide an image with more space around the face. An omitted `liveness` means it was not evaluated.
+
+Liveness runs before recognition on the sides selected by `liveness_compare_scope` (`both`, `source` or `target`). In `normal`, a blocked side returns HTTP 422 `liveness_fake` or `liveness_input_rejected`, with `error.details.liveness` and `error.details.side`; there is no similarity result. `observe` continues the comparison and includes the liveness result on each evaluated face.
+
 ## 5. Search a Collection
 
 Open **Search**, select the Collection, upload a query image, set a result limit and optionally override the threshold. The Collection detection profile chooses the query face. Results are sorted by similarity; a Person's score is the maximum score among that Person's FaceSamples. No match is a successful empty list.
 
 Newly accepted FaceSamples are committed to SQLite and then added to the in-memory index before the successful response is returned. Deletions update both stores. On restart the index is rebuilt from SQLite, which remains authoritative.
+
+With liveness enabled in `normal`, fake or unsuitable query input returns HTTP 422 `liveness_fake` or `liveness_input_rejected` and `error.details.liveness`; the search does not run. This differs from a successful empty match list. `observe` continues searching and returns liveness on the query face.
 
 ## 6. RTSP camera monitoring
 
@@ -123,6 +275,8 @@ enter/exit/error/recovery events exist only in a bounded in-memory ring and are
 lost on restart. Use HTTPS when the UI/API crosses an untrusted network and
 restrict Monitor administration to trusted operators.
 
+With liveness enabled in `normal`, blocked faces show `status: liveness_blocked` and their separate liveness result. They increment `liveness_blocked_faces`, not `unknown_faces`, and do not trigger person/unknown entry events. `observe` continues recognition. Input rejection is displayed separately from a fake result.
+
 ## 7. Update and delete data
 
 Collections and Persons can be edited from their lists. Deleting a FaceSample removes its embedding and optional crop. Deleting a non-empty Collection requires explicit force confirmation. Back up `/data` before bulk or destructive maintenance.
@@ -142,7 +296,7 @@ matches = client.search("employees", "query.jpg", limit=5)
 
 ## 9. Data, backup and security
 
-- Persist `/data`; mount `/models` read-only.
+- Persist `/data`; keep base models read-only and grant Web management write access only to addons and the configuration directory.
 - Back up the SQLite database and configured crop storage together while writes are stopped or by using a SQLite-safe snapshot method.
 - API keys are stored as hashes. Supplying a different `INSIGHTFACE_API_KEY` on a later start intentionally rotates the active key for that data volume.
 - Do not log images, embeddings or keys. Keep broad CORS disabled unless required.
@@ -177,8 +331,9 @@ Supported public packages are `buffalo_l` (`det_10g.onnx` +
 (`det_10g_wo.onnx` + `w600k_r50.onnx`). Server installs only detection and
 recognition from each package; a Raccoon verifier is not installed or loaded.
 Installation creates
-`manifest.json` and signed `MODEL.LICENSE`. Without `--accept-license`, the
-tool prints the terms and exits without downloading. `models verify` validates
+`manifest.json` and signed `MODEL.LICENSE`. Without `--accept-license`, an
+interactive terminal asks for confirmation before downloading; noninteractive
+commands require the flag and otherwise exit without downloading. `models verify` validates
 the package identity, signed license, validity dates, and current authorization;
 unlike runtime display fallback, this explicit verification command requires a
 signed license file.
@@ -192,13 +347,19 @@ it is a compliance credential, not DRM or a model-file checksum.
 
 ## 12. Startup-only configuration
 
-The common startup file is `server/config/server.toml`. Compose mounts it
-read-only at `/etc/insightface/server.toml`; edit it before startup and restart
-the container to apply a change. Defaults are:
+The common startup file is `server/config/server.toml`. Compose mounts its containing directory writable at `/etc/insightface`; the file is `/etc/insightface/server.toml`. Restart the container to apply a saved change. Defaults are:
 
 ```toml
 [inference]
 max_concurrency = "auto" # CPU 4, CUDA 8
+addons = []
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = []
 
 [detection]
 input_sizes = [[96, 96], [512, 512]]
@@ -213,7 +374,8 @@ disabled = false
 
 Dynamic SCRFD runs every configured resolution, maps candidates back to the
 source image, merges all candidates, and performs one global NMS. Settings are
-read once; there is no runtime settings API. New Collections copy the system
+read once for inference. The Web liveness action saves next-start settings; it
+does not hot-reload the running process. New Collections copy the system
 detection profile, after which their profile can be updated independently for
 the next request. Stateless Detect and Embeddings use the system profile;
 Compare can use the system profile or a selected Collection; enrollment and
@@ -277,7 +439,7 @@ make -C server build-cuda12
 Then add `--pull never` to Compose model/install and `up` commands to use the
 local image. Builds use pinned base images and locked dependencies, but require
 network access for those inputs. The public tags are
-`0.2.0-cpu`/`0.2.0-cuda12`; moving `cpu`/`cuda12` tags point to the latest
+`0.3.0-cpu`/`0.3.0-cuda12`; moving `cpu`/`cuda12` tags point to the latest
 stable variant, and there is deliberately no `latest` tag.
 
 Before upgrading, stop writes and create a SQLite-safe snapshot of `/data`
@@ -286,8 +448,83 @@ container against a copy first, check migrations and `/v1/health`, then verify
 the model contract and a known search. Use `docker compose down` without `-v`;
 `docker compose down -v` deletes the named data volume.
 
+### Upgrade to 0.3.0
+
+This version adds `raccoon_s` and `raccoon_l`, support for their model manifests,
+optional liveness, Web addon installation, and BMP image input. Server uses the
+Raccoon detection and recognition models; the package's verifier is not loaded.
+
+**1.** Update the Server source and Compose files to the 0.3.0 version while keeping
+your `server/config/server.toml` settings and deployment overrides. Preserve
+the existing model path, `/data` volume name, crop storage, ports, and API key
+settings. For custom Compose files, update both the `server` and `models`
+service images to `0.3.0-cpu` or `0.3.0-cuda12` as appropriate. Apply the same
+Compose files, overrides, and project name you normally use to the commands
+below.
+
+**2.** Pull the new images and recreate the Server container. From the repository
+root, choose the commands for your existing deployment:
+
+CPU:
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml pull server models
+docker compose -f server/deploy/compose.cpu.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18097/v1/health
+```
+
+CUDA:
+
+```bash
+docker compose -f server/deploy/compose.cuda12.yml pull server models
+docker compose -f server/deploy/compose.cuda12.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18098/v1/health
+```
+
+If you build locally, build the 0.3.0 images first and use
+`up -d --no-build --pull never --force-recreate server` instead of pulling.
+`docker compose restart` alone does not switch to a new image or apply mount
+changes.
+
+**3.** Startup applies database migrations automatically. Wait for `/v1/health` to
+report `ready` and version `0.3.0`, then check **System** for the expected
+model and execution provider. Confirm that your existing Collections and
+people are present and try a known search. Keeping the same model and
+embedding contract preserves samples, embeddings, and Collection contract
+IDs; no re-enrollment is needed.
+
+**Liveness is optional after upgrading.** The shipped configuration and older
+configurations without addon keys both leave it disabled, so upgrading alone
+requires no liveness download. Server startup never downloads models. To enable
+it, follow [the liveness setup](#optional-liveness-addon): prepare the
+[Web download mounts and permissions](#web-download-permissions), choose
+**System → Liveness → Download and enable after restart**, wait for successful
+installation and configuration saving, then manually restart Server. The
+defaults are `normal`, threshold `0.8`, and `liveness_on_registration=false`.
+The model stays at `<models_dir>/addons/liveness.onnx`.
+
+**Using Raccoon is a separate model change.** Upgrading Server keeps your
+current model package. To adopt `raccoon_s` or `raccoon_l`, install the selected
+package in a separate model directory using the
+[model installation instructions](#11-models-and-model-licenses), then configure
+a deployment to use it. Collections must match the new model's embedding
+contract; create compatible Collections and re-enroll, or perform a separate
+data migration. The Web UI does not switch base model packages.
+
+**API and SDK compatibility:** Model, Collection, and FaceSample results no
+longer include `model_version`; model identity uses `model_id`, and Collection
+compatibility uses `embedding_contract_id`. Update clients that require the
+removed field and use SDK `0.3.0` when upgrading the supplied Python client.
+When liveness is evaluated, `liveness` contains only `status`, `is_live`, and
+`live_score`; it is omitted when not evaluated. See the
+[liveness response and error rules](#detection-recognition-and-errors) before
+enabling it for recognition requests.
+
 For network exposure, terminate HTTPS at a trusted reverse proxy, allow only
 required origins rather than broad CORS, apply edge rate/body/time limits, and
 protect the data volume and backups as biometric data. The Server has one
 undifferentiated API key in phase one and is not a multi-tenant authorization
 system.
+
+
+Model packages are identified by name, such as `buffalo_l`, with no separate `model_version`. Server upgrades that keep the same recognition model and embedding contract preserve existing Collection contract IDs, samples and embeddings; re-enrollment is unnecessary. Changing recognition models is a separate migration, and an incompatible Collection returns `collection_model_mismatch` for enrollment and search. New Collections use an embedding contract without a model-version field.

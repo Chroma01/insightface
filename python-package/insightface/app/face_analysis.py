@@ -8,12 +8,16 @@
 from __future__ import division
 
 import glob
+import logging
 import os.path as osp
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import onnxruntime
 
+from ..addons import ADDON_CATALOG, Liveness, ensure_addon
+from ..addons.liveness import DEFAULT_THRESHOLD, validate_threshold
 from ..model_zoo import model_zoo
 from ..model_zoo.onnxruntime_utils import get_default_providers
 from ..model_zoo.package_manifest import (
@@ -25,6 +29,8 @@ from ..utils import DEFAULT_MP_NAME, ensure_available
 from .common import Face
 
 __all__ = ["FaceAnalysis"]
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DET_SIZES = [(128, 128), (640, 640)]
 
@@ -65,8 +71,26 @@ class FaceAnalysis:
         name=DEFAULT_MP_NAME,
         root="~/.insightface",
         allowed_modules=None,
+        *,
+        addons=None,
+        liveness_mode="normal",
+        liveness_threshold=DEFAULT_THRESHOLD,
         **kwargs,
     ):
+        if addons is None:
+            addons = ()
+        if isinstance(addons, str) or not isinstance(addons, Sequence):
+            raise TypeError("addons must be a sequence of addon names, e.g. ['liveness']")
+        for addon in addons:
+            if not isinstance(addon, str) or addon not in ADDON_CATALOG:
+                raise ValueError(f"Unknown addon {addon!r}; available: {list(ADDON_CATALOG)}")
+        if len(set(addons)) != len(addons):
+            raise ValueError("addons must not contain duplicate names")
+        if liveness_mode not in ("normal", "observe"):
+            raise ValueError("liveness_mode must be normal or observe")
+        self.liveness_mode = liveness_mode
+        self.liveness_threshold = validate_threshold(liveness_threshold)
+        self.addons = {}
         onnxruntime.set_default_logger_severity(3)
         if kwargs.get("providers") is None:
             kwargs["providers"] = get_default_providers()
@@ -74,8 +98,8 @@ class FaceAnalysis:
         if providers and _provider_name(providers[0]) == "CoreMLExecutionProvider":
             # CoreML cannot safely construct the dynamic SCRFD Session with
             # the default ALL compute-unit policy on some ORT/macOS versions.
-            # Keep the public constructor unchanged and pass an internal fixed
-            # main resolution to both manifest and legacy model loading.
+            # Pass an internal fixed main resolution to both manifest and
+            # legacy model loading.
             if kwargs.get("static_shape_sessions", True) is not False:
                 kwargs.setdefault(
                     "_coreml_detector_input_size",
@@ -102,6 +126,7 @@ class FaceAnalysis:
             )
             assert "detection" in self.models
             self.det_model = self.models["detection"]
+            self._load_addons(addons, root, kwargs)
             return
 
         onnx_files = glob.glob(osp.join(self.model_dir, "*.onnx"))
@@ -109,15 +134,15 @@ class FaceAnalysis:
         for onnx_file in onnx_files:
             model = model_zoo.get_model(onnx_file, **kwargs)
             if model is None:
-                print("model not recognized:", onnx_file)
+                logger.debug("model not recognized: %s", onnx_file)
             elif allowed_modules is not None and model.taskname not in allowed_modules:
-                print("model ignore:", onnx_file, model.taskname)
+                logger.debug("model ignore: %s %s", onnx_file, model.taskname)
                 del model
             elif model.taskname not in self.models and (
                 allowed_modules is None or model.taskname in allowed_modules
             ):
-                print(
-                    "find model:",
+                logger.debug(
+                    "find model: %s %s %s %s %s",
                     onnx_file,
                     model.taskname,
                     model.input_shape,
@@ -126,10 +151,25 @@ class FaceAnalysis:
                 )
                 self.models[model.taskname] = model
             else:
-                print("duplicated model task type, ignore:", onnx_file, model.taskname)
+                logger.debug(
+                    "duplicated model task type, ignore: %s %s",
+                    onnx_file,
+                    model.taskname,
+                )
                 del model
         assert "detection" in self.models
         self.det_model = self.models["detection"]
+        self._load_addons(addons, root, kwargs)
+
+    def _load_addons(self, addons, root, kwargs):
+        if "liveness" in addons:
+            self.addons["liveness"] = Liveness(
+                ensure_addon("liveness", root=root),
+                threshold=self.liveness_threshold,
+                providers=kwargs.get("providers"),
+                provider_options=kwargs.get("provider_options"),
+                sess_options=kwargs.get("sess_options"),
+            )
 
     def _load_manifest_package(
         self,
@@ -163,8 +203,8 @@ class FaceAnalysis:
                 )
             if task in self.models:
                 raise RuntimeError(f"duplicated manifest model task: {task}")
-            print(
-                "find manifest model:",
+            logger.debug(
+                "find manifest model: %s %s %s %s %s",
                 descriptor.path,
                 model.taskname,
                 getattr(model, "input_shape", None),
@@ -177,15 +217,26 @@ class FaceAnalysis:
         self.det_thresh = det_thresh
         if _is_auto_det_size(det_size):
             det_size = list(DEFAULT_DET_SIZES)
-        print("set det-size:", det_size)
+        logger.debug("set det-size: %s", det_size)
         self.det_size = det_size
         for taskname, model in self.models.items():
             if taskname == "detection":
                 model.prepare(ctx_id, input_size=det_size, det_thresh=det_thresh)
             else:
                 model.prepare(ctx_id)
+        for model in self.addons.values():
+            model.prepare(ctx_id)
 
     def get(self, img, max_num=0, det_metric="default"):
+        """Detect faces and run enabled addons before recognition.
+
+        Liveness returns only status, is_live and live_score on each Face.
+        In normal mode, rejected inputs and fake faces retain their detection
+        result but do not receive an embedding. Other selected tasks still run.
+        Without the addon, the liveness field is absent and recognition runs
+        as before, regardless of the selected liveness mode.
+        """
+        liveness = self.addons.get("liveness")
         bboxes, kpss = self.det_model.detect(img, max_num=max_num, metric=det_metric)
         if bboxes.shape[0] == 0:
             return []
@@ -197,8 +248,17 @@ class FaceAnalysis:
             if kpss is not None:
                 kps = kpss[i]
             face = Face(bbox=bbox, kps=kps, det_score=det_score)
+            if liveness is not None:
+                liveness.get(img, face)
             for taskname, model in self.models.items():
                 if taskname == "detection":
+                    continue
+                if (
+                    taskname == "recognition"
+                    and liveness is not None
+                    and self.liveness_mode == "normal"
+                    and face.liveness.is_live is not True
+                ):
                     continue
                 model.get(img, face)
             ret.append(face)

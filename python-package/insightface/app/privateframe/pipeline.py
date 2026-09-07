@@ -6,7 +6,6 @@ import gc
 import json
 import math
 import time
-import unicodedata
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
@@ -14,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from .artifact_render import RenderTarget, render_artifacts
+from .artifact_render import RenderTarget, render_artifacts, _identity_should_blur
 from .artifacts import (
     git_version,
     sha256_file,
@@ -35,6 +34,7 @@ from .models import (
     packaged_face_recognizer,
 )
 from .streaming import run_stream
+from .recognition import resolve_unknown_action
 from .video import paths_are_distinct
 
 RESULT_FILENAME = "result.privateframe.json"
@@ -233,28 +233,21 @@ def _export_observations(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         if bool(item.get("reduced_assurance", False)):
             exported["reduced_assurance"] = True
-        if bool(item.get("force_blur", False)) or (
+        if bool(item.get("identity_unconfirmed", False)) or (
             item.get("endpoint_repair_reason")
             == "interpolate_unanchored_endpoint"
         ):
-            # The public renderer needs the privacy decision, not the internal
-            # endpoint-repair mechanism that led to it.
-            exported["force_blur"] = True
+            # Geometry review cannot establish continuity of reference matching.
+            exported["identity_unconfirmed"] = True
         output.append(exported)
     return output
 
 
 def _export_recognition(value: Any) -> dict[str, Any]:
-    """Keep only identity fields that can affect a later render."""
+    """Export photo acceptance and reference-match decisions for later renders."""
 
     if not isinstance(value, dict) or value.get("enabled") is not True:
         return {"enabled": False}
-    raw_people = value.get("gallery_persons", [])
-    gallery_people = (
-        [str(person) for person in raw_people]
-        if isinstance(raw_people, list)
-        else []
-    )
     raw_tracks = value.get("tracks", {})
     tracks: dict[str, dict[str, Any]] = {}
     if isinstance(raw_tracks, dict):
@@ -263,15 +256,13 @@ def _export_recognition(value: Any) -> dict[str, Any]:
                 continue
             tracks[str(track_id)] = {
                 "status": str(record.get("status", "UNKNOWN")),
-                "person_id": (
-                    str(record["person_id"])
-                    if record.get("person_id") is not None
-                    else None
-                ),
+                "matched_reference_files": list(record.get("matched_reference_files", [])),
+                "similarity": record.get("similarity"),
+                "reason": str(record.get("reason", "")),
             }
     return {
         "enabled": True,
-        "gallery_persons": gallery_people,
+        "references": deepcopy(value.get("references", {})),
         "tracks": tracks,
     }
 
@@ -375,7 +366,7 @@ def validate_result_document(value: Any) -> dict[str, Any]:
         source = observation.get("source")
         if not isinstance(source, str) or not source:
             raise TypeError(f"{prefix}.source must be a non-empty string")
-        for flag in ("reduced_assurance", "force_blur"):
+        for flag in ("reduced_assurance", "identity_unconfirmed"):
             if flag in observation and not isinstance(observation[flag], bool):
                 raise TypeError(f"{prefix}.{flag} must be boolean")
         box = observation.get("box")
@@ -458,6 +449,9 @@ def _render_settings(
     validate_redaction(settings["redaction"])
     validate_video_output(settings["video_output"])
     _validate_recognition_render_policy(settings, result.get("recognition"))
+    if settings["recognition_policy"]["mode"] != "all":
+        for observation in result.get("observations", []):
+            _identity_should_blur(observation, settings["recognition_policy"], result["recognition"])
     return settings, sha256_json(settings)
 
 
@@ -469,7 +463,7 @@ def _validate_recognition_render_policy(
         raise TypeError(
             "render.recognition_policy must be a mapping in the analysis result"
         )
-    unknown = set(policy) - {"mode", "target_persons"}
+    unknown = set(policy) - {"mode", "unknown_action"}
     if unknown:
         raise ValueError(
             "unknown render recognition policy settings: " + ", ".join(sorted(unknown))
@@ -480,38 +474,24 @@ def _validate_recognition_render_policy(
             "render.recognition_policy.mode must be all, blur_only, or exempt"
         )
     policy["mode"] = mode
+    policy["unknown_action"] = resolve_unknown_action(mode, policy.get("unknown_action", "auto"))
     if mode == "all":
-        policy["target_persons"] = []
         return
     if not isinstance(recognition, dict) or recognition.get("enabled") is not True:
         raise ValueError(
             "selective rendering requires a result produced with recognition enabled"
         )
-    raw_targets = policy.get("target_persons")
-    if not isinstance(raw_targets, list) or not raw_targets:
-        raise ValueError(
-            "render.recognition_policy.target_persons must be a non-empty list"
-        )
-    targets: list[str] = []
-    for value in raw_targets:
-        if not isinstance(value, str) or not value.strip():
-            raise TypeError("render recognition target names must be non-empty strings")
-        targets.append(unicodedata.normalize("NFC", value.strip()))
-    if len(set(targets)) != len(targets):
-        raise ValueError("render recognition target names must be unique")
-    gallery_people = recognition.get("gallery_persons")
-    if gallery_people is None and isinstance(recognition.get("gallery"), dict):
-        gallery_people = recognition["gallery"].get("persons")
-    if not isinstance(gallery_people, list):
-        raise TypeError("recognition result does not declare gallery persons")
-    known = {str(value) for value in gallery_people}
-    missing = sorted(set(targets) - known)
-    if missing:
-        raise ValueError(
-            "render recognition targets are absent from the analyzed gallery: "
-            + ", ".join(missing)
-        )
-    policy["target_persons"] = targets
+    references = recognition.get("references")
+    files = references.get("files") if isinstance(references, dict) else None
+    if not isinstance(files, list) or not files:
+        raise ValueError("selective rendering requires usable reference photos in the analysis result")
+    if any(not isinstance(item, dict) or not isinstance(item.get("file"), str) or not item["file"] for item in files):
+        raise ValueError("recognition reference photo records must name each accepted file")
+    tracks = recognition.get("tracks")
+    if not isinstance(tracks, dict):
+        raise ValueError("selective rendering requires reference-match track records")
+    for track_id in tracks:
+        _identity_should_blur({"track_id": track_id}, policy, recognition)
 
 
 def _remove_runtime_cache(workdir: Path) -> None:
@@ -583,7 +563,7 @@ def _analyze_streaming_pipeline_impl(
         is_cancelled=is_cancelled,
     )
     _raise_if_cancelled(is_cancelled)
-    # ``run_stream`` constructs the detector, recognizer and gallery before
+    # ``run_stream`` constructs the detector, recognizer and references before
     # entering StreamingEngine.run(). Measure the whole analysis phase here so
     # selective setup cannot be mislabeled as artifact-writing time.
     analysis_seconds = time.perf_counter() - started
@@ -737,18 +717,13 @@ def _analyze_streaming_pipeline_impl(
         if isinstance(audio_defaults, dict):
             audio_defaults.pop("debug", None)
     recognition_settings = config.get(
-        "recognition", {"mode": "all", "target_persons": []}
+        "recognition", {"mode": "all", "unknown_action": "auto"}
     )
     recognition_mode = str(recognition_settings.get("mode", "all"))
     render_defaults["recognition_policy"] = {
         "mode": recognition_mode,
-        # Selective-only settings are deliberately not inspected in all mode.
-        # This preserves the zero-recognition contract even for stale/null
-        # values left in a user override.
-        "target_persons": (
-            []
-            if recognition_mode == "all"
-            else list(recognition_settings["target_persons"])
+        "unknown_action": resolve_unknown_action(
+            recognition_mode, recognition_settings.get("unknown_action", "auto")
         ),
     }
     final_result = {
@@ -811,6 +786,7 @@ def _analyze_streaming_pipeline_impl(
         "scene_cuts": scene_cuts,
         "detector_sampling": result["detector_sampling"],
         "local_review_sampling": result["local_review_sampling"],
+        "endpoint_conflicts": result.get("endpoint_conflicts", {"enabled": False}),
         "cache": result["cache"],
         "timings": {
             "analysis_seconds": analysis_seconds,
@@ -959,11 +935,13 @@ def _analyze_streaming_pipeline_impl(
                 "timings": deepcopy(summary["timings"]),
                 "detector_sampling": result["detector_sampling"],
                 "local_review_sampling": result["local_review_sampling"],
+                "endpoint_conflicts": result.get("endpoint_conflicts", {"enabled": False}),
                 "cache": result["cache"],
             },
             "effective_config": config,
             "recognition_diagnostics": recognition_diagnostics,
             "observation_diagnostics": result["review"]["observations"],
+            "endpoint_conflict_decisions": result.get("endpoint_conflict_decisions", []),
         }
         write_json(development_destination, development_report)
         write_json(work / "summary.streaming-onnx.json", summary)

@@ -8,7 +8,7 @@
 directa, SQLite e inferencia local por CPU o GPU NVIDIA en un solo contenedor.**
 
 ```text
-subir una imagen -> detectar, comparar, registrar o buscar
+subir una imagen -> detectar, realizar una prueba de vida, comparar, registrar o buscar
 ```
 
 > **Licencia del modelo:** los modelos públicos preentrenados de InsightFace
@@ -22,16 +22,24 @@ Imágenes, embeddings, modelos e índices pueden permanecer dentro de su red. No
 es un reemplazo compatible con AWS y no implementa SigV4, IAM, Region ni
 semántica de recursos AWS.
 
-Versión actual: **0.2.0**, Linux x86_64.
+Versión actual: **0.3.0**, Linux x86_64.
 
 | Entorno | Imagen |
 | --- | --- |
-| CPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cpu` |
-| GPU NVIDIA | `ghcr.io/deepinsight/insightface-server:0.2.0-cuda12` |
+| CPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cpu` |
+| GPU NVIDIA | `ghcr.io/deepinsight/insightface-server:0.3.0-cuda12` |
 
 Las etiquetas móviles `cpu` y `cuda12` identifican la última versión estable de
 cada familia. No se usa una etiqueta ambigua `latest`. Consulte
 [Maintainer Guide — English](docs/maintainer-guide.md) para la política.
+
+**Novedades y actualización a 0.3.0:** Esta versión añade `raccoon_s` y
+`raccoon_l` con soporte para sus manifiestos, detección de vida opcional con
+instalación del modelo desde la Web UI y entrada de imágenes BMP. Los
+despliegues existentes pueden conservar los montajes de modelos, configuración
+y datos; la detección de vida sigue desactivada hasta que se habilite. Los
+resultados de la API y del SDK ya no incluyen `model_version`. Consulte los
+[pasos de actualización](docs/user-guide.es.md#actualizar-a-030).
 
 ![Panel de InsightFace Server en inglés](docs/images/customer/dashboard-en.jpg)
 
@@ -48,15 +56,17 @@ cada familia. No se usa una etiqueta ambigua `latest`. Consulte
 - Búsqueda GPU exacta con almacenamiento vectorial FP32, FP16, BF16 e INT8.
 - Web UI multilingüe para Panel, Collections, Personas, Detect, Compare,
   Search, monitorización RTSP, System y Help.
-- 29 operaciones REST snake_case bajo `/v1`, incluido `/v1/embeddings`
+- 31 operaciones REST snake_case bajo `/v1`, incluido `/v1/embeddings`
   protegido, más un SDK Python ligero y tipado.
 - Monitors RTSP persistentes del servidor, eventos acotados en memoria,
   múltiples clientes y `preview.mjpeg` opcional; cerrar el navegador no detiene
   el monitor.
 - SQLite como fuente persistente, índices exactos reconstruibles en memoria,
-  `/models` de solo lectura, `/data` persistente, migraciones, health checks y
+  modelos base de solo lectura, directorios de addon y configuración escribibles, `/data` persistente, migraciones, health checks y
   validación CUDA estricta sin fallback silencioso a CPU.
-- Entrada JPEG, PNG y WebP; los originales no se conservan por defecto.
+- Entrada JPEG, PNG, WebP y BMP; los originales no se conservan por defecto.
+
+La prueba de vida está desactivada por defecto: `inference.addons = []` y `addons.auto_download = []` en `server/config/server.toml`. **Sistema → Detección de vida** descarga y verifica el modelo y guarda la activación para el próximo reinicio manual; reutiliza una copia verificada. El inicio no descarga modelos. Si falta un modelo activado, el inicio se detiene e indica cómo instalarlo. Cada rostro evaluado devuelve solo `status`, `is_live` y `live_score`. El modo predeterminado es `normal`; el registro omite la prueba por defecto (`liveness_on_registration = false`). Consulte [configuración, permisos Web y actualización](docs/user-guide.es.md#addon-opcional-de-prueba-de-vida).
 
 ### Rendimiento de búsqueda GPU en RTX 5090
 
@@ -257,7 +267,7 @@ legal. La operación y seguridad están en la
 
 No incluye compatibilidad AWS/CompreFace, CUDA 11, Jetson, ARM64, Windows
 Container, TensorRT, Kubernetes, Workers distribuidos, eventos Monitor
-persistentes o grabación/NVR, liveness, deepfake ni análisis demográfico.
+persistentes o grabación/NVR, deepfake ni análisis demográfico.
 
 ## Documentación
 

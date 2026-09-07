@@ -71,17 +71,11 @@ def test_list_reports_every_supported_package(
     assert models_cli.main(["--models-dir", str(tmp_path), "list"]) == 0
     assert calls == 1
     output = capsys.readouterr().out
-    expected_releases = {
-        "buffalo_l": "v0.7",
-        "buffalo_m": "v0.7",
-        "buffalo_s": "v0.7",
-        "buffalo_sc": "v0.7",
-        "antelopev2": "v0.7",
-        "raccoon_s": "model-zoo",
-        "raccoon_l": "model-zoo",
-    }
-    for name, release in expected_releases.items():
-        assert f"{name}\t{release}\tnot installed" in output
+    assert output.splitlines()[0] == "NAME\tSTATUS"
+    for name in models_cli.PACKAGES:
+        assert f"{name}\tnot installed" in output
+    assert "v0.7" not in output
+
 
 
 @pytest.mark.parametrize(

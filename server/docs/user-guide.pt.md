@@ -4,6 +4,12 @@
 
 Este guia conduz um novo utilizador desde uma pasta vazia até à primeira pesquisa bem-sucedida. As mesmas funções estão disponíveis na Web UI, em `/v1` e no SDK Python. Consulte todos os campos e resultados HTTP no [guia da API](api.pt.md).
 
+Os modelos são identificados por `model_id`; as respostas não incluem um `model_version` separado.
+
+Atualizar o Server com o mesmo modelo de reconhecimento e contrato preserva `embedding_contract_id`, amostras e embeddings das Collections existentes. Trocar de modelo é uma migração separada; um contrato incompatível causa `collection_model_mismatch` no registo e na pesquisa.
+
+Para usar a prova de vida, consulte [configuração, instalação e resultados](#addon-opcional-de-prova-de-vida). Cada operação explica também os seus efeitos.
+
 ## Do zero à primeira pesquisa
 
 CPU requer Linux x86_64, Docker Engine e Docker Compose. CUDA requer ainda um Driver NVIDIA compatível e NVIDIA Container Toolkit; não instale CUDA, cuDNN, ORT, Python ou OpenCV no anfitrião.
@@ -20,11 +26,88 @@ Para GPU use `compose.cuda12.yml` e a porta `18098`. O instalador mostra a licen
 
 O Compose fornecido desativa a autenticação por predefinição para avaliação isolada. Antes de expor o serviço, defina `INSIGHTFACE_AUTH_ENABLED=true` e uma `INSIGHTFACE_API_KEY` longa. Verifique depois o Dashboard, crie uma Collection, registe uma Person e pesquise com outra imagem. Pare com `docker compose ... down` sem `-v` para preservar o volume.
 
+## Addon opcional de prova de vida
+
+A prova de vida está desativada por predefinição em `server/config/server.toml`: `inference.addons` e `addons.auto_download` são `[]`. Configurações antigas sem estas chaves continuam desativadas. Este exemplo permite ativar manualmente; instale o modelo antes de reiniciar.
+
+Em **Sistema → Detecção de vivacidade**, selecione **Transferir e ativar após reiniciar**. Após verificar SHA-256, guarda-se `["liveness"]` nas duas listas, preservando as outras opções. Um ficheiro verificado é reutilizado. **Reinicie manualmente o Server** para aplicar. Os erros permitem repetir; uma descarga falhada não ativa a prova de vida.
+
+Sistema distingue instalação verificada (`installed`), execução atual (`enabled`), configuração guardada para o próximo arranque (`configured_enabled`) e necessidade de reinício (`restart_required`). Descarregar ou guardar não altera a inferência em curso. Para desativar, guarde `inference.addons=[]` e `addons.auto_download=[]` no mesmo ficheiro e reinicie manualmente. A ação Web não altera a definição de registo; o valor predefinido continua a ser `liveness_on_registration=false`.
+
+```toml
+[inference]
+addons = ["liveness"]
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = ["liveness"]
+```
+
+### Instalação do modelo e arranque
+
+`inference.addons` controla a execução e `addons.auto_download` a descarga adicional na instalação do pacote base. Com `["liveness"]`, o addon é instalado mesmo com o pacote base em cache. Não há descarga no arranque. Instalador e Server leem o mesmo ficheiro.
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+Um modelo ativado ausente impede o arranque com `addon_model_missing`; um inválido produz `addon_model_invalid`. O addon não é desativado silenciosamente.
+
+Atualizar apenas o código com a prova de vida desativada mantém as Collections
+e os embeddings existentes utilizáveis. As migrações da base de dados preservam
+as amostras e os embeddings; a prova de vida não altera o resumo criptográfico
+do modelo de reconhecimento nem o `embedding_contract_id`.
+
+### Montagens e permissões para descargas Web
+
+O Compose mantém `/models` só de leitura e monta apenas `server/.models/addons` com escrita em `/models/addons`. Todo o diretório `server/config` é montado com escrita em `/etc/insightface` para guardar `server.toml` de forma atómica. Em Linux, prepare estes caminhos uma vez na raiz do repositório para o utilizador Server da imagem fornecida (UID/GID 10001):
+
+```bash
+mkdir -p server/.models/addons
+sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
+sudo chmod g+rws server/.models/addons server/config
+sudo chmod g+rw server/config/server.toml
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+Em instalações personalizadas use os caminhos reais; para CUDA use `compose.cuda12.yml`. As montagens antigas só de leitura continuam a funcionar com a prova de vida desativada. A ação Web explica a indisponibilidade; pode também instalar pela CLI e editar a configuração manualmente. Depois de guardar na Web, aplique com `docker compose -f server/deploy/compose.cpu.yml restart server`. Alterar montagens ou variáveis de proxy exige recriar o contentor.
+
+Se precisar de proxy, defina `HTTP_PROXY`, `HTTPS_PROXY` e `NO_PROXY` antes de criar o contentor; o Compose passa-as ao Server e à ferramenta de modelos. Use um endereço LAN acessível a partir do contentor: o seu `127.0.0.1` não é o Mac. A ação usa a autenticação API Key existente; sem autenticação, qualquer cliente com acesso à API também a pode executar. Só descarrega o modelo de prova de vida publicado e fixado, sem URLs arbitrários nem troca do pacote de modelo base.
+
+### Resultados da prova de vida
+
+| Resultado | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| Prova aprovada | `ok` | `true` | `[0, 1]` |
+| Não vivo | `ok` | `false` | `[0, 1]` |
+| Entrada rejeitada | `input_rejected` | `null` | `null` |
+
+`normal` reconhece apenas rostos aprovados; `observe` registra o resultado e continua o reconhecimento. Sem avaliação, `liveness` é omitido. O objeto contém apenas `status`, `is_live` e `live_score`: aprovado/fake usa `status: ok`, booleano e pontuação; entrada rejeitada usa `status: input_rejected` e dois valores `null`.
+
+Detect retorna HTTP 200 mesmo para resultados negativos. Em `normal`, embeddings, comparação e busca retornam HTTP 422 `liveness_fake` ou `liveness_input_rejected` com `error.details.liveness`; comparação acrescenta `details.side`. Falhas retornam HTTP 503 `liveness_unavailable`.
+
+O cadastro de pessoas e a adição de FaceSamples ignoram a prova de vida por padrão: `[inference].liveness_on_registration=false` não executa o modelo e omite `liveness` nas novas amostras. Com `true` e o addon habilitado, aplica-se `normal`/`observe`; rejeições incluem `reason` e `liveness`. A revisão de qualidade por `review_mode` e a validação dos embeddings externos continuam ativas. `review_mode=off` e `external_trusted` não ignoram uma prova de cadastro habilitada. As requisições não podem alterar esta configuração de inicialização. Os resultados já salvos continuam disponíveis.
+
+RTSP distingue `liveness_blocked` de `unknown` e conta `liveness_blocked_faces`. Rostos bloqueados não geram eventos de entrada de pessoas/desconhecidos e reiniciam a confirmação. Falhas de inferência apagam identidades exibidas anteriormente.
+
+`liveness_compare_scope` escolhe `both` (predefinição), `source` ou `target` para `/v1/compare`. A prova passa quando `live_score >= liveness_threshold`.
+
+O modelo é guardado em `server/.models/addons/liveness.onnx` no anfitrião e `/models/addons/liveness.onnx` no contentor. `addons` em `/v1/models` e `/v1/system` apresenta os addons ativos.
+
+[Contrato completo da API](api.pt.md#addon-opcional-de-prova-de-vida).
+
 ## 1. Entrada e estado
 
 Abra `http://SERVIDOR:18097/` para CPU ou `http://SERVIDOR:18098/` para CUDA 12. Se a autenticação estiver ativa, escolha **Configurar chave API**, introduza a chave do operador e use-a neste separador. Fica apenas em memória e desaparece ao atualizar ou fechar.
 
 Em **Painel** ou **Sistema**, confirme que serviço, base de dados, modelos e Provider estão prontos. CUDA deve indicar `CUDAExecutionProvider` e nunca recua silenciosamente para CPU.
+
+O Dashboard mostra sempre a prova de vida ativada ou desativada abaixo do modelo. Sistema distingue instalação, estado atual e reinício pendente.
 
 ## 2. Criar uma Collection
 
@@ -33,13 +116,13 @@ Em **Coleções** → **Nova coleção**, defina ID estável, nome, limiar cosin
 pessoa. Guardar em JPEG um `bounding-box crop` redimensionado para 112×112 está
 desligado por predefinição; não é a entrada alinhada de reconhecimento.
 
-A Collection fica ligada ao ID, versão, digest, dimensão e pré-processamento do modelo. Após mudar o modelo, continua visível, mas registo e pesquisa são recusados quando o contrato não coincide.
+A Collection fica ligada ao ID, digest, dimensão e pré-processamento do modelo. Após mudar o modelo, continua visível, mas registo e pesquisa são recusados quando o contrato não coincide.
 
 O perfil de deteção copia os valores do sistema ao criar a Collection e depois permite alterar tamanhos de entrada, limiares de deteção/NMS e estratégia de um rosto. `largest` prioriza a área; `center_largest` maximiza `área - 2,0 × distância em píxeis ao quadrado entre o centro da caixa e o da imagem`. A confiança de deteção não participa nesta pontuação.
 
 ## 3. Registar uma Person
 
-Em **Pessoas**, selecione a Collection e **Registar pessoa**. Pode indicar ID, nome, ID externo, metadata JSON e várias imagens JPEG, PNG ou WebP.
+Em **Pessoas**, selecione a Collection e **Registar pessoa**. Pode indicar ID, nome, ID externo, metadata JSON e várias imagens JPEG, PNG, WebP ou BMP.
 
 - `off`: usa a estratégia de um rosto da Collection e permite vários rostos;
 - `standard`: exige um rosto utilizável e verifica tamanho, deteção, nitidez, brilho e pose;
@@ -47,11 +130,19 @@ Em **Pessoas**, selecione a Collection e **Registar pessoa**. Pode indicar ID, n
 
 O lote aceita sucesso parcial e explica cada rejeição. Os originais não são guardados. `external_trusted` aceita um embedding normalizado L2; a imagem continua obrigatória para deteção e qualidade, mas o vetor não é extraído novamente.
 
+Criar Person e adicionar FaceSamples ignora a prova de vida por predefinição (`liveness_on_registration=false`). Se ativada, `normal` rejeita fake/entrada inadequada; `observe` guarda o resultado e continua. A revisão de qualidade segue o `review_mode` selecionado. A lista de rejeições mostra o `reason` real e a prova de vida separadamente.
+
 ## 4. Detetar, comparar e pesquisar
 
 **Detetar** mostra caixas, cinco pontos, pontuação e qualidade; sem rostos devolve uma lista vazia válida. **Comparar** usa o perfil do sistema ou da Collection para escolher um rosto por imagem e devolve `similarity` cosine, `threshold` e `matched`. Similaridade não é probabilidade.
 
 Em **Pesquisar**, escolha Collection e imagem. A pontuação da pessoa é a maior similaridade dos seus FaceSamples. Os resultados são decrescentes; sem correspondência é uma lista vazia. Cada amostra é confirmada no SQLite e adicionada ao índice antes da resposta. No reinício, o índice é reconstruído a partir do SQLite.
+
+Cada rosto avaliado inclui `liveness.status`, `liveness.is_live` e `liveness.live_score`. Fake e `input_rejected` também devolvem HTTP 200, sem extrair características de reconhecimento. `input_rejected` significa entrada inadequada, por exemplo um rosto demasiado perto da borda. Sem `liveness`, não houve avaliação.
+
+`liveness_compare_scope` (`both`, `source`, `target`) escolhe os lados avaliados antes do reconhecimento. Em `normal`, a rejeição devolve HTTP 422 `liveness_fake` / `liveness_input_rejected`, `error.details.liveness` e `error.details.side`, sem similaridade. `observe` continua e inclui os resultados nos rostos avaliados.
+
+Com prova de vida em `normal`, fake/consulta inadequada devolve HTTP 422 `liveness_fake` / `liveness_input_rejected` e `error.details.liveness`; a pesquisa não é executada. Isto difere de uma lista vazia de correspondências bem-sucedida. `observe` continua e devolve o resultado no rosto consultado.
 
 ## 5. Monitorização de câmara RTSP
 
@@ -59,9 +150,11 @@ Em **Monitorização de câmaras**, crie um Monitor persistente e configure orig
 
 O Monitor funciona independentemente do navegador e tarefas ativas são restauradas ao reiniciar o servidor. A configuração fica no SQLite e credenciais RTSP encriptadas em `/data`, mas fotogramas e eventos não são guardados. Eventos ficam apenas num buffer de memória limitado. O descodificador mantém o último fotograma e ignora os antigos em vez de os acumular.
 
+Com prova de vida em `normal`, os rostos bloqueados têm `status: liveness_blocked` e um resultado separado. Contam em `liveness_blocked_faces`, não em `unknown_faces`, e não geram eventos de entrada. `observe` continua o reconhecimento. Entrada rejeitada e fake são apresentados separadamente.
+
 ## 6. Dados e segurança
 
-Mantenha `/data` persistente e `/models` só de leitura. Antes de operações em massa, copie SQLite e face crops juntos. As chaves são guardadas como hash; iniciar o mesmo volume com outro `INSIGHTFACE_API_KEY` roda a chave ativa. Não registe imagens, embeddings nem chaves.
+Mantenha `/data` persistente e os modelos base de `/models` só de leitura. A gestão Web escreve apenas em `/models/addons` e no diretório de configuração. Antes de operações em massa, copie SQLite e face crops juntos. As chaves são guardadas como hash; iniciar o mesmo volume com outro `INSIGHTFACE_API_KEY` roda a chave ativa. Não registe imagens, embeddings nem chaves.
 
 O explorador de esquema OpenAPI para programadores está em `/docs`; as instruções práticas da API estão nesta ajuda. Inclua `x-request-id` ao comunicar problemas. `401` indica chave, `409 collection_model_mismatch` contrato do modelo e `422 face_not_found` ausência de rosto utilizável.
 
@@ -80,11 +173,26 @@ docker compose -f server/deploy/compose.cpu.yml \
 São suportados `buffalo_l` (`det_10g.onnx` + `w600k_r50.onnx`), `buffalo_m`,
 `buffalo_s`, `buffalo_sc`, `antelopev2`, `raccoon_s` e `raccoon_l`. A
 instalação cria `manifest.json` e
-`MODEL.LICENSE` assinada. Sem `--accept-license`, a ferramenta mostra os termos
-e termina sem descarregar. Os modelos públicos pré-treinados do InsightFace são
-apenas para investigação não comercial sem licença comercial separada.
+`MODEL.LICENSE` assinada. Sem `--accept-license`, um terminal interativo pede
+confirmação antes de descarregar; em execução não interativa, o parâmetro é
+obrigatório e, sem ele, o comando termina sem descarregar. Os modelos públicos
+pré-treinados do InsightFace são apenas para investigação não comercial sem licença comercial separada.
+
+`raccoon_s` e `raccoon_l` são suportados. O Server instala apenas deteção e reconhecimento de cada pacote; não carrega o verificador Raccoon. O nome identifica o modelo, sem número de versão separado. A ação Web de prova de vida não troca o modelo base. Para outro modelo de reconhecimento, use uma Collection compatível; os embeddings anteriores não passam a representar características do novo modelo.
 
 ## 8. Configuração de arranque e pesquisa
+
+```toml
+[inference]
+addons = []
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = []
+```
 
 `server/config/server.toml` é lido uma vez ao iniciar; alterações requerem
 reinício. Predefinições: `input_sizes=[[96,96],[512,512]]`, limiar de deteção
@@ -121,9 +229,88 @@ make -C server build-cuda12
 ```
 
 Use `--pull never` no Compose para a imagem local. Os tags imutáveis são
-`0.2.0-cpu` e `0.2.0-cuda12`; `cpu` e `cuda12` apontam à última versão estável,
+`0.3.0-cpu` e `0.3.0-cuda12`; `cpu` e `cuda12` apontam à última versão estável,
 sem tag `latest`. Antes de atualizar, pare escritas e faça backup SQLite-safe de
 `/data` e crops. Não use `docker compose down -v`, pois elimina o volume.
+
+### Atualizar para 0.3.0
+
+Esta versão adiciona `raccoon_s` e `raccoon_l`, suporte para os respetivos
+manifestos, prova de vida opcional, instalação de addons pela Web e entrada
+de imagens BMP. O Server usa os modelos de deteção e reconhecimento Raccoon;
+não carrega o verificador incluído no pacote.
+
+**1.** Atualize o código do Server e os ficheiros Compose para a versão 0.3.0,
+mantendo as definições de `server/config/server.toml` e as personalizações
+da instalação. Preserve o caminho dos modelos, o nome do volume `/data`,
+o armazenamento de crops, as portas e as definições da API Key. Em ficheiros
+Compose personalizados, atualize as imagens dos serviços `server` e `models`
+para `0.3.0-cpu` ou `0.3.0-cuda12`, conforme o ambiente. Aplique aos comandos
+seguintes os mesmos ficheiros Compose, sobreposições de configuração e nome
+de projeto que usa normalmente.
+
+**2.** Descarregue as novas imagens e recrie o contentor Server. Na raiz do
+repositório, escolha os comandos da instalação existente:
+
+CPU:
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml pull server models
+docker compose -f server/deploy/compose.cpu.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18097/v1/health
+```
+
+CUDA:
+
+```bash
+docker compose -f server/deploy/compose.cuda12.yml pull server models
+docker compose -f server/deploy/compose.cuda12.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18098/v1/health
+```
+
+Se compilar localmente, compile primeiro as imagens 0.3.0 e use
+`up -d --no-build --pull never --force-recreate server` em vez de descarregar.
+`docker compose restart` por si só não muda para uma nova imagem nem aplica
+alterações às montagens.
+
+**3.** O arranque aplica automaticamente as migrações da base de dados. Aguarde
+que `/v1/health` indique `ready` e a versão `0.3.0`, depois confirme em
+**Sistema** o modelo e o fornecedor de execução esperados. Verifique se as
+Collections e pessoas existentes estão presentes e experimente uma pesquisa
+com resultado conhecido. Manter o mesmo modelo e contrato de embeddings
+preserva as amostras, os embeddings e os identificadores de contrato das
+Collections; não é necessário voltar a registar as pessoas.
+
+**A prova de vida é opcional após a atualização.** A configuração fornecida e
+as configurações antigas sem chaves de addons mantêm-na desativada; atualizar
+o Server, por si só, não exige descarregar o modelo de prova de vida. O arranque
+do Server nunca descarrega modelos. Para a ativar, siga a
+[configuração da prova de vida](#addon-opcional-de-prova-de-vida): prepare as
+[montagens e permissões para descargas Web](#montagens-e-permissões-para-descargas-web),
+escolha **Sistema → Detecção de vivacidade → Transferir e ativar após reiniciar**,
+aguarde a instalação e a gravação da configuração com sucesso e reinicie
+manualmente o Server. As predefinições são `normal`, limiar `0.8` e
+`liveness_on_registration=false`. O modelo permanece em
+`<models_dir>/addons/liveness.onnx`.
+
+**Adotar Raccoon é uma mudança de modelo separada.** Atualizar o Server mantém
+o pacote de modelos atual. Para adotar `raccoon_s` ou `raccoon_l`, instale o
+pacote escolhido num diretório de modelos separado seguindo as
+[instruções de instalação](#7-modelos-e-licenças) e configure uma instalação
+para o usar. As Collections têm de corresponder ao contrato de embeddings do
+novo modelo; crie Collections compatíveis e volte a registar as pessoas ou
+faça uma migração de dados separada. A Web UI não muda os pacotes de modelos
+base.
+
+**Compatibilidade da API e do SDK:** Os resultados de modelos, Collections e
+FaceSamples deixam de incluir `model_version`; a identidade do modelo usa
+`model_id` e a compatibilidade da Collection usa `embedding_contract_id`.
+Atualize os clientes que exigem o campo removido e use o SDK `0.3.0` ao
+atualizar o cliente Python fornecido. Quando a prova de vida é avaliada,
+`liveness` contém apenas `status`, `is_live` e `live_score`; quando não é
+avaliada, o campo é omitido. Consulte as
+[regras de resultados e erros](#resultados-da-prova-de-vida) antes de a ativar
+nos pedidos de reconhecimento.
 
 ## 10. GPU, rede e resolução de problemas
 

@@ -1,6 +1,24 @@
 {
   "components": {
     "schemas": {
+      "AddonPreparationError": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "AddonPreparationError",
+        "type": "object"
+      },
       "Body_add_faces_v1_collections__collection_id__persons__person_id__faces_post": {
         "properties": {
           "embedding_contract_id": {
@@ -422,10 +440,6 @@
             "title": "Model Id",
             "type": "string"
           },
-          "model_version": {
-            "title": "Model Version",
-            "type": "string"
-          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -461,7 +475,6 @@
           "description",
           "default_threshold",
           "model_id",
-          "model_version",
           "model_digest",
           "embedding_dimension",
           "preprocessing_version",
@@ -1178,6 +1191,17 @@
             "title": "Landmarks",
             "type": "array"
           },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LivenessResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omitted when liveness was not evaluated for this face."
+          },
           "quality": {
             "$ref": "#/components/schemas/FaceQuality"
           }
@@ -1344,16 +1368,23 @@
             ],
             "title": "Landmarks"
           },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LivenessResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Saved evaluation from registration, omitted when no evaluation occurred. Historical results remain available even if liveness is now disabled."
+          },
           "model_digest": {
             "title": "Model Digest",
             "type": "string"
           },
           "model_id": {
             "title": "Model Id",
-            "type": "string"
-          },
-          "model_version": {
-            "title": "Model Version",
             "type": "string"
           },
           "person_id": {
@@ -1382,7 +1413,6 @@
           "detection_score",
           "quality",
           "model_id",
-          "model_version",
           "model_digest",
           "preprocessing_version",
           "embedding_source",
@@ -1438,6 +1468,160 @@
           "auth_enabled"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "LivenessManagementResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "can_enable": {
+            "title": "Can Enable",
+            "type": "boolean"
+          },
+          "config_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config File"
+          },
+          "configured_enabled": {
+            "description": "Whether the current on-disk config enables liveness for the next startup.",
+            "title": "Configured Enabled",
+            "type": "boolean"
+          },
+          "enabled": {
+            "description": "Whether liveness is active in the running Server.",
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AddonPreparationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "installed": {
+            "description": "Whether the local addon passes the official SHA256 check.",
+            "title": "Installed",
+            "type": "boolean"
+          },
+          "model_path": {
+            "title": "Model Path",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "restart_required": {
+            "description": "The saved liveness selection differs from the running Server.",
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "downloading",
+              "ready",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "unavailable_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stable reason code for clients to localize unavailable_reason; null when preparation is available.",
+            "title": "Unavailable Code"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          }
+        },
+        "required": [
+          "request_id",
+          "enabled",
+          "installed",
+          "configured_enabled",
+          "restart_required",
+          "can_enable",
+          "unavailable_code",
+          "unavailable_reason",
+          "state",
+          "error",
+          "model_path",
+          "config_file"
+        ],
+        "title": "LivenessManagementResponse",
+        "type": "object"
+      },
+      "LivenessResult": {
+        "additionalProperties": false,
+        "description": "Exactly three fields describe the evaluation.\n\nLive: {\"status\":\"ok\",\"is_live\":true,\"live_score\":0.98}.\nFake: {\"status\":\"ok\",\"is_live\":false,\"live_score\":0.12}.\nUnsuitable input: {\"status\":\"input_rejected\",\"is_live\":null,\"live_score\":null}.",
+        "properties": {
+          "is_live": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For status=ok, true or false according to the configured liveness_threshold. Null only for input_rejected; it does not mean the addon is disabled.",
+            "title": "Is Live"
+          },
+          "live_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Live probability from 0 to 1 for status=ok; null for input_rejected.",
+            "title": "Live Score"
+          },
+          "status": {
+            "description": "ok means the model evaluated the face, including fake verdicts. input_rejected means the input does not meet liveness requirements (for example, insufficient image coverage near an edge).",
+            "enum": [
+              "ok",
+              "input_rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "is_live",
+          "live_score"
+        ],
+        "title": "LivenessResult",
         "type": "object"
       },
       "Match": {
@@ -1506,10 +1690,6 @@
             "title": "Model Id",
             "type": "string"
           },
-          "model_version": {
-            "title": "Model Version",
-            "type": "string"
-          },
           "preprocessing_version": {
             "anyOf": [
               {
@@ -1532,7 +1712,6 @@
         },
         "required": [
           "model_id",
-          "model_version",
           "task",
           "sha256"
         ],
@@ -1542,6 +1721,20 @@
       "ModelSummary": {
         "additionalProperties": true,
         "properties": {
+          "addons": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ModelComponent"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Addons"
+          },
           "embedding_dimension": {
             "title": "Embedding Dimension",
             "type": "integer"
@@ -1566,10 +1759,6 @@
             "title": "Model Id",
             "type": "string"
           },
-          "model_version": {
-            "title": "Model Version",
-            "type": "string"
-          },
           "models": {
             "items": {
               "$ref": "#/components/schemas/ModelComponent"
@@ -1588,7 +1777,6 @@
         },
         "required": [
           "model_id",
-          "model_version",
           "model_digest",
           "embedding_dimension",
           "preprocessing_version",
@@ -1602,6 +1790,20 @@
       "ModelsResponse": {
         "additionalProperties": true,
         "properties": {
+          "addons": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ModelComponent"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Addons"
+          },
           "execution_provider": {
             "title": "Execution Provider",
             "type": "string"
@@ -2550,6 +2752,12 @@
             ],
             "title": "Last Error"
           },
+          "liveness_blocked_faces": {
+            "default": 0,
+            "description": "Faces blocked by normal-mode liveness; counted separately from unknown_faces and excluded from identity search and person_enter events.",
+            "title": "Liveness Blocked Faces",
+            "type": "integer"
+          },
           "matched_faces": {
             "title": "Matched Faces",
             "type": "integer"
@@ -2954,7 +3162,19 @@
             "title": "Index",
             "type": "integer"
           },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LivenessResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Supplemental evaluation when available, including rejection for other reasons. Omitted when liveness was not evaluated."
+          },
           "reason": {
+            "description": "Actual rejection reason, such as low_quality, liveness_fake, or liveness_input_rejected. A separate liveness result does not replace this reason.",
             "title": "Reason",
             "type": "string"
           }
@@ -3159,12 +3379,237 @@
     }
   },
   "info": {
-    "description": "Simple self-hosted face detection, comparison, registration, and search.",
+    "description": "Simple self-hosted face detection, optional liveness checks, comparison, registration, and search. Image upload endpoints accept JPEG, PNG, WebP, and BMP. Liveness is disabled by default in server.toml, including in legacy configurations that omit inference.addons. Use the Web UI to download and enable liveness for the next startup, or set inference.addons = [\"liveness\"] and install the addon manually. Set inference.addons = [] to disable it. Setting addons.auto_download = [\"liveness\"] includes it when running models install <package>, even when the base package is cached. Mode, threshold, compare scope, and registration policy are server configuration, not request parameters. When evaluated, liveness has exactly status, is_live, and live_score. An input_rejected status means the input could not be evaluated, with both values null; a missing liveness field means no evaluation was performed. In normal mode, failed or rejected liveness blocks recognition; observe mode continues recognition. Registration skips liveness by default. Install the selected addon before starting the Server; startup does not download models.",
     "title": "InsightFace Server",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/addons/liveness": {
+      "get": {
+        "description": "Inspect active liveness, the verified local model, and saved restart settings.\n\nThis is a management endpoint, not a standalone liveness inference API.\nRead-only or single-file config mounts report can_enable=false with an\nactionable unavailable_reason. Checking status never downloads a model.",
+        "operationId": "liveness_status_v1_addons_liveness_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessManagementResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Liveness Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/addons/liveness/enable": {
+      "post": {
+        "description": "Download and verify liveness, then save its next-startup configuration.\n\nSend an empty JSON object. The background job continues after the request\nor browser tab closes; poll GET /v1/addons/liveness for completion. A\nverified cached model is reused. Only after successful verification does\nthe job add liveness to inference.addons and addons.auto_download in the\nconfigured server.toml, preserving other values and comments. Current\ninference does not change: the operator must manually restart Server.\nRepeated requests share the active job. Auth follows other /v1 APIs;\nbrowser requests must originate from this Server or an allowed CORS origin.",
+        "operationId": "enable_liveness_v1_addons_liveness_enable_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessManagementResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Enable Liveness",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/v1/collections": {
       "get": {
         "operationId": "list_collections_v1_collections_get",
@@ -3937,6 +4382,7 @@
         ]
       },
       "post": {
+        "description": "Register a person from one or more images, allowing partial success.\n\nLiveness is skipped by default (liveness_on_registration=false), and new\nsamples omit liveness. When enabled in server.toml, normal mode rejects\nfake or unsuitable images with reason liveness_fake or\nliveness_input_rejected and a separate liveness result in rejected_images.\nObserve mode continues normal registration checks and stores the result\nwith accepted samples. review_mode=off and external_trusted embeddings do\nnot bypass enabled liveness. HTTP 201 may contain accepted faces and\nrejected_images; if all images are rejected, HTTP 422 registration_failed\ncontains error.details.rejected_images. Model faults return HTTP 503\nliveness_unavailable, not a fake verdict.",
         "operationId": "create_person_v1_collections__collection_id__persons_post",
         "parameters": [
           {
@@ -4593,6 +5039,7 @@
         ]
       },
       "post": {
+        "description": "Add images to an existing person, allowing partial success.\n\nLiveness is skipped by default (liveness_on_registration=false). When\nenabled, normal mode rejects fake or unsuitable images with reason\nliveness_fake or liveness_input_rejected and a separate liveness result\nin rejected_images. Observe mode continues other registration checks.\nreview_mode=off and external_trusted embeddings do not bypass enabled\nliveness. HTTP 201 can contain an empty faces list and only rejected_images.\nAccepted samples retain their evaluated liveness result; unevaluated\nsamples omit it. Model faults return HTTP 503 liveness_unavailable.",
         "operationId": "add_faces_v1_collections__collection_id__persons__person_id__faces_post",
         "parameters": [
           {
@@ -4993,6 +5440,7 @@
     },
     "/v1/collections/{collection_id}/search": {
       "post": {
+        "description": "Search the Collection using the selected face.\n\nWith liveness enabled in normal mode, HTTP 422 liveness_fake or\nliveness_input_rejected stops recognition and index search; the result is\nin error.details.liveness. This is distinct from a valid query with no\nidentity matches. Observe mode continues search and includes liveness in\nsearched_face. Without evaluation, liveness is omitted. Model faults\nreturn HTTP 503 liveness_unavailable in either mode.",
         "operationId": "search_v1_collections__collection_id__search_post",
         "parameters": [
           {
@@ -5120,6 +5568,7 @@
     },
     "/v1/compare": {
       "post": {
+        "description": "Compare the selected face in each image.\n\nConfigured liveness_compare_scope selects both, source, or target for\nliveness evaluation. In normal mode, a fake or input rejection stops\nrecognition and returns HTTP 422 liveness_fake or liveness_input_rejected;\nerror.details includes liveness and side (source or target). In observe\nmode, comparison continues and each evaluated face includes liveness.\nUnevaluated sides omit liveness. Runtime faults return HTTP 503\nliveness_unavailable. These policies cannot be overridden per request.",
         "operationId": "compare_v1_compare_post",
         "requestBody": {
           "content": {
@@ -5236,6 +5685,7 @@
     },
     "/v1/detect": {
       "post": {
+        "description": "Detect faces without generating recognition embeddings.\n\nWhen the liveness addon is enabled, faces[].liveness contains status,\nis_live, and live_score. HTTP 200 also includes fake faces (status=ok,\nis_live=false) and unsuitable input (status=input_rejected, is_live=null,\nlive_score=null); neither is a detection error. An omitted liveness field\nmeans no evaluation. Model execution failure returns HTTP 503\nliveness_unavailable. There is no separate liveness endpoint.",
         "operationId": "detect_v1_detect_post",
         "requestBody": {
           "content": {
@@ -5352,6 +5802,7 @@
     },
     "/v1/embeddings": {
       "post": {
+        "description": "Generate the selected face's recognition embedding.\n\nWith liveness enabled in normal mode, fake faces and unsuitable input\nstop before recognition: HTTP 422 liveness_fake or liveness_input_rejected,\nwith the three-field result in error.details.liveness. Observe mode\ncontinues recognition and returns faces[].liveness beside the embedding.\nWithout evaluation, liveness is omitted. Runtime faults return HTTP 503\nliveness_unavailable in either mode.",
         "operationId": "embeddings_v1_embeddings_post",
         "requestBody": {
           "content": {
@@ -6558,6 +7009,7 @@
     },
     "/v1/monitors/{monitor_id}/state": {
       "get": {
+        "description": "Read the current RTSP detection and recognition state.\n\nEvaluated faces include the same three-field liveness result as image\nendpoints. In normal mode, blocked faces have status=liveness_blocked and\ncontribute to liveness_blocked_faces, not unknown_faces. They do not run\nidentity search or emit person_enter events. Observe mode continues\nrecognition and identity events. Runtime liveness failures are inference\nerrors and must not be interpreted as fake faces.",
         "operationId": "monitor_state_v1_monitors__monitor_id__state_get",
         "parameters": [
           {

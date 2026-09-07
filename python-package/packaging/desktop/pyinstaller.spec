@@ -19,6 +19,13 @@ privateframe_config_datas = [
     (str(config_path), "insightface/app/privateframe/configs")
     for config_path in sorted(privateframe_config_dir.glob("*.yaml"))
 ]
+privateframe_doc_dir = (
+    project_root / "insightface" / "app" / "privateframe" / "docs"
+)
+privateframe_doc_datas = [
+    (str(doc_path), "insightface/app/privateframe/docs")
+    for doc_path in sorted(privateframe_doc_dir.glob("*.md"))
+]
 trusted_key_dir = project_root / "insightface" / "model_zoo" / "trusted_keys"
 trusted_key_datas = [
     (str(key_path), "insightface/model_zoo/trusted_keys")
@@ -31,6 +38,10 @@ if not trusted_key_datas:
 if not privateframe_config_datas:
     raise FileNotFoundError(
         f"PrivateFrame configuration files were not found in {privateframe_config_dir}"
+    )
+if not (privateframe_doc_dir / "configuration.md").is_file():
+    raise FileNotFoundError(
+        f"PrivateFrame configuration reference was not found in {privateframe_doc_dir}"
     )
 
 windows_icon = icon_dir / "app_icon.ico"
@@ -61,7 +72,12 @@ hiddenimports = [
     "insightface.gui.main_window",
 ]
 
-datas = runtime_icon_datas + privateframe_config_datas + trusted_key_datas
+datas = (
+    runtime_icon_datas
+    + privateframe_config_datas
+    + privateframe_doc_datas
+    + trusted_key_datas
+)
 binaries = []
 
 a = Analysis(

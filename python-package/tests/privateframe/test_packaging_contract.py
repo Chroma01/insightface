@@ -11,7 +11,7 @@ import setuptools
 import pytest
 
 
-def test_desktop_bundle_preserves_privateframe_config_paths(
+def test_desktop_bundle_preserves_privateframe_config_and_reference_paths(
     monkeypatch,
 ) -> None:
     package_root = Path(__file__).resolve().parents[2]
@@ -51,6 +51,13 @@ def test_desktop_bundle_preserves_privateframe_config_paths(
         for source, destination in captured["analysis_kwargs"]["datas"]
         if destination == "insightface/app/privateframe/configs"
     }
+    doc_dir = package_root / "insightface" / "app" / "privateframe" / "docs"
+    expected_docs = {str(path) for path in doc_dir.glob("*.md")}
+    bundled_docs = {
+        source
+        for source, destination in captured["analysis_kwargs"]["datas"]
+        if destination == "insightface/app/privateframe/docs"
+    }
     trusted_key_dir = (
         package_root / "insightface" / "model_zoo" / "trusted_keys"
     )
@@ -63,11 +70,13 @@ def test_desktop_bundle_preserves_privateframe_config_paths(
 
     assert expected_sources
     assert bundled_configs == expected_sources
+    assert str(doc_dir / "configuration.md") in expected_docs
+    assert bundled_docs == expected_docs
     assert expected_keys
     assert bundled_keys == expected_keys
 
 
-def test_privateframe_extra_and_yaml_are_packaged(
+def test_privateframe_extra_config_and_offline_reference_are_packaged(
     monkeypatch,
 ) -> None:
     package_root = Path(__file__).resolve().parents[2]
@@ -86,7 +95,7 @@ def test_privateframe_extra_and_yaml_are_packaged(
     runpy.run_path(str(package_root / "setup.py"), run_name="packaging_test")
 
     assert captured["package_data"]["insightface.app.privateframe"] == [
-        "configs/*.yaml"
+        "configs/*.yaml", "docs/*.md"
     ]
     assert captured["extras_require"]["privateframe"] == [
         "av>=12",

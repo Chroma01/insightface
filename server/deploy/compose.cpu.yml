@@ -1,10 +1,11 @@
 name: insightface-simple-cpu
 
 x-models-path: &models-path ../.models
+x-addons-path: &addons-path ../.models/addons
 
 services:
   server:
-    image: ghcr.io/deepinsight/insightface-server:0.2.0-cpu
+    image: ghcr.io/deepinsight/insightface-server:0.3.0-cpu
     platform: linux/amd64
     init: true
     read_only: true
@@ -29,13 +30,18 @@ services:
       INSIGHTFACE_SEARCH_DEVICE_ID: "${INSIGHTFACE_SEARCH_DEVICE_ID:-0}"
       INSIGHTFACE_SEARCH_TOPK_MODE: "${INSIGHTFACE_SEARCH_TOPK_MODE:-auto}"
       INSIGHTFACE_SEARCH_BUILD_BATCH_ROWS: "${INSIGHTFACE_SEARCH_BUILD_BATCH_ROWS:-4096}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-}"
+      http_proxy: "${http_proxy:-}"
+      https_proxy: "${https_proxy:-}"
+      no_proxy: "${no_proxy:-}"
       INSIGHTFACE_INFERENCE_MODE: onnx
       INSIGHTFACE_EXECUTION_PROVIDER: CPUExecutionProvider
     volumes:
       - type: bind
-        source: ../config/server.toml
-        target: /etc/insightface/server.toml
-        read_only: true
+        source: ../config
+        target: /etc/insightface
         bind:
           create_host_path: false
       - type: volume
@@ -47,6 +53,13 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Only addons and the configuration directory are writable by the Web UI.
+      # See the user guide for host permissions required by UID/GID 10001.
+      - type: bind
+        source: *addons-path
+        target: /models/addons
+        bind:
+          create_host_path: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=128m
     cap_drop: [ALL]
@@ -56,7 +69,7 @@ services:
 
   models:
     profiles: [tools]
-    image: ghcr.io/deepinsight/insightface-server:0.2.0-cpu
+    image: ghcr.io/deepinsight/insightface-server:0.3.0-cpu
     platform: linux/amd64
     init: true
     read_only: true
@@ -65,6 +78,7 @@ services:
     entrypoint: ["python", "-m", "insightface_server.models_cli"]
     environment:
       INSIGHTFACE_MODELS_DIR: /models
+      INSIGHTFACE_CONFIG_FILE: /etc/insightface/server.toml
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       NO_PROXY: "${NO_PROXY:-}"
@@ -72,6 +86,12 @@ services:
       https_proxy: "${https_proxy:-}"
       no_proxy: "${no_proxy:-}"
     volumes:
+      - type: bind
+        source: ../config/server.toml
+        target: /etc/insightface/server.toml
+        read_only: true
+        bind:
+          create_host_path: false
       - type: bind
         source: *models-path
         target: /models

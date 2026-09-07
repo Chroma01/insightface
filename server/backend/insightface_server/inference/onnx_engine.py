@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from ..addons import LivenessUnavailable, addon_summary, require_installed_addon
 from ..config import (
     DEFAULT_DETECTOR_INPUT_SIZES,
     DEFAULT_DETECTOR_NMS_THRESHOLD,
@@ -231,6 +232,14 @@ class OnnxInsightFaceEngine:
         if self._provider not in {"CPUExecutionProvider", "CUDAExecutionProvider"}:
             raise ValueError(f"Unsupported execution_provider: {self._provider}")
         models_dir = Path(str(_setting(settings, "models_dir", "/models")))
+        self._liveness_path = (
+            require_installed_addon("liveness", models_dir)
+            if "liveness" in _setting(settings, "addons", ()) else None
+        )
+        self._liveness_mode = _setting(settings, "liveness_mode", "normal")
+        self._liveness_threshold = _setting(settings, "liveness_threshold", 0.8)
+        self._liveness = None
+        self._liveness_session = None
         self.bundle: ModelBundle = load_manifest(models_dir)
         license_inspection = inspect_model_package_license(
             models_dir,
@@ -262,7 +271,6 @@ class OnnxInsightFaceEngine:
         ).hexdigest()
         self.summary = EngineSummary(
             model_id=self.bundle.model_id,
-            model_version=self.bundle.model_version,
             # Collection semantics include detection/alignment as well as recognition.
             model_digest=bundle_digest,
             embedding_dimension=int(recognizer.embedding_dimension or 0),
@@ -270,6 +278,7 @@ class OnnxInsightFaceEngine:
             provider=self._provider,
             models=tuple(model.public_summary() for model in self.bundle.models),
             license=license_summary,
+            addons=(addon_summary("liveness"),) if self._liveness_path else (),
         )
         self._device_id = int(_setting(settings, "device_id", 0))
         self._detector_threshold = float(_setting(settings, "detector_threshold", 0.50))
@@ -423,7 +432,7 @@ class OnnxInsightFaceEngine:
                 f"Required {self._provider} is unavailable; ONNX Runtime reports {available}"
             )
 
-        # These are the only two Session constructions in the engine lifecycle.
+        # Sessions are constructed once and shared by requests and RTSP frames.
         self._detector_session = self._new_session(self.bundle.detector.path)
         self._recognizer_session = self._new_session(self.bundle.recognizer.path)
         self._detector = SCRFD(
@@ -448,6 +457,14 @@ class OnnxInsightFaceEngine:
         self._configure_image_preprocessing(
             self._recognizer, self._recognizer_session, self.bundle.recognizer
         )
+        if self._liveness_path is not None:
+            from insightface.addons import Liveness
+
+            self._liveness_session = self._new_session(self._liveness_path)
+            self._liveness = Liveness(
+                self._liveness_path, session=self._liveness_session,
+                threshold=self._liveness_threshold,
+            )
 
         self._warm_up()
         provider_audit: dict[str, object] = {}
@@ -460,6 +477,10 @@ class OnnxInsightFaceEngine:
                     self._recognizer_session, model_name="recognizer"
                 ),
             }
+            if self._liveness_session is not None:
+                provider_audit["liveness"] = self._finish_cuda_profile(
+                    self._liveness_session, model_name="liveness"
+                )
 
         cuda = _cuda_runtime_version()
         cudnn = _cudnn_version()
@@ -489,10 +510,18 @@ class OnnxInsightFaceEngine:
             "cudnn_version": cudnn,
             "gpus": gpus,
             "models": [dict(model) for model in self.summary.models],
+            "addons": [dict(addon) for addon in self.summary.addons],
+            "liveness_mode": self._liveness_mode,
         }
 
     def _warm_up(self) -> None:
         self._warm_up_detector_sizes(self._detector_input_sizes)
+        if self._liveness is not None:
+            from insightface.addons.liveness import DESTINATION_LANDMARKS
+
+            self._liveness.predict(
+                np.zeros((80, 80, 3), dtype=np.uint8), DESTINATION_LANDMARKS
+            )
 
         recognizer_input = self._recognizer_session.get_inputs()[0]
         width, height = self.bundle.recognizer.input_size
@@ -546,6 +575,8 @@ class OnnxInsightFaceEngine:
         max_faces: int | None = None,
         min_score: float | None = None,
         detection_profile: DetectionProfile | None = None,
+        single_face: bool = False,
+        apply_liveness: bool = True,
     ) -> list[FaceObservation]:
         from insightface.utils import face_align
 
@@ -561,6 +592,7 @@ class OnnxInsightFaceEngine:
                     raise RuntimeError("Inference engine has not been started")
                 detector = self._detector
                 recognizer = self._recognizer
+                liveness = self._liveness if apply_liveness else None
                 profile = detection_profile or self._default_detection_profile
                 self.validate_detection_profile(profile)
 
@@ -588,27 +620,53 @@ class OnnxInsightFaceEngine:
                 landmarks = (
                     None if keypoints is None else np.asarray(keypoints[index], dtype=np.float32)
                 )
-                embedding = None
-                if require_embeddings:
-                    if landmarks is None or landmarks.shape != (5, 2):
-                        continue
-                    aligned = face_align.norm_crop(
-                        image,
-                        landmark=landmarks,
-                        image_size=self.bundle.recognizer.input_size[0],
-                    )
-                    embedding = l2_normalize(recognizer.get_feat(aligned)[0])
                 observation = FaceObservation(
                     bbox=(left, top, right, bottom),
                     detection_score=detection_score,
                     landmarks=landmarks,
-                    embedding=embedding,
+                    embedding=None,
                 )
                 enrich_quality(image, observation)
                 observations.append(observation)
 
             observations.sort(key=lambda face: face.area, reverse=True)
-            return observations if max_faces is None else observations[:max_faces]
+            if single_face and observations:
+                def selection_score(face):
+                    if profile.single_face_selection == "largest":
+                        return face.area
+                    left, top, right, bottom = face.bbox
+                    return face.area - 2.0 * (
+                        ((left + right - image_width) * 0.5) ** 2
+                        + ((top + bottom - image_height) * 0.5) ** 2
+                    )
+                observations = [max(observations, key=selection_score)]
+            retained = []
+            for observation in observations:
+                if liveness is not None:
+                    try:
+                        observation.liveness = liveness.predict(image, observation.landmarks)
+                    except Exception as exc:
+                        raise LivenessUnavailable("Liveness inference failed") from exc
+                blocked = (
+                    observation.liveness is not None
+                    and self._liveness_mode == "normal"
+                    and observation.liveness["is_live"] is not True
+                )
+                if require_embeddings and not blocked:
+                    landmarks = observation.landmarks
+                    if landmarks is None or landmarks.shape != (5, 2) or not np.isfinite(landmarks).all():
+                        if liveness is None:
+                            continue
+                    else:
+                        aligned = face_align.norm_crop(
+                            image, landmark=landmarks,
+                            image_size=self.bundle.recognizer.input_size[0],
+                        )
+                        observation.embedding = l2_normalize(recognizer.get_feat(aligned)[0])
+                retained.append(observation)
+                if max_faces is not None and len(retained) >= max_faces:
+                    break
+            return retained
 
     def validate_detection_profile(self, profile: DetectionProfile) -> None:
         sizes = normalize_detector_input_sizes(profile.input_sizes)
@@ -646,3 +704,5 @@ class OnnxInsightFaceEngine:
             self._recognizer = None
             self._detector_session = None
             self._recognizer_session = None
+            self._liveness = None
+            self._liveness_session = None

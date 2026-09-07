@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import gc
 import json
+import logging
 import math
 import os
 import sys
@@ -29,7 +30,8 @@ RESULT_FILENAME = "result.privateframe.json"
 _DOTTED_CONFIG_HELP = (
     "Any public YAML setting may also be overridden as "
     "--section.field VALUE (for example, --scan.max_analysis_fps 15). "
-    "Values use YAML/JSON types; existing list items use numeric segments."
+    "Values use YAML/JSON types; existing list items use numeric segments. "
+    "Use 'describe' for common options and the bundled full configuration reference."
 )
 _DOTTED_RENDER_HELP = (
     "Public render.* YAML settings may be overridden as dotted options. "
@@ -68,6 +70,42 @@ def validate_result_document(value: Any) -> dict[str, Any]:
     from .pipeline import validate_result_document as implementation
 
     return implementation(value)
+
+
+@contextlib.contextmanager
+def _recognition_logs(progress_format: str):
+    """Expose reference import diagnostics without changing the host logger."""
+
+    progress_format = _resolved_progress_mode(progress_format)
+    class Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if progress_format == "jsonl":
+                value = json.dumps(
+                    {"log_schema_version": 1, "event": "log",
+                     "level": record.levelname.lower(), "stage": "recognition",
+                     "message": record.getMessage()},
+                    ensure_ascii=False, separators=(",", ":"),
+                )
+            else:
+                value = f"[{record.levelname.lower()}] {record.getMessage()}"
+            print(value, file=sys.stderr, flush=True)
+
+    handler = Handler()
+    configured = []
+    for name in ("recognition", "streaming"):
+        logger = logging.getLogger(f"{__package__}.{name}")
+        configured.append((logger, logger.level, logger.propagate))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    try:
+        yield
+    finally:
+        for logger, level, propagate in configured:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            logger.propagate = propagate
+        handler.close()
 
 
 class _CLIUsageError(ValueError):
@@ -187,11 +225,11 @@ def command_parser(*, machine_errors: bool = False) -> argparse.ArgumentParser:
         prog="insightface-privateframe",
         allow_abbrev=False,
         description=(
-            "Detect and track faces in a local source video, save reusable analysis "
-            "JSON, and render face regions with Gaussian blur or mosaic for privacy. "
-            "The source video is never modified. Use 'describe' for the "
-            "machine-readable contract and 'doctor' for read-only environment "
-            "diagnostics."
+            "Automatically blur faces or add mosaic to a video before sharing or "
+            "publishing it, to help protect the privacy of people who appear. "
+            "Blur all detected faces, or use reference photos to set rules for "
+            "specific people. Videos are processed locally, producing a new video "
+            "while keeping the original unchanged."
         ),
     )
     value.add_argument(
@@ -260,11 +298,12 @@ def command_parser(*, machine_errors: bool = False) -> argparse.ArgumentParser:
     commands.add_parser(
         "describe",
         allow_abbrev=False,
-        help="describe the tool purpose, workflows, and complete machine contract",
+        help="describe workflows, common configuration, and machine output contracts",
         description=(
             "Explain what PrivateFrame does and print its recommended workflows, "
-            "command selection, inputs, outputs, configuration, status, and error "
-            "contracts without inspecting the runtime environment."
+            "command selection, inputs, outputs, common and intermediate configuration, "
+            "status, and error contracts without inspecting the runtime environment. "
+            "The JSON links to the bundled full configuration reference for advanced settings."
         ),
     )
 
@@ -1050,10 +1089,9 @@ def _check_process_render_settings(
         render_defaults = deepcopy(config["render"])
         recognition = config.get("recognition", {})
         mode = str(recognition.get("mode", "all"))
-        targets = [] if mode == "all" else list(recognition["target_persons"])
         render_defaults["recognition_policy"] = {
             "mode": mode,
-            "target_persons": targets,
+            "unknown_action": recognition.get("unknown_action", "auto"),
         }
         synthetic_result = {
             "render_defaults": render_defaults,
@@ -1062,7 +1100,10 @@ def _check_process_render_settings(
                 if mode == "all"
                 else {
                     "enabled": True,
-                    "gallery": {"persons": targets},
+                    # Dry-run validates settings without decoding reference
+                    # photos. Real execution validates the full reference set.
+                    "references": {"files": [{"file": "dry-run-placeholder"}]},
+                    "tracks": {},
                 }
             ),
         }
@@ -1376,9 +1417,11 @@ def _dry_run_status(
     _apply_overwrite_readiness(report, args)
     _apply_lock_readiness(report, args)
     _refresh_diagnostic_summary(report)
-    return {
+    diagnostic_ok = bool(report.get("ok", True))
+    report["ready"] = diagnostic_ok and bool(report.get("ready", False))
+    payload = {
         "status_schema_version": _STATUS_SCHEMA_VERSION,
-        "ok": True,
+        "ok": diagnostic_ok,
         "command": args.command,
         "dry_run": True,
         "ready": bool(report.get("ready", False)),
@@ -1386,6 +1429,13 @@ def _dry_run_status(
         "checks": report.get("checks", []),
         "diagnostics": report,
     }
+    if not diagnostic_ok:
+        payload["error"] = _error_status(
+            args.command,
+            RuntimeError("Preflight diagnostics failed internally; inspect checks for details"),
+            stage="preflight",
+        )["error"]
+    return payload
 
 
 def _apply_output_defaults(
@@ -1454,6 +1504,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _emit(build_describe_payload(command_parser()))
             return 0
+        except Exception as exc:  # noqa: BLE001 - machine error envelope
+            _emit(_error_status("describe", exc, stage="describe"))
+            return 1
         except KeyboardInterrupt as exc:
             _emit(_error_status("describe", exc, stage="describe"))
             return 130
@@ -1493,7 +1546,7 @@ def main(argv: list[str] | None = None) -> int:
             with contextlib.redirect_stdout(sys.stderr):
                 status = _dry_run_status(args, config_overrides)
             _emit(status)
-            return 0
+            return 0 if bool(status.get("ok", False)) else 1
         except Exception as exc:  # noqa: BLE001 - machine error envelope
             _emit(_error_status(args.command, exc, stage="preflight"))
             return 1
@@ -1507,7 +1560,7 @@ def main(argv: list[str] | None = None) -> int:
         # InsightFace's older model-loading helpers still emit informational
         # ``print`` calls.  Treat those as diagnostics so stdout remains the
         # single status record even while models download or Sessions prepare.
-        with _claim_output_targets(args):
+        with _claim_output_targets(args), _recognition_logs(args.progress):
             with contextlib.redirect_stdout(sys.stderr):
                 if command == "analyze":
                     result = analyze_streaming_pipeline(

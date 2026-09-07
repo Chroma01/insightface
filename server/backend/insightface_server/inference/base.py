@@ -14,24 +14,24 @@ from ..config import DetectionProfile
 @dataclass(frozen=True, slots=True)
 class EngineSummary:
     model_id: str
-    model_version: str
     model_digest: str
     embedding_dimension: int
     preprocessing_version: str
     provider: str
     models: tuple[dict[str, object], ...] = ()
     license: dict[str, object] | None = None
+    addons: tuple[dict[str, object], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
             "model_id": self.model_id,
-            "model_version": self.model_version,
             "model_digest": self.model_digest,
             "embedding_dimension": self.embedding_dimension,
             "preprocessing_version": self.preprocessing_version,
             "provider": self.provider,
             "models": [dict(model) for model in self.models],
             "license": dict(self.license) if self.license is not None else None,
+            **({"addons": [dict(addon) for addon in self.addons]} if self.addons else {}),
         }
 
 
@@ -50,6 +50,7 @@ class FaceObservation:
     pitch: float = 0.0
     roll: float = 0.0
     rejection_reasons: list[str] = field(default_factory=list)
+    liveness: dict[str, object] | None = None
 
     @property
     def confidence(self) -> float:
@@ -100,6 +101,8 @@ class InferenceEngine(Protocol):
         max_faces: int | None = None,
         min_score: float | None = None,
         detection_profile: DetectionProfile | None = None,
+        single_face: bool = False,
+        apply_liveness: bool = True,
     ) -> list[FaceObservation]: ...
 
     def validate_detection_profile(self, profile: DetectionProfile) -> None: ...

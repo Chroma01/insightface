@@ -91,8 +91,8 @@ def test_offline_license_public_key_is_packaged_but_private_issuer_is_excluded()
 
 def test_compose_mounts_models_read_only_and_persists_data() -> None:
     variants = {
-        "server/deploy/compose.cpu.yml": ("0.2.0-cpu", "18097"),
-        "server/deploy/compose.cuda12.yml": ("0.2.0-cuda12", "18098"),
+        "server/deploy/compose.cpu.yml": ("0.3.0-cpu", "18097"),
+        "server/deploy/compose.cuda12.yml": ("0.3.0-cuda12", "18098"),
     }
     for relative, (image_tag, host_port) in variants.items():
         compose = _read(relative)
@@ -118,6 +118,11 @@ def test_compose_mounts_models_read_only_and_persists_data() -> None:
         assert 'user: "${INSIGHTFACE_MODELS_UID:-1000}:${INSIGHTFACE_MODELS_GID:-1000}"' in compose
         assert 'group_add: ["10001"]' in compose
         assert "healthcheck:\n      disable: true" in compose
+        server_service = compose.split("\n  models:\n", 1)[0]
+        assert "source: ../config\n        target: /etc/insightface" in server_service
+        assert "target: /models\n        read_only: true" in server_service
+        assert "source: *addons-path\n        target: /models/addons" in server_service
+        assert "HTTPS_PROXY:" in server_service
         models_service = compose.split("\n  models:\n", 1)[1]
         assert "target: /models" in models_service
         assert "gpus: all" not in models_service
@@ -142,6 +147,7 @@ def test_build_context_excludes_unrelated_repository_data() -> None:
     assert "!server/**" in dockerignore
     for required in (
         "!python-package/insightface/app/**",
+        "!python-package/insightface/addons/**",
         "!python-package/insightface/model_zoo/**",
         "!python-package/insightface/utils/**",
         "!python-package/insightface/data/__init__.py",

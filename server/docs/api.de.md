@@ -4,9 +4,14 @@
 
 Dieses Dokument erklärt Zweck, Eingaben, Serververhalten, Erfolg und typische Fehler aller öffentlichen Endpunkte. Start und Modellinstallation stehen im [Benutzerhandbuch](user-guide.de.md); das exakte laufende Schema finden Sie unter `/docs` und `/openapi.json`.
 
+
+Modelle werden durch `model_id` identifiziert; Antworten enthalten kein separates `model_version`. Bestehende Collections behalten ihre `embedding_contract_id`.
+
+Für Liveness siehe [Konfiguration, Modellinstallation und Ergebnisse](#optionales-liveness-addon). Die einzelnen Arbeitsschritte erklären zusätzlich die Auswirkungen.
+
 ## Gemeinsame Regeln
 
-- Basispfad `/v1`, JSON in `snake_case`, Bilder als JPEG/PNG/WebP multipart.
+- Basispfad `/v1`, JSON in `snake_case`, Bilder als JPEG/PNG/WebP/BMP multipart.
 - Die mitgelieferte Compose-Konfiguration deaktiviert Authentifizierung für isolierte Tests. Ist sie aktiv, benötigen alle Endpunkte außer health `Authorization: Bearer <api_key>`. Bei deaktivierter Authentifizierung den Header ganz weglassen.
 - Jede Antwort trägt `x-request-id`; JSON wiederholt ihn als `request_id`.
 - Confidence/quality/threshold liegen in `0..1`. Similarity ist keine Wahrscheinlichkeit, sondern roher Cosinus in `[-1,1]`; Standard `0.4`, Treffer bei `similarity >= threshold`.
@@ -18,6 +23,60 @@ BASE_URL=http://127.0.0.1:18097
 AUTH_HEADER="Authorization: Bearer ${INSIGHTFACE_API_KEY}"
 curl -fsS "${BASE_URL}/v1/health"
 ```
+
+## Optionales Liveness-Addon
+
+Liveness ist in `server/config/server.toml` standardmäßig deaktiviert: `inference.addons` und `addons.auto_download` sind `[]`. Alte Konfigurationen ohne diese Schlüssel bleiben deaktiviert. Das folgende Beispiel aktiviert Liveness manuell; installieren Sie das Modell vor dem Neustart.
+
+Unter **System → Lebenderkennung** können Sie das Modell herunterladen und für den nächsten Start aktivieren. Erst nach SHA-256-Prüfung werden beide Listen als `["liveness"]` gespeichert; andere Einstellungen bleiben erhalten. Geprüfte Dateien werden wiederverwendet. **Starten Sie den Server manuell neu**, damit die Änderung wirkt. Fehler sind sichtbar und wiederholbar; fehlgeschlagene Downloads aktivieren Liveness nicht.
+
+[Mounts und Berechtigungen für Web-Downloads](user-guide.de.md#mounts-und-berechtigungen-für-web-downloads).
+
+```toml
+[inference]
+addons = ["liveness"]
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = ["liveness"]
+```
+
+### Modellinstallation und Start
+
+`inference.addons` steuert die Laufzeit, `addons.auto_download` den Zusatzdownload beim Installieren eines Basispakets. Mit `["liveness"]` wird das Addon auch bei bereits gecachtem Basispaket installiert. Beim Serverstart erfolgt kein Download. Installer und Server lesen dieselbe Datei.
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+Ein aktiviertes, fehlendes Modell stoppt den Start mit `addon_model_missing`; ein ungültiges Modell mit `addon_model_invalid`. Das Addon wird nicht stillschweigend deaktiviert.
+
+### Liveness-Ergebnisse
+
+| Ergebnis | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| Lebendes Gesicht | `ok` | `true` | `[0, 1]` |
+| Täuschungsversuch | `ok` | `false` | `[0, 1]` |
+| Ungeeignete Eingabe | `input_rejected` | `null` | `null` |
+
+`normal` erkennt nur Gesichter mit bestandener Liveness-Prüfung. `observe` liefert das Ergebnis und setzt die Erkennung fort. Ohne Prüfung fehlt `liveness`. Das Objekt enthält nur `status`, `is_live` und `live_score`: Bei bestandener Prüfung oder erkanntem Täuschungsversuch gilt `status: ok` mit Wahrheitswert und Score; bei abgelehnter Eingabe gilt `status: input_rejected`, die anderen Werte sind `null`.
+
+`/v1/detect` liefert auch negative Ergebnisse mit HTTP 200. In `normal` liefern Embeddings, Vergleich und Suche HTTP 422 `liveness_fake` oder `liveness_input_rejected` mit `error.details.liveness`; Vergleiche ergänzen `details.side`. Laufzeitfehler liefern HTTP 503 `liveness_unavailable`.
+
+Für neue Personen und zusätzliche FaceSamples wird Liveness standardmäßig übersprungen: `[inference].liveness_on_registration=false` führt das Modell nicht aus und lässt `liveness` in neuen Samples weg. Mit `true` gilt bei aktiviertem Addon die Richtlinie `normal`/`observe`; Ablehnungen enthalten `reason` und `liveness`. Die Qualitätsprüfung über `review_mode` und die Validierung externer Embeddings bleiben aktiv. `review_mode=off` und `external_trusted` umgehen eine aktivierte Registrierungsprüfung nicht. Requests können diese Startkonfiguration nicht überschreiben. Bereits gespeicherte Ergebnisse bleiben sichtbar.
+
+RTSP unterscheidet `liveness_blocked` von `unknown` und zählt `liveness_blocked_faces`. Blockierte Gesichter erzeugen keine Personen-/Unbekannt-Eintrittsereignisse und setzen die Bestätigungsfolge zurück. Bei Inferenzfehlern werden alte Identitätsanzeigen gelöscht.
+
+`liveness_compare_scope` legt die geprüften Seiten von `/v1/compare` fest: `both` (Standard) für beide, `source` für das Quellbild, `target` für das Zielbild. Als lebend gilt ein Gesicht bei `live_score >= liveness_threshold`.
+
+`models addons install liveness` speichert das veröffentlichte Modell unter `/models/addons/liveness.onnx`, auf dem Compose-Host unter `server/.models/addons/liveness.onnx`. Startfehler sind `addon_model_missing` und `addon_model_invalid`. `/v1/models` und `/v1/system` melden aktive Zusatzmodelle unter `addons`.
+
+[Konfiguration und Arbeitsabläufe](user-guide.de.md#optionales-liveness-addon).
 
 ## System
 
@@ -31,11 +90,64 @@ curl -fsS "${BASE_URL}/v1/health"
 
 ### `GET /v1/models`
 
+`addons` meldet aktive Addons getrennt vom Basismodell. Prüfen Sie den Eintrag `liveness` und die wirksamen Einstellungen in `safe_config` der Systemantwort. Diese Endpunkte sind schreibgeschützt und installieren keine Modelle.
+
 **Zweck/Eingabe:** Verifizierte Detector-/Recognizer-Modelle, Provider und Lizenz lesen; keine Parameter. **Ergebnis:** 200 `models`, `execution_provider`, `license`. **Fehler:** 401.
+
+Die Basispakete `raccoon_s` und `raccoon_l` unterstützen CPU und CUDA und werden vor dem Start mit dem Modellwerkzeug installiert. Dieser Endpunkt zeigt laufende Modellkomponenten, keinen Downloadkatalog. Die folgende Web-Aktion verwaltet nur Liveness. Collections sind an Erkennungsmodell und Vorverarbeitung gebunden: Ein anderes Basispaket konvertiert vorhandene Merkmale nicht und kann `409 collection_model_mismatch` auslösen. Das alleinige Aktivieren von Liveness ändert diesen Vertrag nicht.
+
+### `GET /v1/addons/liveness`
+
+**Verwendung:** Installationszustand und Einstellungen für den nächsten Start lesen, ohne Download oder Änderung. Dies ist eine Verwaltungs-API, keine eigenständige Liveness-Inferenz.
+
+**Ergebnis:** HTTP 200. `enabled` beschreibt den laufenden Prozess. `installed` bedeutet, dass die Datei die veröffentlichte SHA-256-Prüfung besteht; es bedeutet keine Aktivierung. `configured_enabled` liest die Auswahl für den nächsten Start aus der aktuellen Konfigurationsdatei. `restart_required` zeigt eine Abweichung von `enabled`. Bis zum Neustart beschreibt `safe_config` aus `/v1/system` weiterhin den laufenden Prozess.
+
+`state` ist `idle` (kein geprüftes Modell), `downloading` (Vorbereitung läuft), `ready` (geprüftes Modell vorhanden) oder `error` (Vorbereitungs-, Datei- oder Konfigurationsfehler). `ready` allein bestätigt weder eine gespeicherte Aktivierung noch einen abgeschlossenen Neustart.
+
+`can_enable` zeigt, ob die Web-Vorbereitung verfügbar ist. Andernfalls liefern `unavailable_code` einen stabilen Grundcode und `unavailable_reason` eine Erklärung; sonst sind beide `null`. `error` ist `null` oder ein Objekt mit `code` und `message`. `model_path` ist der lokale Modellpfad; `config_file` der gewählte TOML-Pfad oder `null`. Die Antwort enthält außerdem `request_id`.
+
+Mögliche Werte von `unavailable_code`: `config_file_missing` (keine Konfigurationsdatei gewählt), `config_file_not_regular` (keine reguläre Datei), `config_file_mount` (einzeln eingebundene Datei), `config_not_writable` (Konfiguration nicht schreibbar), `addon_directory_not_writable` (Addon-Verzeichnis nicht schreibbar), `addon_config_invalid` (ungültige Konfiguration), `addon_model_invalid` (ungültiges Modell) und `server_stopping` (Server fährt herunter).
+
+```json
+{
+  "enabled": false,
+  "installed": true,
+  "configured_enabled": true,
+  "restart_required": true,
+  "can_enable": true,
+  "unavailable_code": null,
+  "unavailable_reason": null,
+  "state": "ready",
+  "error": null,
+  "model_path": "/models/addons/liveness.onnx",
+  "config_file": "/etc/insightface/server.toml",
+  "request_id": "3ed21e89-4595-4eed-a699-1df42ca62032"
+}
+```
+
+### `POST /v1/addons/liveness/enable`
+
+**Verwendung:** Liveness herunterladen und für den nächsten Start konfigurieren. Ein leeres JSON-Objekt `{}` mit `Content-Type: application/json` senden. Modell-URLs oder andere Parameter werden nicht akzeptiert.
+
+```bash
+curl -sS "${BASE_URL}/v1/addons/liveness" -H "${AUTH_HEADER}"
+curl -sS "${BASE_URL}/v1/addons/liveness/enable" -H "${AUTH_HEADER}" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+**Ergebnis:** HTTP 202 liefert dieselben Statusfelder wie GET und bestätigt die Annahme des Auftrags, keine Aktivierung. `GET /v1/addons/liveness` bis zum Abschluss abfragen. Wiederholte Anfragen teilen den laufenden Auftrag; das Schließen des Browsers bricht ihn nicht ab.
+
+Erst nach Download und SHA-256-Prüfung wird `liveness` in `[inference].addons` und `[addons].auto_download` der `config_file` ergänzt. Andere Werte und Kommentare bleiben erhalten, geprüfte Dateien werden wiederverwendet. Bei `installed=true`, `configured_enabled=true` und `restart_required=true` den Server manuell neu starten. Danach meldet der neue Prozess `enabled=true` und `restart_required=false`. Es gibt weder Nachladen im laufenden Betrieb noch eine API zum Wechsel des Basismodells.
+
+**Fehler:** Anfragefehler verwenden das normale Fehlerformat: `400 invalid_addon_request` bei einem anderen Inhalt als `{}`, `401 unauthorized` bei fehlender Authentifizierung, `403 origin_not_allowed` bei unzulässiger Browserherkunft, `409 addon_management_unavailable` bei ungeeigneten Pfaden, Rechten oder Einstellungen und `415 json_required` bei einem anderen Inhaltstyp als JSON. Browser müssen dieselbe oder eine ausdrücklich per CORS erlaubte Herkunft verwenden.
+
+Ein angenommener Auftrag kann später fehlschlagen: GET liefert weiterhin HTTP 200, aber `state=error` und `error.code`. `addon_download_failed` lässt die Konfiguration unverändert; Netzwerk/Proxy des Servers prüfen. Bei `addon_config_save_failed` Konfiguration oder Verzeichnisrechte korrigieren; geprüfte Downloads bleiben nutzbar. `addon_config_invalid` bezeichnet ungültiges TOML auf dem Datenträger. Bei `addon_model_invalid` die beschädigte Datei ersetzen oder entfernen; sie wird nie still überschrieben. Bei `addon_job_in_progress` arbeitet ein anderer Prozess: warten und aktualisieren. Erst nach Behebung der Ursache POST erneut senden.
 
 ## Zustandslose Bildoperationen
 
 ### `POST /v1/detect`
+
+Bei aktivierter Prüfung enthält jedes bewertete Gesicht `liveness.status`, `liveness.is_live` und `liveness.live_score`. Auch erkannte Täuschungsversuche und `input_rejected` liefern HTTP 200, ohne Erkennungsmerkmale zu extrahieren. `input_rejected` bedeutet ungeeignete Eingabe, etwa ein Gesicht zu nahe am Bildrand. Fehlt `liveness`, wurde es nicht bewertet.
 
 **Eingabe:** multipart `image` erforderlich, `max_faces` 1–100, optional `collection_id`. **Verhalten/Ergebnis:** Mehrfachauflösung, gemeinsame NMS, Flächensortierung; 200 `faces` mit Boxen/5 Punkten/Score/Qualität und `processing_ms`. Kein Gesicht ist eine leere Erfolgsliste. **Fehler:** 400 alter min_score, 404 Collection, 413, 422 invalid_image, 503.
 
@@ -45,9 +157,13 @@ curl -sS "${BASE_URL}/v1/detect" -H "${AUTH_HEADER}" -F 'image=@group.jpg' -F 'm
 
 ### `POST /v1/compare`
 
+`liveness_compare_scope` (`both`, `source`, `target`) bestimmt die vor der Erkennung geprüften Seiten. `normal` liefert bei Ablehnung HTTP 422 `liveness_fake` / `liveness_input_rejected`, `error.details.liveness` und `error.details.side`, ohne Ähnlichkeit. `observe` vergleicht weiter und liefert Ergebnisse an den bewerteten Gesichtern.
+
 **Eingabe:** multipart `source`, `target`, optional `threshold` 0–1 und `collection_id`. **Ergebnis:** Wählt je ein Gesicht und liefert 200 `matched`, Cosinus-`similarity`, effektiven threshold, beide Faces und Laufzeit. **Fehler:** 404, 413, 422 invalid_image/face_not_found, 503.
 
 ### `POST /v1/embeddings`
+
+Mit Liveness in `normal` führen Täuschungsversuche oder ungeeignete Eingaben zu HTTP 422 `liveness_fake` / `liveness_input_rejected` und `error.details.liveness`; es wird kein Embedding extrahiert. `observe` liefert Embedding und Liveness am Gesicht.
 
 **Eingabe:** multipart `image`, optional `collection_id`. **Ergebnis:** 200 mit ausgewähltem Face, L2-normalisiertem Embedding, Modell und Laufzeit. Für normale Registrierung nicht nötig; Embeddings werden nicht geloggt. **Fehler:** 400 alter face_selection, 404, 413, 422, 503.
 
@@ -81,6 +197,8 @@ curl -sS "${BASE_URL}/v1/collections" -H "${AUTH_HEADER}" -H 'Content-Type: appl
 
 ### `POST /v1/collections/{collection_id}/persons`
 
+Neue Personen und zusätzliche FaceSamples überspringen Liveness standardmäßig (`liveness_on_registration=false`). Bei aktivierter Prüfung lehnt `normal` Täuschungsversuche oder ungeeignete Eingaben ab; `observe` speichert das Ergebnis und fährt fort. Die Qualitätsprüfung folgt dem gewählten `review_mode`. Ablehnungen zeigen den tatsächlichen `reason` und das Liveness-Ergebnis getrennt.
+
 **Eingabe:** Pfad Collection; multipart wiederholtes `images`, optional id/name/external_id, JSON-String metadata, `review_mode=off|standard|strict`, `embedding_mode=server|external_trusted`; extern benötigt Vektoren und contract ID. **Verhalten/Ergebnis:** Prüft jedes Bild; 201 `person`, akzeptierte `faces`, `rejected_images`; Teilerfolg erlaubt, alle abgelehnt ergibt 422 ohne Person. **Fehler:** 400, 404, 409 ID/Vertrag/Kapazität, 413, 422, 503.
 
 ```bash
@@ -105,6 +223,8 @@ curl -sS "${BASE_URL}/v1/collections/employees/persons" -H "${AUTH_HEADER}" -F '
 
 ### `POST /v1/collections/{collection_id}/persons/{person_id}/faces`
 
+Neue Personen und zusätzliche FaceSamples überspringen Liveness standardmäßig (`liveness_on_registration=false`). Bei aktivierter Prüfung lehnt `normal` Täuschungsversuche oder ungeeignete Eingaben ab; `observe` speichert das Ergebnis und fährt fort. Die Qualitätsprüfung folgt dem gewählten `review_mode`. Ablehnungen zeigen den tatsächlichen `reason` und das Liveness-Ergebnis getrennt.
+
 **Eingabe:** Pfad-IDs; wiederholte images und dieselben Review-/Embedding-Felder wie Person-Erstellung. **Ergebnis:** 201 `faces`, `rejected_images`, Teilerfolg möglich. **Fehler:** Registrierungsfehler plus 404 Person.
 
 ### `GET /v1/collections/{collection_id}/persons/{person_id}/faces`
@@ -122,6 +242,8 @@ curl -sS "${BASE_URL}/v1/collections/employees/persons" -H "${AUTH_HEADER}" -F '
 ## Suche
 
 ### `POST /v1/collections/{collection_id}/search`
+
+Mit Liveness in `normal` führen Täuschungsversuche oder ungeeignete Suchbilder zu HTTP 422 `liveness_fake` / `liveness_input_rejected` und `error.details.liveness`; die Suche läuft nicht. Das unterscheidet sich von einer erfolgreichen leeren Trefferliste. `observe` sucht weiter und liefert Liveness am Suchgesicht.
 
 **Eingabe:** Collection-ID; multipart `image`, `limit` 1–100 (Standard 5), optional threshold, sonst Collection-Wert. **Verhalten/Ergebnis:** Sucht das gewählte Face über alle Samples, pro Person gilt der höchste Wert; 200 `searched_face`, sortierte `matches`, threshold und Laufzeit. Kein Treffer ist leere Liste. **Fehler:** 404, 409 Modell, 413, 422 Bild/Gesicht, 503 Index/Timeout.
 
@@ -154,6 +276,8 @@ Monitor-Konfigurationen liegen dauerhaft in SQLite; aktivierte Aufgaben werden n
 **Zweck:** Einen Monitor dauerhaft entfernen. **Eingabe:** `monitor_id` im Pfad. **Ergebnis:** Decoder, Inferenz und RTSP-Verbindung werden gestoppt, RAM-Ereignisse verworfen, HTTP 204; die Collection bleibt bestehen. **Fehler:** 401, 404.
 
 ### `GET /v1/monitors/{monitor_id}/state`
+
+Mit Liveness in `normal` erhalten blockierte Gesichter `status: liveness_blocked` und ein separates Liveness-Ergebnis. Sie zählen zu `liveness_blocked_faces`, nicht zu `unknown_faces`, und erzeugen keine Eintrittsereignisse. `observe` erkennt weiter. Eingabeablehnung und Täuschungsversuch werden getrennt angezeigt.
 
 **Zweck:** Den aktuellen Zustand für Headless-Clients abfragen. **Eingabe:** Monitor-ID im Pfad. **Ergebnis:** 200 mit Verbindung, effektiver FPS, Laufzeit, übersprungenen Frames, aktuellen Treffern/unbekannten Gesichtern, Preview, Reconnects und Fehlern, ohne Embeddings. **Fehler:** 401, 404.
 

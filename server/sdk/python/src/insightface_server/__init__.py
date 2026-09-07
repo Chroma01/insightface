@@ -35,6 +35,7 @@ from .results import (
     FaceRegistrationResult,
     FaceSample,
     HealthResult,
+    LivenessResult,
     Match,
     ModelsResult,
     Monitor,
@@ -70,6 +71,7 @@ __all__ = [
     "FaceRegistrationResult",
     "FaceSample",
     "HealthResult",
+    "LivenessResult",
     "ImageInput",
     "InsightFaceServerError",
     "NotFoundError",
@@ -98,4 +100,4 @@ __all__ = [
     "ValidationError",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

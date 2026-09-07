@@ -26,13 +26,19 @@ class _Model:
         self.taskname = task
 
 
-def test_constructor_keeps_the_standard_face_analysis_signature():
+def test_constructor_preserves_positional_arguments_and_adds_keyword_only_addons():
     assert list(inspect.signature(FaceAnalysis).parameters) == [
         "name",
         "root",
         "allowed_modules",
+        "addons",
+        "liveness_mode",
+        "liveness_threshold",
         "kwargs",
     ]
+    for name in ("addons", "liveness_mode", "liveness_threshold"):
+        assert inspect.signature(FaceAnalysis).parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+    assert inspect.signature(FaceAnalysis).parameters["liveness_mode"].default == "normal"
 
 
 def test_manifest_coreml_enables_managed_cache_without_public_api_change(
@@ -68,6 +74,9 @@ def test_manifest_coreml_enables_managed_cache_without_public_api_change(
         "name",
         "root",
         "allowed_modules",
+        "addons",
+        "liveness_mode",
+        "liveness_threshold",
         "kwargs",
     ]
 
@@ -183,6 +192,9 @@ def test_coreml_provider_tuple_and_dynamic_opt_out_preserve_public_api(
         "name",
         "root",
         "allowed_modules",
+        "addons",
+        "liveness_mode",
+        "liveness_threshold",
         "kwargs",
     ]
 

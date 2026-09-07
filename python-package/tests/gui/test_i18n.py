@@ -98,6 +98,47 @@ def test_model_download_action_translation_catalog_is_complete_and_format_safe()
             assert translated_fields == source_fields, (language, source)
 
 
+def test_privateframe_photo_workflow_translations_are_used_and_have_no_fallbacks():
+    from insightface.gui.core.i18n import (
+        _PRIVATEFRAME_PHOTO_UI_LANGUAGES,
+        _PRIVATEFRAME_PHOTO_UI_ROWS,
+        _PRIVATEFRAME_PHOTO_UI_TRANSLATIONS,
+        _PRIVATEFRAME_UI_TRANSLATIONS,
+    )
+
+    expected_languages = {
+        option.value for option in LANGUAGE_OPTIONS
+        if option.value not in {"system", "en"}
+    }
+    assert set(_PRIVATEFRAME_PHOTO_UI_LANGUAGES) == expected_languages
+    assert set(_PRIVATEFRAME_PHOTO_UI_TRANSLATIONS) == expected_languages
+    assert len(_PRIVATEFRAME_PHOTO_UI_ROWS) >= 62
+    assert (
+        "Checks up to 1, 3 or 5 selected frames per track unless overridden in the configuration. "
+        "More checks take longer and provide more evidence; they do not guarantee a correct match."
+    ) in _PRIVATEFRAME_PHOTO_UI_ROWS
+    assert {"Processing details…", "PrivateFrame Processing Details"} <= set(
+        _PRIVATEFRAME_PHOTO_UI_ROWS
+    )
+    for source, values in _PRIVATEFRAME_PHOTO_UI_ROWS.items():
+        assert len(values) == len(expected_languages), source
+        source_fields = sorted(
+            (name, spec, conversion)
+            for _text, name, spec, conversion in Formatter().parse(source)
+            if name
+        )
+        for language in expected_languages:
+            translated = _PRIVATEFRAME_PHOTO_UI_TRANSLATIONS[language][source]
+            assert translated.strip() and translated != source, (language, source)
+            assert tr(source, language) == translated
+            assert _PRIVATEFRAME_UI_TRANSLATIONS[language][source] == translated
+            assert sorted(
+                (name, spec, conversion)
+                for _text, name, spec, conversion in Formatter().parse(translated)
+                if name
+            ) == source_fields, (language, source)
+
+
 def test_apply_translations_updates_basic_widgets():
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget

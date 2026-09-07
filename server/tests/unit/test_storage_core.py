@@ -30,7 +30,6 @@ def collection_item(collection_id: str = "employees") -> dict[str, object]:
         "default_threshold": 0.68,
         "metadata": {},
         "model_id": "recognition",
-        "model_version": "1",
         "model_digest": "a" * 64,
         "embedding_dimension": 4,
         "preprocessing_version": "1",
@@ -51,7 +50,6 @@ def face_item(face_id: str, embedding: np.ndarray | None = None) -> dict[str, ob
         "detection_score": 0.9,
         "quality": {"score": 0.8},
         "model_id": "recognition",
-        "model_version": "1",
         "model_digest": "a" * 64,
         "preprocessing_version": "1",
         "crop_path": None,
@@ -139,7 +137,6 @@ def test_repository_round_trips_embedding_and_optional_landmarks(
                 "detection_score": 0.9,
                 "quality": {"score": 0.8},
                 "model_id": "recognition",
-                "model_version": "1",
                 "model_digest": "a" * 64,
                 "preprocessing_version": "1",
                 "crop_path": None,
@@ -173,7 +170,6 @@ def test_embedding_contract_id_is_stable_and_collection_derived(
 ) -> None:
     contract_id = embedding_contract_id(
         model_id="recognition",
-        model_version="1",
         model_digest="A" * 64,
         embedding_dimension=4,
         preprocessing_version="1",
@@ -181,8 +177,8 @@ def test_embedding_contract_id_is_stable_and_collection_derived(
     created = repository.create_collection(collection_item())
 
     assert contract_id == (
-        "ifsemb-v1-sha256:"
-        "0473aa8e9422b084c939259ce447572a82ff9d23dc3a341bd22cf4806b4494b5"
+        "ifsemb-v2-sha256:"
+        "6727ec66a67682836ffe84461721f25bec728b126f47fe4c235bfb5af2ef1d9d"
     )
     assert contract_id.startswith(EMBEDDING_CONTRACT_PREFIX)
     assert created["embedding_contract_id"] == contract_id
@@ -356,11 +352,13 @@ def test_int8_x736_migration_preserves_x1000_collection_and_child_rows(
     shutil.copy(source_migrations / "0001_initial.sql", migrations)
     shutil.copy(source_migrations / "0002_native_search.sql", migrations)
     # Repository always targets the current storage schema; stage migration 0004
-    # through 0006 here while deliberately withholding 0003 to exercise its x1000
+    # through 0006, 0008 and 0009 here while withholding 0003 to exercise its x1000
     # backfill.
     shutil.copy(source_migrations / "0004_collection_face_crops.sql", migrations)
     shutil.copy(source_migrations / "0005_external_trusted_embeddings.sql", migrations)
     shutil.copy(source_migrations / "0006_collection_detection_profiles.sql", migrations)
+    shutil.copy(source_migrations / "0008_liveness.sql", migrations)
+    shutil.copy(source_migrations / "0009_model_identity.sql", migrations)
     database = Database(tmp_path / "x1000.db", migrations)
     database.initialize()
     repository = Repository(database)
@@ -397,7 +395,7 @@ def test_int8_x736_migration_preserves_x1000_collection_and_child_rows(
     assert after.vector_id == before.vector_id
     assert after.person_numeric_id == before.person_numeric_id
     np.testing.assert_array_equal(after.embedding, before.embedding)
-    assert database.status()["migration_count"] == 6
+    assert database.status()["migration_count"] == 8
     with database.read() as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -781,6 +779,7 @@ def test_collection_face_crop_migration_preserves_legacy_rows(tmp_path: Path) ->
 
     shutil.copy(source_migrations / "0004_collection_face_crops.sql", migrations)
     shutil.copy(source_migrations / "0005_external_trusted_embeddings.sql", migrations)
+    shutil.copy(source_migrations / "0008_liveness.sql", migrations)
     database.initialize()
     migrated = Repository(database)
 
@@ -791,7 +790,8 @@ def test_collection_face_crop_migration_preserves_legacy_rows(tmp_path: Path) ->
     assert face["embedding_source"] == "server"
     assert face["embedding_contract_id"] is None
     assert migrated.get_face_crop("employees", "alice", "face-1") is None
-    assert database.status()["migration_count"] == 5
+    assert "liveness" not in face
+    assert database.status()["migration_count"] == 6
     with database.read() as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 

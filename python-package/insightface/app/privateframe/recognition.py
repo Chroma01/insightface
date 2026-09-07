@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -40,13 +41,15 @@ ARC_FACE_TEMPLATE_112.setflags(write=False)
 
 SUPPORTED_GALLERY_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 RECOGNITION_MODES = frozenset({"all", "blur_only", "exempt"})
+UNKNOWN_ACTIONS = frozenset({"auto", "blur", "keep"})
+_LOGGER = logging.getLogger(__name__)
 
 # Gallery references are user-supplied still images, so they use a deliberately
 # small, fixed upright-only detector policy instead of inheriting the much more
 # expensive multi-angle video scan or local-revalidation policy. The 640 view
 # supplies accurate landmarks for ordinary faces; 128 recovers very large
 # faces. SCRFD performs global multi-scale NMS before PrivateFrame applies its
-# stable output cap and the one-face Gallery validator receives the results.
+# stable output cap before the largest detected face is selected.
 GALLERY_DETECTOR_INPUT_SIZES = (640, 128)
 GALLERY_DETECTOR_CONFIDENCE_THRESHOLD = 0.50
 
@@ -67,12 +70,6 @@ TEMPORAL_EVIDENCE_SIMILARITY_OFFSET = 0.10
 SINGLE_FRAME_SIMILARITY_OFFSET = 0.05
 
 RECOGNITION_LANDMARK_SOURCES = frozenset({"local_scrfd", "global_scrfd"})
-
-
-def _diagnostic_failure_reason(stage: str, error: BaseException) -> str:
-    """Return a stable, message-free reason for a recoverable model failure."""
-
-    return f"{stage}:{type(error).__name__}"
 
 
 def detect_gallery_faces_upright(
@@ -199,7 +196,7 @@ def recognition_candidate_quality(
 
     These constants are an internal recognizer profile, not user-facing
     configuration. The gate is intentionally conservative because a rejected
-    candidate makes a track UNKNOWN (and therefore blurred), while a poor crop
+    candidate makes a track UNKNOWN (handled by the selected policy), while a poor crop
     can create an unsafe false exemption.
     """
 
@@ -343,14 +340,13 @@ def _embed_aligned_face(recognizer: Any, aligned_bgr: np.ndarray) -> np.ndarray:
 class RecognitionProfile:
     name: str
     max_frames_per_track: int
-    minimum_margin: float = 0.08
     minimum_cluster_similarity: float = 0.35
 
 
 RECOGNITION_PROFILES: Mapping[str, RecognitionProfile] = MappingProxyType(
     {
         # A one-frame track cannot expose a switch; the single-frame decision
-        # therefore compensates with a stricter cosine threshold and margin.
+        # therefore compensates with a stricter cosine threshold.
         "fast": RecognitionProfile("fast", 1),
         "balanced": RecognitionProfile("balanced", 3),
         "accurate": RecognitionProfile("accurate", 5),
@@ -586,21 +582,6 @@ class EmbeddingSample:
             raise ValueError("embedding quality must be finite and positive")
 
 
-@dataclass(frozen=True)
-class IdentityPrototype:
-    person_id: str
-    embedding: np.ndarray
-    reference_count: int
-    rejected_count: int = 0
-
-
-@dataclass(frozen=True)
-class TrackEmbedding:
-    embedding: np.ndarray | None
-    support: int
-    frame_indices: tuple[int, ...]
-
-
 def _normalized_matrix(values: Sequence[Any]) -> np.ndarray:
     vectors = [l2_normalize_embedding(value) for value in values]
     if not vectors:
@@ -642,45 +623,6 @@ def _weighted_prototype(
     return l2_normalize_embedding(combined)
 
 
-def build_identity_prototype(
-    person_id: str,
-    embeddings: Sequence[Any],
-    weights: Sequence[float] | None = None,
-    *,
-    minimum_cluster_similarity: float = 0.35,
-) -> IdentityPrototype:
-    """Build a robust gallery identity prototype from its largest coherent cluster."""
-
-    normalized_id = _person_id(person_id)
-    vectors = _normalized_matrix(embeddings)
-    sample_weights = _validated_weights(weights, len(vectors))
-    threshold = _cosine_value(minimum_cluster_similarity, field="minimum_cluster_similarity")
-    clusters = _complete_link_clusters(vectors, threshold)
-    ranked = sorted(
-        clusters,
-        # Coherent reference count, never detector confidence, determines
-        # which identity cluster is dominant.
-        key=lambda values: (len(values), sum(sample_weights[values]), -min(values)),
-        reverse=True,
-    )
-    if len(ranked) > 1:
-        # Detector confidence may weight already-consistent references, but it
-        # must never choose between incompatible identities. Two disagreeing
-        # references are always ambiguous. With three or more references, only
-        # a coherent cluster containing at least two thirds of all references
-        # may reject the remaining outliers.
-        minimum_dominant_count = math.ceil(len(vectors) * 2.0 / 3.0)
-        if len(ranked[0]) < max(2, minimum_dominant_count):
-            raise ValueError(f"identity {normalized_id!r} has inconsistent reference images")
-    kept = ranked[0]
-    return IdentityPrototype(
-        person_id=normalized_id,
-        embedding=_weighted_prototype(vectors, kept, sample_weights),
-        reference_count=len(kept),
-        rejected_count=len(vectors) - len(kept),
-    )
-
-
 @dataclass(frozen=True)
 class _TrackClusters:
     ordered: tuple[EmbeddingSample, ...]
@@ -714,27 +656,6 @@ def _cluster_track_embeddings(
     return _TrackClusters(ordered, vectors, indices, prototypes)
 
 
-def aggregate_track_embeddings(
-    samples: Sequence[EmbeddingSample],
-    *,
-    minimum_cluster_similarity: float = 0.35,
-) -> TrackEmbedding:
-    """Aggregate a coherent track; any second quality cluster is a conflict."""
-
-    analysis = _cluster_track_embeddings(samples, minimum_cluster_similarity)
-    if analysis is None:
-        return TrackEmbedding(None, 0, ())
-    main = analysis.indices[0]
-    conflicting = len(analysis.indices) > 1
-    return TrackEmbedding(
-        embedding=None if conflicting else analysis.prototypes[0],
-        support=len(main),
-        frame_indices=tuple(
-            analysis.ordered[index].frame_index for index in main
-        ),
-    )
-
-
 class IdentityStatus(str, Enum):
     CONFIRMED = "CONFIRMED"
     UNKNOWN = "UNKNOWN"
@@ -743,13 +664,11 @@ class IdentityStatus(str, Enum):
 
 @dataclass(frozen=True)
 class IdentityDecision:
+    """Track membership in the reference photo set, without named identities."""
+
     status: IdentityStatus
-    person_id: str | None = None
-    top1_person_id: str | None = None
-    top1_similarity: float | None = None
-    runner_up_person_id: str | None = None
-    runner_up_similarity: float | None = None
-    margin: float | None = None
+    matched_reference_files: tuple[str, ...] = ()
+    similarity: float | None = None
     support: int = 0
     frame_indices: tuple[int, ...] = ()
     reason: str = ""
@@ -760,16 +679,12 @@ class IdentityDecision:
     threshold_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stable, JSON-native identity artifact representation."""
+        """Return the JSON-native reference-match evidence."""
 
         return {
             "status": self.status.value,
-            "person_id": self.person_id,
-            "top1_person_id": self.top1_person_id,
-            "top1_similarity": self.top1_similarity,
-            "runner_up_person_id": self.runner_up_person_id,
-            "runner_up_similarity": self.runner_up_similarity,
-            "margin": self.margin,
+            "matched_reference_files": list(self.matched_reference_files),
+            "similarity": self.similarity,
             "support": self.support,
             "frame_indices": list(self.frame_indices),
             "reason": self.reason,
@@ -781,318 +696,124 @@ class IdentityDecision:
         }
 
 
-def _prototype_mapping(
-    prototypes: Mapping[str, IdentityPrototype | np.ndarray],
-) -> dict[str, np.ndarray]:
+def _reference_mapping(references: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
     result: dict[str, np.ndarray] = {}
     width: int | None = None
-    for raw_id, raw_prototype in prototypes.items():
-        person_id = _person_id(raw_id)
-        if person_id in result:
-            raise ValueError(f"duplicate NFC-normalized person id: {person_id!r}")
-        vector = l2_normalize_embedding(
-            raw_prototype.embedding if isinstance(raw_prototype, IdentityPrototype) else raw_prototype
-        )
+    for raw_name, embedding in references.items():
+        name = _reference_file_name(raw_name)
+        if name in result:
+            raise ValueError(f"duplicate NFC-normalized reference filename: {name!r}")
+        vector = l2_normalize_embedding(embedding)
         if width is None:
             width = vector.size
         elif vector.size != width:
-            raise ValueError("gallery prototypes must have the same width")
-        result[person_id] = vector
+            raise ValueError("reference embeddings must have the same width")
+        result[name] = vector
     if not result:
-        raise ValueError("at least one gallery prototype is required")
+        raise ValueError("at least one reference embedding is required")
     return result
 
 
-def _rank_identities(
-    embedding: np.ndarray,
-    prototypes: Mapping[str, np.ndarray],
-) -> list[tuple[str, float]]:
-    if any(value.size != embedding.size for value in prototypes.values()):
-        raise ValueError("track and gallery embedding widths do not match")
-    return sorted(
-        ((person_id, float(embedding @ value)) for person_id, value in prototypes.items()),
+def _best_reference_match(
+    embedding: np.ndarray, references: Mapping[str, np.ndarray]
+) -> tuple[str, float]:
+    if any(value.size != embedding.size for value in references.values()):
+        raise ValueError("track and reference embedding widths do not match")
+    return min(
+        ((name, float(embedding @ value)) for name, value in references.items()),
         key=lambda item: (-item[1], item[0]),
     )
 
 
 def decide_track_identity(
     samples: Sequence[EmbeddingSample],
-    prototypes: Mapping[str, IdentityPrototype | np.ndarray],
+    prototypes: Mapping[str, np.ndarray],
     similarity_threshold: float,
     *,
-    minimum_margin: float = 0.08,
     minimum_cluster_similarity: float = 0.35,
     single_frame_similarity_offset: float = SINGLE_FRAME_SIMILARITY_OFFSET,
-    single_frame_minimum_margin: float = 0.12,
 ) -> IdentityDecision:
-    """Return one fail-safe identity decision for a canonical track."""
+    """Confirm reference-set membership only with unanimous temporal evidence.
+
+    Every reference photo is an independent exemplar of the same selected set.
+    No photo-to-photo runner-up margin is meaningful: two photos may show the
+    same person. Different reference people are never averaged together.
+    """
 
     threshold = _cosine_value(similarity_threshold, field="similarity_threshold")
     if threshold < 0.0:
         raise ValueError("similarity_threshold must be between 0 and 1")
-    margin_required = _finite_number(minimum_margin, field="minimum_margin")
-    if not 0.0 <= margin_required <= 2.0:
-        raise ValueError("minimum_margin must be between 0 and 2")
     single_offset = _finite_number(
-        single_frame_similarity_offset,
-        field="single_frame_similarity_offset",
+        single_frame_similarity_offset, field="single_frame_similarity_offset"
     )
     if not 0.0 <= single_offset <= 1.0:
         raise ValueError("single_frame_similarity_offset must be between 0 and 1")
-    single_margin = _finite_number(
-        single_frame_minimum_margin,
-        field="single_frame_minimum_margin",
-    )
-    if not 0.0 <= single_margin <= 2.0:
-        raise ValueError("single_frame_minimum_margin must be between 0 and 2")
-    gallery = _prototype_mapping(prototypes)
+    references = _reference_mapping(prototypes)
     frame_indices = [sample.frame_index for sample in samples]
     if len(set(frame_indices)) != len(frame_indices):
-        return IdentityDecision(
-            IdentityStatus.UNKNOWN,
-            reason="duplicate_frame_samples",
-        )
-
-    clustered = _cluster_track_embeddings(
-        samples, minimum_cluster_similarity
-    )
+        return IdentityDecision(IdentityStatus.UNKNOWN, reason="duplicate_frame_samples")
+    clustered = _cluster_track_embeddings(samples, minimum_cluster_similarity)
     if clustered is None:
-        return IdentityDecision(status=IdentityStatus.UNKNOWN, reason="no_embedding")
+        return IdentityDecision(IdentityStatus.UNKNOWN, reason="no_embedding")
 
-    # Whole-track exemption is deliberately unanimous over every selected,
-    # quality-qualified sample. A minority sample can be a brief identity
-    # switch even when it remains close enough to the dominant appearance to
-    # fall into the same complete-link cluster. Majority voting alone would
-    # therefore be unsafe: two target frames could hide one stranger frame.
-    independently_confirmed: dict[
-        str, list[tuple[EmbeddingSample, list[tuple[str, float]], float | None]]
-    ] = {}
-    unconfirmed_frames: list[int] = []
-    per_frame_threshold = (
-        min(1.0, threshold + single_offset)
-        if len(clustered.ordered) == 1
-        else threshold
-    )
-    per_frame_margin = (
-        max(margin_required, single_margin)
-        if len(clustered.ordered) == 1
-        else margin_required
-    )
-    for sample, vector in zip(clustered.ordered, clustered.vectors):
-        ranked_sample = _rank_identities(vector, gallery)
-        sample_margin = (
-            ranked_sample[0][1] - ranked_sample[1][1]
-            if len(ranked_sample) > 1
-            else None
-        )
-        if ranked_sample[0][1] < per_frame_threshold or (
-            sample_margin is not None and sample_margin < per_frame_margin
-        ):
-            unconfirmed_frames.append(sample.frame_index)
-            continue
-        independently_confirmed.setdefault(ranked_sample[0][0], []).append(
-            (sample, ranked_sample, sample_margin)
-        )
-    if len(independently_confirmed) > 1:
-        return IdentityDecision(
-            status=IdentityStatus.CONFLICT,
-            support=len(clustered.ordered),
-            frame_indices=tuple(
-                item.frame_index for item in clustered.ordered
-            ),
-            reason="multiple_confirmed_identities",
-        )
-    if unconfirmed_frames and len(clustered.ordered) > 1:
-        separated_cluster = len(clustered.indices) > 1
-        return IdentityDecision(
-            status=(
-                IdentityStatus.CONFLICT
-                if separated_cluster
-                else IdentityStatus.UNKNOWN
-            ),
-            support=len(clustered.ordered) - len(unconfirmed_frames),
-            frame_indices=tuple(
-                item.frame_index for item in clustered.ordered
-            ),
-            reason=(
-                "unconfirmed_track_cluster"
-                if separated_cluster
-                else "unconfirmed_track_sample"
-            ),
-        )
-
-    # A whole-track exemption is allowed across pose-separated embedding
-    # clusters only when every quality-qualified cluster independently clears
-    # Gallery threshold+margin for the same person. An UNKNOWN minority cluster
-    # can be a short identity switch, so it vetoes the entire track.
-    if len(clustered.indices) > 1:
-        cluster_matches: list[
-            tuple[
-                str,
-                float,
-                str | None,
-                float | None,
-                float | None,
-                tuple[int, ...],
-            ]
-        ] = []
-        all_cluster_frames = tuple(
-            item.frame_index for item in clustered.ordered
-        )
-        for indices, prototype in zip(
-            clustered.indices, clustered.prototypes
-        ):
-            ranked_cluster = _rank_identities(prototype, gallery)
-            cluster_person, cluster_score = ranked_cluster[0]
-            runner_person, runner_score = (
-                ranked_cluster[1]
-                if len(ranked_cluster) > 1
-                else (None, None)
-            )
-            cluster_margin = (
-                cluster_score - runner_score
-                if runner_score is not None
-                else None
-            )
-            singleton = len(indices) == 1
-            cluster_threshold = (
-                min(1.0, threshold + single_offset)
-                if singleton
-                else threshold
-            )
-            cluster_margin_required = (
-                max(margin_required, single_margin)
-                if singleton
-                else margin_required
-            )
-            if cluster_score < cluster_threshold or (
-                cluster_margin is not None
-                and cluster_margin < cluster_margin_required
-            ):
-                return IdentityDecision(
-                    status=IdentityStatus.CONFLICT,
-                    support=len(clustered.ordered),
-                    frame_indices=all_cluster_frames,
-                    reason="unconfirmed_track_cluster",
-                )
-            cluster_matches.append(
-                (
-                    cluster_person,
-                    cluster_score,
-                    runner_person,
-                    runner_score,
-                    cluster_margin,
-                    tuple(
-                        clustered.ordered[index].frame_index
-                        for index in indices
-                    ),
-                )
-            )
-        confirmed_people = {value[0] for value in cluster_matches}
-        if len(confirmed_people) != 1:
-            return IdentityDecision(
-                status=IdentityStatus.CONFLICT,
-                support=len(clustered.ordered),
-                frame_indices=all_cluster_frames,
-                reason="multiple_confirmed_identities",
-            )
-        weakest = min(cluster_matches, key=lambda value: value[1])
-        margins = [
-            value[4] for value in cluster_matches if value[4] is not None
-        ]
-        person_id = next(iter(confirmed_people))
-        return IdentityDecision(
-            status=IdentityStatus.CONFIRMED,
-            person_id=person_id,
-            top1_person_id=person_id,
-            top1_similarity=weakest[1],
-            runner_up_person_id=weakest[2],
-            runner_up_similarity=weakest[3],
-            margin=min(margins) if margins else None,
-            support=len(clustered.ordered),
-            frame_indices=all_cluster_frames,
-            reason="confirmed_all_clusters",
-        )
-
-    aggregate = aggregate_track_embeddings(
-        samples,
-        minimum_cluster_similarity=minimum_cluster_similarity,
-    )
-    if aggregate.embedding is None:
-        return IdentityDecision(status=IdentityStatus.UNKNOWN, reason="no_embedding")
-
-    ranked = _rank_identities(aggregate.embedding, gallery)
-    top_id, top_score = ranked[0]
-    runner_id, runner_score = ranked[1] if len(ranked) > 1 else (None, None)
-    margin = top_score - runner_score if runner_score is not None else None
+    all_frames = tuple(item.frame_index for item in clustered.ordered)
+    sample_threshold = min(1.0, threshold + single_offset) if len(samples) == 1 else threshold
+    matches = [_best_reference_match(vector, references) for vector in clustered.vectors]
+    confirmed = [(name, score) for name, score in matches if score >= sample_threshold]
     common = {
-        "top1_person_id": top_id,
-        "top1_similarity": top_score,
-        "runner_up_person_id": runner_id,
-        "runner_up_similarity": runner_score,
-        "margin": margin,
-        "support": aggregate.support,
-        "frame_indices": aggregate.frame_indices,
+        "matched_reference_files": tuple(sorted({name for name, _score in confirmed})),
+        "similarity": min(score for _name, score in matches),
+        "support": len(confirmed),
+        "frame_indices": all_frames,
     }
+    if len(confirmed) != len(matches):
+        mixed = bool(confirmed)
+        return IdentityDecision(
+            IdentityStatus.CONFLICT if mixed and len(clustered.indices) > 1 else IdentityStatus.UNKNOWN,
+            reason=(
+                "unconfirmed_track_cluster" if mixed and len(clustered.indices) > 1
+                else "unconfirmed_track_sample" if mixed
+                else "below_similarity_threshold"
+            ),
+            **common,
+        )
 
-    aggregate_threshold = min(1.0, threshold + single_offset) if len(samples) == 1 else threshold
-    aggregate_margin = max(margin_required, single_margin) if len(samples) == 1 else margin_required
-    if top_score < aggregate_threshold:
-        return IdentityDecision(
-            status=IdentityStatus.UNKNOWN,
-            reason="below_similarity_threshold",
-            **common,
-        )
-    if margin is not None and margin < aggregate_margin:
-        return IdentityDecision(
-            status=IdentityStatus.UNKNOWN,
-            reason="insufficient_margin",
-            **common,
-        )
-    matches = independently_confirmed.get(top_id, [])
-    required_support = len(samples)
-    if len(matches) < required_support:
-        return IdentityDecision(
-            status=IdentityStatus.UNKNOWN,
-            reason="insufficient_consistent_support",
-            **common,
-        )
+    # Individual frames and each coherent appearance cluster must agree on
+    # membership. This vetoes a weak pose/brief stranger hidden by averaging.
+    # Different photos can independently support different video poses.
+    cluster_scores = []
+    for indices, prototype in zip(clustered.indices, clustered.prototypes):
+        _name, score = _best_reference_match(prototype, references)
+        cluster_scores.append(score)
+        cluster_threshold = min(1.0, threshold + single_offset) if len(indices) == 1 else threshold
+        if score < cluster_threshold:
+            return IdentityDecision(
+                IdentityStatus.CONFLICT if len(clustered.indices) > 1 else IdentityStatus.UNKNOWN,
+                reason="unconfirmed_track_cluster",
+                **{**common, "similarity": min(common["similarity"], score)},
+            )
     return IdentityDecision(
-        status=IdentityStatus.CONFIRMED,
-        person_id=top_id,
-        top1_person_id=top_id,
-        top1_similarity=top_score,
-        runner_up_person_id=runner_id,
-        runner_up_similarity=runner_score,
-        margin=margin,
-        support=len(matches),
-        frame_indices=tuple(sorted(sample.frame_index for sample, _ranked, _margin in matches)),
-        reason=(
-            "confirmed_single_frame"
-            if len(samples) == 1
-            else "confirmed_unanimous_support"
-        ),
+        IdentityStatus.CONFIRMED,
+        reason="confirmed_single_frame" if len(samples) == 1 else "confirmed_unanimous_support",
+        **{**common, "similarity": min(common["similarity"], *cluster_scores)},
     )
 
 
 @dataclass(frozen=True)
 class GalleryImage:
-    person_id: str
     path: Path
     relative_file_name: str
 
 
 @dataclass(frozen=True)
 class GalleryFileFingerprint:
-    """Non-biometric, location-independent gallery content identity."""
+    """Non-biometric, location-independent reference photo content identity."""
 
-    person_id: str
     relative_file_name: str
     content_sha256: str
 
     def to_dict(self) -> dict[str, str]:
         return {
-            "person_id": self.person_id,
             "relative_file_name": self.relative_file_name,
             "content_sha256": self.content_sha256,
         }
@@ -1101,23 +822,22 @@ class GalleryFileFingerprint:
 @dataclass(frozen=True)
 class GalleryScan:
     root: Path
-    person_ids: tuple[str, ...]
     images: tuple[GalleryImage, ...]
 
 
 @dataclass(frozen=True)
 class GalleryReference:
-    person_id: str
     file_name: str
     relative_file_name: str
     content_sha256: str
     embedding: np.ndarray
     quality: float
+    detected_face_count: int
+    selected_box: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
 class GalleryRejection:
-    person_id: str
     file_name: str
     reason: str
     relative_file_name: str = ""
@@ -1127,8 +847,7 @@ class GalleryRejection:
 @dataclass(frozen=True)
 class Gallery:
     root: Path
-    person_ids: tuple[str, ...]
-    prototypes: Mapping[str, IdentityPrototype]
+    prototypes: Mapping[str, np.ndarray]
     references: tuple[GalleryReference, ...]
     rejections: tuple[GalleryRejection, ...]
     file_fingerprints: tuple[GalleryFileFingerprint, ...]
@@ -1139,7 +858,7 @@ class Gallery:
         return self.content_fingerprint
 
     def fingerprint_dict(self) -> dict[str, Any]:
-        """Return stable gallery identity without paths, pixels, or embeddings."""
+        """Return reference photo identity without paths, pixels, or embeddings."""
 
         return {
             "sha256": self.content_fingerprint,
@@ -1148,48 +867,31 @@ class Gallery:
 
 
 def scan_gallery(path: str | Path) -> GalleryScan:
-    """Scan only direct, non-hidden, non-symlink images under first-level people."""
+    """Scan only direct, non-hidden, non-symlink reference images in a folder."""
 
     root = Path(path).expanduser()
     if root.is_symlink():
-        raise ValueError("gallery root must not be a symlink")
+        raise ValueError("reference root must not be a symlink")
     if not root.is_dir():
-        raise FileNotFoundError(f"gallery directory does not exist: {root}")
+        raise FileNotFoundError(f"reference directory does not exist: {root}")
     root = root.resolve()
-    people: dict[str, Path] = {}
-    for entry in sorted(root.iterdir(), key=lambda value: value.name):
-        if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
-            continue
-        person_id = _person_id(entry.name)
-        if person_id in people:
-            raise ValueError(
-                "gallery has directory names that collide after Unicode NFC "
-                f"normalization: {people[person_id].name!r}, {entry.name!r}"
-            )
-        people[person_id] = entry
     images: list[GalleryImage] = []
-    for person_id, directory in people.items():
-        normalized_names: dict[str, str] = {}
-        for entry in sorted(directory.iterdir(), key=lambda value: value.name):
-            if entry.name.startswith(".") or entry.is_symlink() or not entry.is_file():
-                continue
-            if entry.suffix.lower() in SUPPORTED_GALLERY_EXTENSIONS:
-                normalized_name = unicodedata.normalize("NFC", entry.name)
-                if normalized_name in normalized_names:
-                    raise ValueError(
-                        "gallery file names collide after Unicode NFC "
-                        f"normalization: {normalized_names[normalized_name]!r}, "
-                        f"{entry.name!r}"
-                    )
-                normalized_names[normalized_name] = entry.name
-                images.append(
-                    GalleryImage(
-                        person_id,
-                        entry.resolve(),
-                        f"{person_id}/{normalized_name}",
-                    )
-                )
-    return GalleryScan(root, tuple(people), tuple(images))
+    normalized_names: dict[str, str] = {}
+    for entry in sorted(root.iterdir(), key=lambda value: value.name):
+        if entry.name.startswith(".") or entry.is_symlink() or not entry.is_file():
+            continue
+        if entry.suffix.lower() not in SUPPORTED_GALLERY_EXTENSIONS:
+            continue
+        normalized_name = _reference_file_name(entry.name)
+        if normalized_name in normalized_names:
+            raise ValueError(
+                "reference filenames collide after Unicode NFC normalization: "
+                f"{normalized_names[normalized_name]!r}, {entry.name!r}"
+            )
+        normalized_names[normalized_name] = entry.name
+        images.append(GalleryImage(entry.resolve(), normalized_name))
+    images.sort(key=lambda value: value.relative_file_name)
+    return GalleryScan(root, tuple(images))
 
 
 def _read_gallery_image(path: Path) -> np.ndarray | None:
@@ -1204,9 +906,7 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _gallery_content_fingerprint(
-    values: Sequence[GalleryFileFingerprint],
-) -> str:
+def _gallery_content_fingerprint(values: Sequence[GalleryFileFingerprint]) -> str:
     payload = json.dumps(
         [value.to_dict() for value in values],
         ensure_ascii=False,
@@ -1222,12 +922,21 @@ def _detect_gallery_faces(detector: Any, image: np.ndarray) -> Sequence[Mapping[
     elif callable(getattr(detector, "detect", None)):
         result = detector.detect(image)
     else:
-        raise TypeError("gallery detector must be callable or expose detect(image)")
+        raise TypeError("reference detector must be callable or expose detect(image)")
     if not isinstance(result, Sequence) or isinstance(result, (str, bytes)):
-        raise TypeError("gallery detector must return a sequence")
+        raise TypeError("reference detector must return a sequence")
     if not all(isinstance(value, Mapping) for value in result):
-        raise TypeError("gallery detector results must be mappings")
+        raise TypeError("reference detector results must be mappings")
     return result
+
+
+def _detection_box(detection: Mapping[str, Any]) -> tuple[float, float, float, float]:
+    box = np.asarray(detection.get("box"), dtype=np.float64)
+    if box.shape != (4,) or not np.all(np.isfinite(box)):
+        raise ValueError("face box must contain four finite coordinates")
+    if box[2] <= box[0] or box[3] <= box[1]:
+        raise ValueError("face box must have positive width and height")
+    return tuple(float(value) for value in box)
 
 
 def build_gallery(
@@ -1235,54 +944,34 @@ def build_gallery(
     detector: Any,
     recognizer: Any,
     *,
-    target_persons: Sequence[str] = (),
     image_loader: Callable[[Path], np.ndarray | None] = _read_gallery_image,
-    minimum_cluster_similarity: float = 0.35,
 ) -> Gallery:
-    """Validate gallery images and build one prototype per usable identity."""
+    """Select the largest face from each reference photo, then validate it.
+
+    A rejected largest face never falls back to another person in that photo.
+    Detector and recognizer execution failures abort the task; unsuitable
+    reference photographs are the only recoverable per-photo failures.
+    """
 
     scanned = scan_gallery(path)
-    targets = _person_ids(target_persons)
-    missing = sorted(set(targets) - set(scanned.person_ids))
-    if missing:
-        raise ValueError(f"target persons are absent from gallery: {missing}")
     references: list[GalleryReference] = []
     rejections: list[GalleryRejection] = []
     file_fingerprints = tuple(
-        sorted(
-            (
-                GalleryFileFingerprint(
-                    item.person_id,
-                    item.relative_file_name,
-                    _sha256_path(item.path),
-                )
-                for item in scanned.images
-            ),
-            key=lambda value: (
-                value.person_id,
-                value.relative_file_name,
-                value.content_sha256,
-            ),
-        )
+        GalleryFileFingerprint(item.relative_file_name, _sha256_path(item.path))
+        for item in scanned.images
     )
     fingerprint_by_relative_name = {value.relative_file_name: value for value in file_fingerprints}
 
     def reject(item: GalleryImage, reason: str) -> None:
         fingerprint = fingerprint_by_relative_name[item.relative_file_name]
-        rejections.append(
-            GalleryRejection(
-                item.person_id,
-                item.path.name,
-                reason,
-                item.relative_file_name,
-                fingerprint.content_sha256,
-            )
-        )
+        rejections.append(GalleryRejection(
+            item.path.name, reason, item.relative_file_name, fingerprint.content_sha256
+        ))
+        _LOGGER.warning("Reference photo %s was not used: %s", item.path.name, reason)
 
-    seen_content_by_person: dict[str, set[str]] = {}
+    seen_content: set[str] = set()
     for item in scanned.images:
         fingerprint = fingerprint_by_relative_name[item.relative_file_name]
-        seen_content = seen_content_by_person.setdefault(item.person_id, set())
         if fingerprint.content_sha256 in seen_content:
             reject(item, "duplicate_content")
             continue
@@ -1291,7 +980,8 @@ def build_gallery(
             image = image_loader(item.path)
         except (OSError, ValueError, cv2.error):
             image = None
-        if image is None or np.asarray(image).ndim != 3 or np.asarray(image).shape[2] != 3:
+        image = None if image is None else np.asarray(image)
+        if image is None or image.ndim != 3 or image.shape[2] != 3 or image.size == 0:
             reject(item, "unreadable_image")
             continue
         try:
@@ -1299,21 +989,27 @@ def build_gallery(
         except MemoryError:
             raise
         except Exception as error:
-            reject(
-                item,
-                _diagnostic_failure_reason(
-                    "detector_inference_error",
-                    error,
-                ),
-            )
-            continue
-        if len(detections) == 0:
+            raise RuntimeError(f"Reference photo {item.path.name}: face detector inference failed") from error
+        if not detections:
             reject(item, "no_face")
             continue
-        if len(detections) != 1:
-            reject(item, "multiple_faces")
+        # Validate boxes before ranking: with a malformed box we cannot know
+        # which face is largest, so selecting another would be misleading.
+        try:
+            boxes = [_detection_box(value) for value in detections]
+        except (TypeError, ValueError):
+            reject(item, "invalid_face_box")
             continue
-        detection = detections[0]
+        selected_index = max(
+            range(len(boxes)),
+            key=lambda index: (boxes[index][2] - boxes[index][0]) * (boxes[index][3] - boxes[index][1]),
+        )
+        detection, selected_box = detections[selected_index], boxes[selected_index]
+        if len(detections) > 1:
+            _LOGGER.info(
+                "Reference photo %s: detected %d faces; using only the largest face (box=%s), ignoring %d others",
+                item.path.name, len(detections), selected_box, len(detections) - 1,
+            )
         if "landmarks" not in detection:
             reject(item, "missing_landmarks")
             continue
@@ -1331,19 +1027,11 @@ def build_gallery(
         ):
             reject(item, "invalid_confidence")
             continue
-        if "box" not in detection:
-            reject(item, "missing_box")
-            continue
-        confidence = float(raw_confidence)
         aligned: np.ndarray | None = None
         try:
             aligned = arcface_align_112(image, landmarks)
             quality, eligible, _details = recognition_candidate_quality(
-                aligned,
-                detection["box"],
-                landmarks,
-                confidence,
-                image.shape,
+                aligned, selected_box, landmarks, float(raw_confidence), image.shape,
             )
         except (TypeError, ValueError, cv2.error):
             reject(item, "invalid_geometry")
@@ -1360,49 +1048,26 @@ def build_gallery(
         except MemoryError:
             raise
         except Exception as error:
-            reject(
-                item,
-                _diagnostic_failure_reason(
-                    "recognizer_inference_error",
-                    error,
-                ),
-            )
-            continue
+            raise RuntimeError(f"Reference photo {item.path.name}: recognizer inference failed") from error
         finally:
             if aligned.flags.writeable:
                 aligned.fill(0)
-        references.append(
-            GalleryReference(
-                item.person_id,
-                item.path.name,
-                item.relative_file_name,
-                fingerprint.content_sha256,
-                embedding,
-                quality,
-            )
-        )
+        references.append(GalleryReference(
+            item.path.name, item.relative_file_name, fingerprint.content_sha256,
+            embedding, quality, len(detections), selected_box,
+        ))
 
-    by_person: dict[str, list[GalleryReference]] = {person_id: [] for person_id in scanned.person_ids}
-    for reference in references:
-        by_person[reference.person_id].append(reference)
-    prototypes: dict[str, IdentityPrototype] = {}
-    for person_id, values in by_person.items():
-        if not values:
-            continue
-        prototypes[person_id] = build_identity_prototype(
-            person_id,
-            [value.embedding for value in values],
-            [value.quality for value in values],
-            minimum_cluster_similarity=minimum_cluster_similarity,
-        )
-    invalid_targets = sorted(set(targets) - set(prototypes))
-    if invalid_targets:
-        raise ValueError(f"target persons have no usable reference images: {invalid_targets}")
-    if not prototypes:
-        raise ValueError("gallery has no usable reference images")
+    _LOGGER.info(
+        "Reference photos: read %d, used %d, skipped %d",
+        len(scanned.images), len(references), len(rejections),
+    )
+    if not references:
+        raise ValueError("No usable faces were found in the reference photos; choose clearer reference photos and try again")
+    prototypes = _reference_mapping({
+        reference.relative_file_name: reference.embedding for reference in references
+    })
     return Gallery(
         root=scanned.root,
-        person_ids=scanned.person_ids,
         prototypes=MappingProxyType(prototypes),
         references=tuple(references),
         rejections=tuple(rejections),
@@ -1417,47 +1082,60 @@ class PolicyDecision:
     reason: str
 
 
-def _identity_from_artifact(
-    value: IdentityDecision | Mapping[str, Any] | None,
-) -> IdentityDecision:
+def _identity_from_artifact(value: IdentityDecision | Mapping[str, Any] | None) -> IdentityDecision:
     if isinstance(value, IdentityDecision):
-        return value
-    if not isinstance(value, Mapping):
-        return IdentityDecision(IdentityStatus.UNKNOWN, reason="missing_identity_artifact")
-    raw_status = value.get("status", "")
+        status, files = value.status, value.matched_reference_files
+    elif isinstance(value, Mapping):
+        status, files = value.get("status"), value.get("matched_reference_files")
+    else:
+        raise ValueError("missing or invalid reference-match artifact")
     try:
-        status = raw_status if isinstance(raw_status, IdentityStatus) else IdentityStatus(str(raw_status))
-    except ValueError:
-        return IdentityDecision(IdentityStatus.UNKNOWN, reason="invalid_identity_artifact")
-    person = value.get("person_id")
-    if person is not None and not isinstance(person, str):
-        return IdentityDecision(IdentityStatus.UNKNOWN, reason="invalid_identity_artifact")
-    return IdentityDecision(status, person_id=person, reason="artifact")
+        status = IdentityStatus(status)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid reference-match artifact status") from error
+    if not isinstance(files, (list, tuple)):
+        raise ValueError("invalid reference-match artifact filenames")
+    try:
+        normalized_files = tuple(_reference_file_name(name) for name in files)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid reference-match artifact filenames") from error
+    if len(set(normalized_files)) != len(normalized_files):
+        raise ValueError("reference-match artifact filenames collide after Unicode NFC normalization")
+    if status is IdentityStatus.CONFIRMED and not normalized_files:
+        raise ValueError("confirmed reference-match artifact has no matched photos")
+    if isinstance(value, IdentityDecision):
+        return replace(value, status=status, matched_reference_files=normalized_files)
+    return IdentityDecision(status, matched_reference_files=normalized_files, reason="artifact")
+
+
+def resolve_unknown_action(mode: str, unknown_action: str = "auto") -> str:
+    policy_mode = _recognition_mode(mode)
+    if not isinstance(unknown_action, str) or unknown_action not in UNKNOWN_ACTIONS:
+        raise ValueError(f"recognition unknown_action must be one of {sorted(UNKNOWN_ACTIONS)}")
+    if policy_mode == "all":
+        return "blur"
+    if unknown_action == "auto":
+        return "keep" if policy_mode == "blur_only" else "blur"
+    return unknown_action
 
 
 def apply_identity_policy(
     mode: str,
     identity: IdentityDecision | Mapping[str, Any] | None,
-    target_persons: Sequence[str],
+    unknown_action: str = "auto",
 ) -> PolicyDecision:
-    """Map identity evidence to rendering behavior without touching geometry."""
+    """Map reference-match evidence to rendering without changing geometry."""
 
     policy_mode = _recognition_mode(mode)
+    fallback = resolve_unknown_action(policy_mode, unknown_action)
     if policy_mode == "all":
         return PolicyDecision(True, "policy_all")
-    normalized_identity = _identity_from_artifact(identity)
-    targets = set(_person_ids(target_persons))
-    if not targets:
-        raise ValueError(f"recognition mode {policy_mode} requires target persons")
-    if normalized_identity.status is not IdentityStatus.CONFIRMED or normalized_identity.person_id is None:
-        return PolicyDecision(True, f"fail_safe_{normalized_identity.status.value.lower()}")
-    try:
-        matched = _person_id(normalized_identity.person_id) in targets
-    except (TypeError, ValueError):
-        return PolicyDecision(True, "fail_safe_invalid_identity")
-    if policy_mode == "blur_only":
-        return PolicyDecision(matched, "target_match" if matched else "confirmed_non_target")
-    return PolicyDecision(not matched, "target_exempt" if matched else "confirmed_non_target")
+    decision = _identity_from_artifact(identity)
+    if decision.status is not IdentityStatus.CONFIRMED:
+        return PolicyDecision(fallback == "blur", f"{decision.status.value.lower()}_{fallback}")
+    if not decision.matched_reference_files:
+        raise ValueError("confirmed reference match has no matched photos")
+    return PolicyDecision(policy_mode == "blur_only", "reference_match" if policy_mode == "blur_only" else "reference_exempt")
 
 
 @dataclass(frozen=True)
@@ -1465,7 +1143,7 @@ class RecognitionEngine:
     enabled: bool
     mode: str
     profile: RecognitionProfile
-    target_persons: tuple[str, ...] = ()
+    unknown_action: str = "blur"
     similarity_threshold: float | None = None
     recognizer: Any = None
     gallery: Gallery | Any = None
@@ -1489,63 +1167,32 @@ class RecognitionEngine:
     ) -> IdentityDecision:
         if not self.enabled:
             return replace(
-                IdentityDecision(
-                    status=IdentityStatus.UNKNOWN,
-                    reason="policy_all",
-                ),
+                IdentityDecision(IdentityStatus.UNKNOWN, reason="policy_all"),
                 selected_frame_count=0,
                 threshold_reason="policy_all",
             )
-        temporal_evidence: TemporalThresholdEvidence | None = None
-        selected: Sequence[RecognitionCandidate] = ()
-        try:
-            selected = select_temporally_distributed(
-                candidates,
-                self.profile.max_frames_per_track,
+        selected = select_temporally_distributed(candidates, self.profile.max_frames_per_track)
+        temporal_evidence = temporal_threshold_evidence(
+            [value.frame_index for value in selected],
+            frames_per_second=frames_per_second,
+            base_similarity_threshold=float(self.similarity_threshold),
+        )
+        # Model failures must escape this method. Treating them as UNKNOWN
+        # would silently keep targets visible in blur_only mode.
+        samples = [
+            EmbeddingSample(
+                frame_index=value.frame_index,
+                embedding=_embed_aligned_face(self.recognizer, value.aligned_face),
+                quality=value.quality,
             )
-            temporal_evidence = temporal_threshold_evidence(
-                [value.frame_index for value in selected],
-                frames_per_second=frames_per_second,
-                base_similarity_threshold=float(self.similarity_threshold),
-            )
-            samples = [
-                EmbeddingSample(
-                    frame_index=value.frame_index,
-                    embedding=_embed_aligned_face(
-                        self.recognizer,
-                        value.aligned_face,
-                    ),
-                    quality=value.quality,
-                )
-                for value in selected
-            ]
-            return temporal_evidence.annotate(
-                decide_track_identity(
-                    samples,
-                    self.gallery.prototypes,
-                    temporal_evidence.decision_similarity_threshold,
-                    minimum_margin=self.profile.minimum_margin,
-                    minimum_cluster_similarity=(
-                        self.profile.minimum_cluster_similarity
-                    ),
-                )
-            )
-        except MemoryError:
-            raise
-        except Exception as error:
-            decision = self.unknown_decision(
-                _diagnostic_failure_reason(
-                    "track_recognition_error",
-                    error,
-                )
-            )
-            if temporal_evidence is not None:
-                return temporal_evidence.annotate(decision)
-            return replace(
-                decision,
-                selected_frame_count=len(selected),
-                threshold_reason="track_recognition_error",
-            )
+            for value in selected
+        ]
+        return temporal_evidence.annotate(decide_track_identity(
+            samples,
+            self.gallery.prototypes,
+            temporal_evidence.decision_similarity_threshold,
+            minimum_cluster_similarity=self.profile.minimum_cluster_similarity,
+        ))
 
 
 def create_recognition_engine(
@@ -1555,53 +1202,33 @@ def create_recognition_engine(
     gallery_detector: Any,
     gallery_builder: Callable[..., Any] = build_gallery,
 ) -> RecognitionEngine:
-    """Create recognition lazily; ``mode=all`` touches no model or gallery state."""
+    """Create recognition lazily; mode all loads no model or reference photos."""
 
     mode = _recognition_mode(settings.get("mode", "all"))
+    fallback = resolve_unknown_action(mode, settings.get("unknown_action", "auto"))
     if mode == "all":
-        # Profile, thresholds, targets and gallery are selective-only inputs.
-        # Ignore even stale/invalid values to preserve the zero-recognition
-        # contract of the default policy.
-        return RecognitionEngine(False, mode, RECOGNITION_PROFILES["balanced"])
+        return RecognitionEngine(False, mode, RECOGNITION_PROFILES["balanced"], fallback)
     profile = resolve_recognition_profile(
-        str(settings.get("profile", "balanced")),
-        settings.get("max_frames_per_track"),
+        str(settings.get("profile", "balanced")), settings.get("max_frames_per_track"),
     )
-
-    targets_raw = settings.get("target_persons")
-    if not isinstance(targets_raw, Sequence) or isinstance(targets_raw, (str, bytes)):
-        raise TypeError("selective recognition target_persons must be a sequence")
-    targets = _person_ids(targets_raw)
-    if not targets:
-        raise ValueError("selective recognition requires target_persons")
-    gallery_dir = settings.get("gallery_dir")
-    if not isinstance(gallery_dir, (str, Path)) or not str(gallery_dir).strip():
-        raise ValueError("selective recognition requires gallery_dir")
+    reference_dir = settings.get("reference_dir")
+    if not isinstance(reference_dir, (str, Path)) or not str(reference_dir).strip():
+        raise ValueError("selective recognition requires reference_dir")
     if "similarity_threshold" not in settings:
         raise ValueError("selective recognition requires similarity_threshold")
     threshold = _cosine_value(settings["similarity_threshold"], field="similarity_threshold")
+    if threshold < 0:
+        raise ValueError("similarity_threshold must be between 0 and 1")
     if not callable(getattr(recognizer, "get_feat", None)):
         raise TypeError("selective recognition requires an ArcFace recognizer with get_feat()")
     if gallery_detector is None:
-        raise ValueError("selective recognition requires a gallery detector")
-    gallery = gallery_builder(
-        gallery_dir,
-        gallery_detector,
-        recognizer,
-        target_persons=targets,
-        minimum_cluster_similarity=profile.minimum_cluster_similarity,
-    )
+        raise ValueError("selective recognition requires a reference detector")
+    gallery = gallery_builder(reference_dir, gallery_detector, recognizer)
     if not isinstance(getattr(gallery, "prototypes", None), Mapping):
-        raise TypeError("gallery builder must return an object with prototype mappings")
-    return RecognitionEngine(
-        True,
-        mode,
-        profile,
-        targets,
-        threshold,
-        recognizer,
-        gallery,
-    )
+        raise TypeError("reference builder must return an object with reference embedding mappings")
+    if not gallery.prototypes:
+        raise ValueError("No usable faces were found in the reference photos")
+    return RecognitionEngine(True, mode, profile, fallback, threshold, recognizer, gallery)
 
 
 def _finite_number(value: Any, *, field: str, positive: bool = False) -> float:
@@ -1632,21 +1259,12 @@ def _validated_weights(values: Sequence[float] | None, count: int) -> np.ndarray
     return weights
 
 
-def _person_id(value: Any) -> str:
+def _reference_file_name(value: Any) -> str:
     if not isinstance(value, str):
-        raise TypeError("person id must be a string")
+        raise TypeError("reference filename must be a string")
     result = unicodedata.normalize("NFC", value)
-    if not result or result in {".", ".."}:
-        raise ValueError("person id must not be empty or a path component")
-    if "/" in result or "\\" in result or "\x00" in result:
-        raise ValueError("person id must not contain path separators")
-    return result
-
-
-def _person_ids(values: Sequence[str]) -> tuple[str, ...]:
-    result = tuple(_person_id(value) for value in values)
-    if len(set(result)) != len(result):
-        raise ValueError("person ids collide after Unicode NFC normalization")
+    if not result or result in {".", ".."} or any(character in result for character in ("/", "\\", "\x00")):
+        raise ValueError("reference filename must be a non-empty direct filename")
     return result
 
 
@@ -1668,6 +1286,7 @@ __all__ = [
     "LOCAL_LANDMARK_MIN_IOU",
     "RECOGNITION_LANDMARK_SOURCES",
     "RECOGNITION_MODES",
+    "UNKNOWN_ACTIONS",
     "RECOGNITION_PROFILES",
     "SINGLE_FRAME_SIMILARITY_OFFSET",
     "SUPPORTED_GALLERY_EXTENSIONS",
@@ -1682,19 +1301,15 @@ __all__ = [
     "GalleryRejection",
     "GalleryScan",
     "IdentityDecision",
-    "IdentityPrototype",
     "IdentityStatus",
     "PolicyDecision",
     "RecognitionCandidate",
     "RecognitionEngine",
     "RecognitionProfile",
     "TemporalThresholdEvidence",
-    "TrackEmbedding",
-    "aggregate_track_embeddings",
     "apply_identity_policy",
     "arcface_align_112",
     "build_gallery",
-    "build_identity_prototype",
     "create_recognition_engine",
     "decide_track_identity",
     "detect_gallery_faces_upright",
@@ -1703,6 +1318,7 @@ __all__ = [
     "local_landmark_box_agreement",
     "recognition_candidate_quality",
     "resolve_recognition_profile",
+    "resolve_unknown_action",
     "scan_gallery",
     "select_temporally_distributed",
     "temporal_threshold_evidence",

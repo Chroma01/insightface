@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict, cast
+from typing import Any, Dict, List, Literal, Optional, TypedDict, cast
 
 
 class PixelBox(TypedDict):
@@ -32,6 +32,12 @@ class Quality(TypedDict, total=False):
     brightness: float
 
 
+class LivenessResult(TypedDict):
+    status: Literal["ok", "input_rejected"]
+    is_live: Optional[bool]
+    live_score: Optional[float]
+
+
 class FaceObservation(TypedDict, total=False):
     id: str
     bbox: BoundingBox
@@ -39,6 +45,7 @@ class FaceObservation(TypedDict, total=False):
     detection_score: float
     quality: Quality
     embedding: List[float]
+    liveness: LivenessResult
 
 
 class Person(TypedDict, total=False):
@@ -57,7 +64,6 @@ class Collection(TypedDict, total=False):
     description: str
     default_threshold: float
     model_id: str
-    model_version: str
     model_digest: str
     embedding_dimension: int
     preprocessing_version: str
@@ -85,13 +91,13 @@ class FaceSample(TypedDict, total=False):
     detection_score: float
     quality: Quality
     model_id: str
-    model_version: str
     model_digest: str
     preprocessing_version: str
     embedding_source: str
     embedding_contract_id: Optional[str]
     has_crop: bool
     created_at: str
+    liveness: LivenessResult
 
 
 class Match(TypedDict, total=False):
@@ -171,6 +177,10 @@ class ModelsResult(ApiResult):
     @property
     def models(self) -> List[Dict[str, Any]]:
         return cast(List[Dict[str, Any]], self.data.get("models", []))
+
+    @property
+    def addons(self) -> List[Dict[str, Any]]:
+        return cast(List[Dict[str, Any]], self.data.get("addons", []))
 
 
 class CompareResult(ApiResult):

@@ -32,7 +32,6 @@ class MockInferenceEngine:
     ) -> None:
         self.summary = EngineSummary(
             model_id="synthetic-recognition",
-            model_version="1",
             model_digest=hashlib.sha256(b"simple-insightface-server-mock-v1").hexdigest(),
             embedding_dimension=embedding_dimension,
             preprocessing_version="mock-1",
@@ -40,13 +39,11 @@ class MockInferenceEngine:
             models=(
                 {
                     "model_id": "synthetic-detection",
-                    "model_version": "1",
                     "task": "face_detection",
                     "sha256": hashlib.sha256(b"synthetic-detection").hexdigest(),
                 },
                 {
                     "model_id": "synthetic-recognition",
-                    "model_version": "1",
                     "task": "face_recognition",
                     "sha256": hashlib.sha256(b"synthetic-recognition").hexdigest(),
                 },
@@ -78,6 +75,8 @@ class MockInferenceEngine:
         max_faces: int | None = None,
         min_score: float | None = None,
         detection_profile: DetectionProfile | None = None,
+        single_face: bool = False,
+        apply_liveness: bool = True,
     ) -> list[FaceObservation]:
         validate_image(image)
         if max_faces is not None and max_faces <= 0:
@@ -103,6 +102,16 @@ class MockInferenceEngine:
             threshold = profile.threshold if min_score is None else max(profile.threshold, min_score)
             observations = [face for face in observations if face.detection_score >= threshold]
             observations.sort(key=lambda face: face.area, reverse=True)
+            if single_face and observations:
+                def selection_score(face):
+                    if profile.single_face_selection == "largest":
+                        return face.area
+                    left, top, right, bottom = face.bbox
+                    return face.area - 2.0 * (
+                        ((left + right - width) * 0.5) ** 2
+                        + ((top + bottom - height) * 0.5) ** 2
+                    )
+                observations = [max(observations, key=selection_score)]
             return observations if max_faces is None else observations[:max_faces]
 
     def validate_detection_profile(self, profile: DetectionProfile) -> None:

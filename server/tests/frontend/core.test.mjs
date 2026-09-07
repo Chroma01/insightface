@@ -43,7 +43,7 @@ test("locales match the public InsightFace website and normalize browser variant
   assert.equal(t("Open-source model license", {}, "zh"), "开源模型许可");
   assert.equal(t("Camera monitoring", {}, "zh"), "摄像头监控");
   assert.equal(t("No file selected", {}, "zh"), "未选择文件");
-  assert.equal(t("JPEG, PNG, or WebP", {}, "zh"), "JPEG、PNG 或 WebP");
+  assert.equal(t("JPEG, PNG, WebP, or BMP", {}, "zh"), "JPEG、PNG、WebP 或 BMP");
   assert.match(t("Commercial use requires a separate license.", {}, "ja"), /別途ライセンス/);
   assert.equal(t(t("Detection {score}", { score: "0.998" }, "de"), {}, "zh"), "检测 0.998");
   assert.equal(t(t("People in {collection}", { collection: "lfw" }, "ja"), {}, "ko"), "lfw의 인물");
@@ -51,7 +51,7 @@ test("locales match the public InsightFace website and normalize browser variant
 
 test("bundled Markdown renderer supports portable guide links without executing HTML", () => {
   const rendered = renderMarkdown("# Guide\n\n![Dashboard](docs/images/customer/dashboard-en.jpg)\n\n[API](api.zh-CN.md)\n\n[Maintainer](maintainer-guide.md)\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```html\n<script>alert(1)</script>\n```\n\n[unsafe](javascript:alert(1))");
-  assert.match(rendered, /<h1>Guide<\/h1>/);
+  assert.match(rendered, /<h1 id="guide">Guide<\/h1>/);
   assert.match(rendered, /<table>/);
   assert.match(rendered, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.doesNotMatch(rendered, /<script>/);

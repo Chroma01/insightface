@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from ..addons import LivenessUnavailable
 from ..api.schemas import EmbeddingMode, ReviewMode
 from ..config import DetectionProfile, Settings
 from ..errors import ApiError, bad_request, conflict, not_found, unprocessable
@@ -117,14 +118,12 @@ class FaceService:
         summary = self.engine.summary
         expected = (
             summary.model_id,
-            summary.model_version,
             summary.model_digest,
             summary.embedding_dimension,
             summary.preprocessing_version,
         )
         actual = (
             item["model_id"],
-            item["model_version"],
             item["model_digest"],
             item["embedding_dimension"],
             item["preprocessing_version"],
@@ -152,14 +151,46 @@ class FaceService:
         *,
         embeddings: bool = True,
         detection_profile: DetectionProfile | None = None,
+        single_face: bool = False,
+        apply_liveness: bool = True,
     ) -> list[FaceObservation]:
         profile = detection_profile or self.settings.detection_profile
-        faces = self.engine.analyze(
-            image.pixels,
-            require_embeddings=embeddings,
-            detection_profile=profile,
-        )
+        options = {}
+        enabled = "liveness" in self.settings.addons
+        if enabled:
+            options = {"single_face": single_face, "apply_liveness": apply_liveness}
+        try:
+            faces = self.engine.analyze(
+                image.pixels, require_embeddings=embeddings,
+                detection_profile=profile, **options,
+            )
+            if enabled and apply_liveness and any(face.liveness is None for face in faces):
+                raise LivenessUnavailable("The configured addon returned no liveness result")
+        except LivenessUnavailable as exc:
+            LOGGER.exception("liveness_inference_failed")
+            raise ApiError("liveness_unavailable", "Liveness inference is unavailable.", 503) from exc
         return sorted(faces, key=lambda face: -face.area)
+
+    def liveness_rejection(self, face: FaceObservation) -> str | None:
+        result = face.liveness
+        if result is None or self.settings.liveness_mode != "normal":
+            return None
+        if result["status"] == "input_rejected":
+            return "liveness_input_rejected"
+        if result["is_live"] is not True:
+            return "liveness_fake"
+        return None
+
+    def require_recognition(self, face: FaceObservation) -> None:
+        reason = self.liveness_rejection(face)
+        if reason:
+            message = (
+                "Input does not meet liveness requirements. Adjust face position and retry."
+                if reason == "liveness_input_rejected" else "The face did not pass liveness detection."
+            )
+            raise unprocessable(message, code=reason, liveness=face.liveness)
+        if face.embedding is None:
+            raise unprocessable("Recognition embedding is unavailable.", code="embedding_unavailable")
 
     def detect(
         self,
@@ -223,15 +254,19 @@ class FaceService:
         )
 
     def selected_face(
-        self, image: ImageData, *, detection_profile: DetectionProfile | None = None
+        self, image: ImageData, *, detection_profile: DetectionProfile | None = None,
+        apply_liveness: bool = True,
     ) -> FaceObservation:
         profile = detection_profile or self.settings.detection_profile
         faces = self.analyze(
-            image, embeddings=True, detection_profile=profile
+            image, embeddings=True, detection_profile=profile,
+            single_face=True, apply_liveness=apply_liveness,
         )
         if not faces:
             raise unprocessable("No usable face was detected.", code="face_not_found")
-        return self.select_from_observations(faces, image, profile)
+        face = self.select_from_observations(faces, image, profile)
+        self.require_recognition(face)
+        return face
 
     def largest_face(self, image: ImageData) -> FaceObservation:
         """Backward-compatible internal alias using the system profile."""
@@ -259,6 +294,9 @@ class FaceService:
         if review_mode != "off" and len(faces) != 1:
             return "multiple_faces"
         face = faces[0]
+        liveness_reason = self.liveness_rejection(face)
+        if liveness_reason:
+            return liveness_reason
         if require_landmarks:
             if face.landmarks is None:
                 return "invalid_landmarks"
@@ -401,6 +439,8 @@ class FaceService:
                     # quality but never invokes the recognizer.
                     embeddings=embedding_mode == "server",
                     detection_profile=detection_profile,
+                    single_face=review_mode == "off",
+                    apply_liveness=self.settings.liveness_on_registration,
                 )
                 if review_mode == "off":
                     faces = (
@@ -429,7 +469,10 @@ class FaceService:
                     ),
                 )
                 if reason:
-                    rejected.append({"index": index, "filename": image.filename, "reason": reason})
+                    rejected.append({
+                        "index": index, "filename": image.filename, "reason": reason,
+                        **({"liveness": faces[0].liveness} if len(faces) == 1 and faces[0].liveness is not None else {}),
+                    })
                     continue
                 face = faces[0]
                 final_embedding = (
@@ -454,8 +497,8 @@ class FaceService:
                         ),
                         "detection_score": clamp01(face.confidence),
                         "quality": quality(face),
+                        **({"liveness": face.liveness} if face.liveness is not None else {}),
                         "model_id": collection["model_id"],
-                        "model_version": collection["model_version"],
                         "model_digest": collection["model_digest"],
                         "preprocessing_version": collection["preprocessing_version"],
                         "embedding_source": embedding_mode,
@@ -544,8 +587,8 @@ class FaceService:
                 "landmarks",
                 "detection_score",
                 "quality",
+                "liveness",
                 "model_id",
-                "model_version",
                 "model_digest",
                 "preprocessing_version",
                 "embedding_source",
@@ -776,7 +819,13 @@ class FaceService:
         results: list[dict[str, Any]] = []
         try:
             for face in faces:
-                assert face.embedding is not None
+                if self.liveness_rejection(face):
+                    results.append({
+                        "status": "liveness_blocked",
+                        "face": face_result(face, width, height), "match": None,
+                    })
+                    continue
+                self.require_recognition(face)
                 matches = self.search_indexes.search(
                     collection_id,
                     face.embedding,

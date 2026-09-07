@@ -1,4 +1,4 @@
-import { initializeI18n, t, translateTree } from "./i18n.mjs?v=0.2.0-r14";
+import { initializeI18n, t, translateTree } from "./i18n.mjs?v=0.3.0-r1";
 
 const operationsRoot = document.querySelector("#operations");
 const navigationRoot = document.querySelector("#operation-nav");

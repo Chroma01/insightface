@@ -33,7 +33,7 @@ distribution; the independently installable client is the SDK wheel under
 
 Do not commit model binaries, signed customer licenses, issuer private keys,
 real face images, customer data, generated databases, or production
-configuration. `/models` is read-only runtime input; `/data` is mutable,
+configuration. Base models in `/models` are read-only runtime input. The Web liveness installer writes only the nested `/models/addons` mount and the configuration directory; `/data` is mutable,
 persistent runtime state.
 
 ## 2. Source architecture
@@ -150,15 +150,15 @@ supports install and strict verification for public packages; the manifest
 helper supports controlled private bundles. Catalog downloads share the
 `MODEL_ZOO_RELEASE_BASE_URL` for the dedicated
 [`model-zoo` GitHub Release](https://github.com/deepinsight/insightface/releases/tag/model-zoo);
-each package's `release` value remains model-version metadata and does not select
-the download tag.
+packages are identified by name and have no separate release/version metadata.
 
 The strict V1 manifest is the runtime truth for its declared bundle metadata.
 The extensible V2 manifest instead names tasks and their input contracts and
 does not define a separate model-version field. A V2 task may declare an
 optional ONNX SHA-256; the Server verifies declared detector/recognizer digests
-and always calculates their actual digests. The Server uses `model_id` in the
-legacy `model_version` API/storage slot. Together, the manifest and runtime
+and always calculates their actual digests. Older manifests may contain
+`model_version`; loading ignores it. New manifests, API responses, SDK result
+types, and database rows omit that field. Together, the manifest and runtime
 inspection determine:
 
 - detector and recognizer file names;
@@ -187,6 +187,53 @@ Changing detector or recognizer can change detection, alignment, preprocessing,
 or embedding semantics. The computed bundle contract therefore pins every
 Collection. Do not bypass `collection_model_mismatch`; phase one intentionally
 requires explicit rebuild or migration.
+
+### 5.1 Optional liveness and Web preparation
+
+The shipped configuration and omitted addon keys both default to disabled:
+`inference.addons = []` and `addons.auto_download = []`. Enabling liveness does
+not change the recognition model digest or the existing Collection contract.
+The model catalog pins the public URL, size and SHA-256; addons remain flat at
+`<models_dir>/addons/liveness.onnx`, independent of the base model bundle.
+`raccoon_s` and `raccoon_l` are supported detector/recognizer packages. The
+Server does not load their verifier model or provide Web base-package switching.
+
+`GET /v1/addons/liveness` distinguishes current execution (`enabled`), a
+verified file (`installed`), next-start configuration (`configured_enabled`),
+and `restart_required`. `POST /v1/addons/liveness/enable` accepts an empty JSON
+object and returns 202 while an owned background task downloads and verifies
+the catalog artifact, then updates the two addon lists in the same
+`server.toml`. It preserves other settings and comments, validates the new
+TOML, and commits via a temporary file and atomic replacement. The job shares
+an advisory download lock with the CLI and a stable config lock with other
+processes. Duplicate requests join the running task; failures expose stable
+codes, and retries reuse verified artifacts. Closing a browser does not cancel
+the download. Shutdown prevents a later configuration commit.
+
+The running engine never reloads this configuration: an operator restarts it
+to apply the change. Startup stays offline and fails with an actionable
+`addon_model_missing` or `addon_model_invalid` error for a selected unavailable
+addon. The Web action follows existing API authentication, requires JSON, and
+checks browser Origin. The app has no separate administrator role. Read-only
+deployments remain supported; status explains why preparation is unavailable.
+Use the stable `unavailable_code` and error codes for UI localization;
+`unavailable_reason` and backend messages are diagnostic text, not translation
+keys. Render authored Markdown without running interface translation over it.
+Web-enabled deployments mount only the addon subdirectory writable under the
+read-only model root, and mount the whole configuration directory writable so
+atomic replacement is possible. Host permissions and proxy setup are in the
+[user guide](user-guide.md#web-download-permissions).
+
+Every evaluated face has exactly `status`, `is_live`, and `live_score`. Fake is
+`status=ok` with `is_live=false`; unsuitable input is `status=input_rejected`
+with both values null. An omitted result means no evaluation. In `normal`,
+failed/rejected liveness stops recognition; `observe` continues. Detection
+still returns all detected faces and their liveness results with HTTP 200.
+Recognition operations return the documented 422 error; inference failures
+return 503, not a fake verdict. Registration skips liveness by default;
+`liveness_on_registration=true` applies the configured mode, and enrollment
+review or external embeddings do not bypass it. RTSP keeps blocked faces
+separate from unknown identities.
 
 ## 6. Embedding and score contract
 
@@ -371,7 +418,7 @@ The Server processes sensitive biometric data. Preserve these design rules:
 - no image, embedding, API key, RTSP credential, or multipart-body logging;
 - default-deny CORS, exact trusted origins only;
 - image-byte, decoded-pixel, request-body, image-count, and request-time limits;
-- `/models` read-only and `/data` the only durable writable area;
+- `/models` read-only, nested `/models/addons` writable for explicit addon downloads, the configuration directory writable for atomic startup-setting saves, and `/data` persistent;
 - non-root UID/GID 10001, read-only root filesystem, dropped capabilities,
   `no-new-privileges`, bounded `/tmp`;
 - no remote model download during normal startup;
@@ -532,7 +579,7 @@ python3.11 -m twine check /tmp/ifs-server-dist/* /tmp/ifs-sdk-dist/*
 Build both immutable version tags from the exact committed revision:
 
 ```bash
-export RELEASE_VERSION=0.2.0
+export RELEASE_VERSION=0.3.0
 export RELEASE_IMAGE=ghcr.io/deepinsight/insightface-server
 export RELEASE_SHA="$(git rev-parse HEAD)"
 
@@ -693,3 +740,20 @@ finish the matching pair; never rebuild or overwrite a versioned tag.
   incompatible environment appear healthy.
 - Never push images, code, releases, or customer artifacts unless explicitly
   authorized.
+
+
+### Model identity and existing Collections
+
+Models are identified by `model_id` (the package name). The runtime bundle digest,
+embedding dimension and preprocessing contract still protect Collection
+compatibility. Model weights, inference and embeddings are unchanged by removing
+the separate model-version field.
+
+Migration `0009_model_identity.sql` persists each existing Collection's original
+`ifsemb-v1-sha256:` identifier before dropping the old model-version columns.
+Historical external FaceSample contract IDs stay unchanged, so existing trusted
+clients can continue using their recorded identifiers. New Collections use an
+`ifsemb-v2-sha256:` identifier over `[model_id, model_digest, embedding_dimension,
+preprocessing_version]`. These prefixes version the contract format, not models.
+Take a database backup before upgrading; older Server images cannot read the
+migrated schema without restoring that backup.

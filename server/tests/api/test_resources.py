@@ -539,6 +539,12 @@ def test_strict_review_existing_person_accepts_only_when_same_is_greater(
     create_collection(client)
     create_person(client, "employees", "alice", seed=103)
 
+    # Exercise an exact tie independently of BLAS float32 dot-product rounding
+    # (a normalized vector's self-dot can be slightly above 1 on some hosts).
+    monkeypatch.setattr(
+        "insightface_server.services.core.profile_similarity", lambda *_args: 1.0
+    )
+
     monkeypatch.setattr(
         client.app.state.search_indexes,
         "best_other_person",

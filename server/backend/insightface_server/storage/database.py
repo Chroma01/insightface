@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO
 
+from ..models.embedding_contract import legacy_embedding_contract_id
 from ..request_context import check_request_deadline
 
 
@@ -57,6 +58,10 @@ class Database:
                 lock_path.chmod(0o600)
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 with self._connect() as connection:
+                    connection.create_function(
+                        "legacy_embedding_contract_id", 5,
+                        legacy_embedding_contract_id, deterministic=True,
+                    )
                     connection.execute(
                         "CREATE TABLE IF NOT EXISTS schema_migrations "
                         "(version TEXT PRIMARY KEY, "

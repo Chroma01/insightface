@@ -126,7 +126,7 @@ def _monitor_result(item: dict[str, Any]) -> dict[str, Any]:
     face = copy.deepcopy(item.get("face") or {})
     if not isinstance(match, dict):
         return {
-            "status": "unknown",
+            "status": "liveness_blocked" if item.get("status") == "liveness_blocked" else "unknown",
             "face": face,
             "person": None,
             "similarity": None,
@@ -380,7 +380,8 @@ class MonitorSession:
                 "threshold": self._threshold,
                 "faces": faces,
                 "matched_faces": matched,
-                "unknown_faces": len(faces) - matched,
+                "unknown_faces": sum(item.get("status") == "unknown" for item in faces),
+                "liveness_blocked_faces": sum(item.get("status") == "liveness_blocked" for item in faces),
                 "preview": {
                     "enabled": self.options.preview_enabled,
                     "active": bool(
@@ -698,6 +699,9 @@ class MonitorSession:
                 else:
                     self._inference_errors += 1
                     self._inference_error = error_message
+                    if error_message and error_message.startswith("liveness_unavailable:"):
+                        self._results = []
+                        self._tracks.clear()
             if results is None:
                 self._mark_error(
                     source="inference",
@@ -766,7 +770,11 @@ class MonitorSession:
                 track.matched_face_id = result.get("matched_face_id")
                 track.similarity = result.get("similarity")
                 track.face = copy.deepcopy(result.get("face") or {})
-            if not track.confirmed and track.consecutive >= self.options.confirm_frames:
+            if (
+                track.kind in {"matched", "unknown"}
+                and not track.confirmed
+                and track.consecutive >= self.options.confirm_frames
+            ):
                 track.confirmed = True
                 self._emit_track_event(track, entering=True, now=now)
             rendered.append(
@@ -790,6 +798,8 @@ class MonitorSession:
                 self._emit_track_event(track, entering=False, now=now)
 
     def _emit_track_event(self, track: _Track, *, entering: bool, now: float) -> None:
+        if track.kind not in {"matched", "unknown"}:
+            return
         if track.kind == "unknown" and not self.options.emit_unknown:
             return
         prefix = "person" if track.kind == "matched" else "unknown"
@@ -1079,6 +1089,7 @@ class MonitorManager:
             "faces": [],
             "matched_faces": 0,
             "unknown_faces": 0,
+            "liveness_blocked_faces": 0,
             "preview": {
                 "enabled": bool(row["preview_enabled"]),
                 "active": False,

@@ -147,6 +147,9 @@ class Repository:
         landmarks_json = value.pop("landmarks_json")
         value["landmarks"] = json.loads(landmarks_json) if landmarks_json else None
         value["quality"] = json.loads(value.pop("quality_json"))
+        liveness_json = value.pop("liveness_json", None)
+        if liveness_json is not None:
+            value["liveness"] = json.loads(liveness_json)
         if include_embedding:
             value["embedding"] = np.frombuffer(
                 value["embedding"], dtype=np.float32
@@ -167,8 +170,8 @@ class Repository:
     def _face_columns(*, include_embedding: bool) -> str:
         columns = """
             id,collection_id,person_id,embedding_dimension,
-            bounding_box_json,landmarks_json,detection_score,quality_json,
-            model_id,model_version,model_digest,preprocessing_version,
+            bounding_box_json,landmarks_json,detection_score,quality_json,liveness_json,
+            model_id,model_digest,preprocessing_version,
             embedding_source,embedding_contract_id,crop_path,created_at,
             CASE WHEN crop_image IS NOT NULL OR crop_path IS NOT NULL
                  THEN 1 ELSE 0 END AS has_crop
@@ -192,7 +195,7 @@ class Repository:
         with self.database.write() as connection:
             connection.execute(
                 """INSERT INTO collections(
-                    id,name,description,default_threshold,model_id,model_version,
+                    id,name,description,default_threshold,model_id,embedding_contract_id,
                     model_digest,embedding_dimension,preprocessing_version,
                     metadata_json,created_at,updated_at,search_profile,capacity_rows,
                     max_faces_per_person,load_policy,save_face_crops,
@@ -205,7 +208,7 @@ class Repository:
                     item.get("description", ""),
                     item["default_threshold"],
                     item["model_id"],
-                    item["model_version"],
+                    embedding_contract_id_for_collection(item),
                     item["model_digest"],
                     item["embedding_dimension"],
                     item["preprocessing_version"],
@@ -574,9 +577,9 @@ class Repository:
             """INSERT INTO face_samples(
                 id,collection_id,person_id,embedding,embedding_dimension,
                 bounding_box_json,landmarks_json,detection_score,quality_json,
-                model_id,model_version,model_digest,preprocessing_version,
+                model_id,model_digest,preprocessing_version,
                 embedding_source,embedding_contract_id,
-                crop_path,crop_image,crop_media_type,created_at
+                crop_path,crop_image,crop_media_type,created_at,liveness_json
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 face["id"],
@@ -589,7 +592,6 @@ class Repository:
                 face["detection_score"],
                 json.dumps(face["quality"], sort_keys=True),
                 face["model_id"],
-                face["model_version"],
                 face["model_digest"],
                 face["preprocessing_version"],
                 face.get("embedding_source", "server"),
@@ -598,6 +600,7 @@ class Repository:
                 face.get("crop_image"),
                 face.get("crop_media_type"),
                 face.get("created_at", utc_now()),
+                json.dumps(face["liveness"]) if face.get("liveness") is not None else None,
             ),
         )
         cursor = connection.execute(

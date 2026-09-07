@@ -113,6 +113,12 @@ img, canvas, video { max-width: 100%; }
 .metric-card > strong.metric-text { overflow: hidden; font-size: 16px; line-height: 2.05; text-overflow: ellipsis; white-space: nowrap; }
 .metric-card > small { display: block; overflow: hidden; color: var(--faint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .system-metrics { margin-bottom: 20px; }
+#metric-model-liveness { font-size: 11px; }
+.liveness-management > p { font-size: 13px; }
+.liveness-management > .button { margin-top: 16px; }
+.liveness-management pre { padding: 12px; overflow-x: auto; font-size: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.liveness-notice { padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); line-height: 1.6; }
+.liveness-error { color: var(--danger); overflow-wrap: anywhere; }
 
 .two-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .panel { min-width: 0; padding: 21px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
@@ -233,6 +239,8 @@ tbody tr:hover { background: #fafcfb; }
 .face-card dd { margin: 0; font-weight: 700; }
 .rejection-list { padding: 12px; color: #744716; background: var(--warning-soft); border: 1px solid #f2d4a7; border-radius: 9px; }
 .rejection-item { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 11px; }
+.rejection-item > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.rejection-details { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; text-align: right; overflow-wrap: anywhere; }
 
 .tool-layout { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 18px; }
 .tool-controls { display: flex; flex-direction: column; gap: 16px; align-self: start; }

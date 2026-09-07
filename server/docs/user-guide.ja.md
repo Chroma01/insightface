@@ -4,6 +4,12 @@
 
 このガイドは初めて利用する方のために、空の作業ディレクトリから最初の検索成功までを順番に説明します。同じ機能は Web UI、`/v1` API、Python SDK から利用できます。全 HTTP 項目とレスポンスは [API 利用ガイド](api.ja.md) を参照してください。
 
+モデルは `model_id` で識別し、応答に独立した `model_version` は含めません。
+
+同じ認識モデルと特徴契約で Server を更新する場合、既存 Collection の `embedding_contract_id`、サンプル、特徴量は維持されます。異なる認識モデルへの変更は別の移行で、契約が不一致なら登録・検索は `collection_model_mismatch` になります。
+
+生体検知を使う場合は、[設定・モデルのインストール・結果の意味](#任意の生体検知-addon)を確認してください。各操作の節にも影響を説明しています。
+
 ## ゼロから起動して最初の検索を行う
 
 CPU 版には Linux x86_64、Docker Engine、Docker Compose が必要です。CUDA 版には対応 NVIDIA Driver と NVIDIA Container Toolkit も必要ですが、ホスト側 CUDA、cuDNN、ORT、Python、OpenCV は不要です。
@@ -20,11 +26,83 @@ GPU では `compose.cuda12.yml` とポート `18098` を使用します。モデ
 
 同梱 Compose は隔離評価向けに認証を既定で無効にしています。有効化する場合は起動前に `INSIGHTFACE_AUTH_ENABLED=true` と長い `INSIGHTFACE_API_KEY` を設定します。UI を開き、Dashboard確認 → Collection作成 → Person登録 → 別画像でSearchの順に進めます。停止は `docker compose ... down` を使用し、データを保持する場合は `-v` を付けないでください。
 
+## 任意の生体検知 addon
+
+`server/config/server.toml` では生体検知は既定で無効です。`inference.addons` と `addons.auto_download` は両方 `[]` で、キーのない旧設定も無効のままです。以下は手動で有効にする例です。再起動前にモデルをインストールしてください。
+
+**システム → 生体検知** で **ダウンロードして再起動後に有効化** を選びます。公開モデルの SHA-256 を検証後、両リストを `["liveness"]` に保存し、他の設定を保持します。検証済みキャッシュは再利用します。現在の処理は変わらず、**手動で Server を再起動**すると有効になります。失敗時はエラーと再試行を表示し、ダウンロード失敗では設定を有効にしません。
+
+システム画面は検証済みファイルの有無（`installed`）、現在の実行状態（`enabled`）、保存した次回起動設定（`configured_enabled`）、再起動の要否（`restart_required`）を別々に表示します。ダウンロードや設定保存だけでは現在の推論は変わりません。無効に戻すには同じ設定ファイルで `inference.addons=[]` と `addons.auto_download=[]` を保存して手動で再起動します。Web 操作は登録設定を変更せず、その既定値は `liveness_on_registration=false` です。
+
+```toml
+[inference]
+addons = ["liveness"]
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = ["liveness"]
+```
+
+### モデルのインストールと起動
+
+`inference.addons` は実行時の使用、`addons.auto_download` は基本モデルのインストール時の追加ダウンロードを制御します。後者を `["liveness"]` にすると、基本モデルがキャッシュ済みでも addon を追加します。起動時のダウンロードはありません。インストーラーと Server は同じ設定ファイルを読みます。
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+有効なモデルがない場合は `addon_model_missing`、不正なファイルは `addon_model_invalid` で起動を停止します。設定した addon を自動で無効にはしません。
+
+### Web ダウンロードのマウントと権限
+
+Compose は `/models` を読み取り専用に保ち、`server/.models/addons` だけを `/models/addons` に書き込み可能で重ねてマウントします。設定を原子的に保存するため、`server/config` ディレクトリ全体を `/etc/insightface` に書き込み可能でマウントします。Linux では、同梱イメージの Server ユーザー（UID/GID 10001）が利用できるよう、リポジトリのルートで一度だけ次を実行してください。
+
+```bash
+mkdir -p server/.models/addons
+sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
+sudo chmod g+rws server/.models/addons server/config
+sudo chmod g+rw server/config/server.toml
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+独自の配置では実際のマウント元に置き換え、CUDA では `compose.cuda12.yml` を使用します。従来の読み取り専用マウントでも、生体検知を無効にして運用できます。Web 操作が利用できない理由が表示された場合は、CLI でモデルをインストールして設定を手動編集する方法も使えます。Web 保存後は `docker compose -f server/deploy/compose.cpu.yml restart server` で反映します。マウントやプロキシ環境変数を変えた場合は、コンテナを再作成してください。
+
+ダウンロードにプロキシが必要なら、コンテナ作成前に `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` を設定します。Compose は Server とモデルツールの両方へ渡します。プロキシにはコンテナから到達できる LAN アドレスを使います。コンテナ内の `127.0.0.1` は Mac ではありません。この操作は既存の API Key 認証を使い、認証が無効なら API に接続できる利用者も実行できます。対象は公開された固定の生体検知モデルだけで、任意の URL の入力や基本モデルパッケージの切り替えは提供しません。
+
+### 生体検知の結果
+
+| 結果 | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| 生体検知合格 | `ok` | `true` | `[0, 1]` |
+| 非生体 | `ok` | `false` | `[0, 1]` |
+| 入力拒否 | `input_rejected` | `null` | `null` |
+
+`normal` は生体検知に合格した顔だけを認識します。`observe` は結果を記録して認識を続けます。無効な場合、`liveness` 自体を省略します。結果は `status`、`is_live`、`live_score` の3項目だけです。合格と fake は `status: ok`、真偽値とスコアを返します。入力拒否は `status: input_rejected`、残り2項目は `null` です。
+
+検出は負の結果も HTTP 200 で返します。`normal` の特徴抽出・比較・検索は HTTP 422 `liveness_fake` または `liveness_input_rejected` と `error.details.liveness` を返します。比較には `details.side` もあります。推論障害は HTTP 503 `liveness_unavailable` です。
+
+新規 Person の登録と FaceSample の追加では、生体検知は初期状態で省略されます。`[inference].liveness_on_registration=false` の場合、モデルを実行せず、新しいサンプルの `liveness` を省略します。`true` にすると addon が有効な場合に `normal`/`observe` に従い、拒否項目には `reason` と `liveness` が付きます。`review_mode` の品質審査と外部特徴量の検証は引き続き実行されます。登録時の生体検知を有効にした場合、`review_mode=off` と `external_trusted` でも回避できません。リクエストからこの設定を上書きすることはできません。過去に保存された生体検知結果は引き続き参照できます。
+
+RTSP では `liveness_blocked` を `unknown` と区別し、`liveness_blocked_faces` に計上します。ブロックされた顔に人物・不明者の入場イベントを発行せず、確認フレーム数をリセットします。推論障害時は古い認識表示を消します。
+
+`liveness_compare_scope` は `/v1/compare` の対象を `both`（既定）、`source`、`target` から選びます。`live_score >= liveness_threshold` なら合格です。
+
+モデルはホストの `server/.models/addons/liveness.onnx`、コンテナの `/models/addons/liveness.onnx` に配置します。`/v1/models` と `/v1/system` の `addons` は現在有効な addon を示します。
+
+[API の詳細](api.ja.md#任意の生体検知-addon).
+
 ## 1. ログインと準備確認
 
 CPU は `http://SERVER:18097/`、CUDA 12 は `http://SERVER:18098/` を開きます。認証が有効な場合は **API キーを設定** から管理者の Key を入力します。Key は現在のタブのメモリだけに保持され、再読み込みまたはタブを閉じると消えます。
 
 **ダッシュボード** または **システム** で、サービス、データベース、モデル、Provider が ready であることを確認します。CUDA 版は `CUDAExecutionProvider` を表示しなければならず、CPU へ自動フォールバックしません。
+
+ダッシュボードはモデル名の下に生体検知の有効・無効を常に表示します。システムではインストール、現在の実行状態、再起動待ちを区別します。
 
 ## 2. Collection を作成
 
@@ -33,13 +111,13 @@ CPU は `http://SERVER:18097/`、CUDA 12 は `http://SERVER:18098/` を開きま
 FaceSample 数を設定します。112×112 にリサイズした `bounding-box crop` JPEG
 の保存は既定でオフです。これは認識モデル用のアライン済み入力ではありません。
 
-Collection はモデル ID、バージョン、digest、次元、前処理に固定されます。モデル変更後も古い Collection は表示されますが、契約が異なる登録・検索は明示的に拒否されます。
+Collection はモデル ID、digest、次元、前処理に固定されます。モデル変更後も古い Collection は表示されますが、契約が異なる登録・検索は明示的に拒否されます。
 
 検出設定は作成時にシステム既定値をコピーし、入力サイズ、検出/NMS しきい値、単一顔戦略を後から変更できます。`largest` は面積優先、`center_largest` は `面積 - 2.0 × 顔枠中心と画像中心のピクセル距離の二乗` を最大化します。検出信頼度はこのスコアに含みません。
 
 ## 3. Person を登録
 
-**人物** で Collection を選び、**人物を登録** を開きます。ID、名前、外部 ID、JSON metadata と 1 枚以上の JPEG、PNG、または WebP を指定します。
+**人物** で Collection を選び、**人物を登録** を開きます。ID、名前、外部 ID、JSON metadata と 1 枚以上の JPEG、PNG、WebP、または BMP を指定します。
 
 - `off`: Collection の単一顔戦略を使用し、複数顔を許可します。
 - `standard`: 1 つの有効顔を要求し、サイズ、検出値、鮮明度、明るさ、姿勢を確認します。
@@ -47,11 +125,19 @@ Collection はモデル ID、バージョン、digest、次元、前処理に固
 
 一括登録は部分成功を返します。拒否理由を確認してから再試行してください。元画像は保存されません。`external_trusted` では L2 正規化済み embedding を利用でき、画像は品質確認に必要ですが特徴量の再抽出は行いません。
 
+Person の新規登録と FaceSample の追加では既定で生体検知を省略します（`liveness_on_registration=false`）。有効にすると `normal` は fake・入力拒否を拒否し、`observe` は結果を保持して続行します。品質審査は引き続き選択した `review_mode` に従い、拒否一覧は実際の `reason` と生体検知結果を別々に表示します。
+
 ## 4. 検出・比較・検索
 
 **検出** は顔矩形、5 点、検出値、品質を表示し、顔なしは空リストで成功します。**比較** は選択したシステムまたは Collection の戦略で各画像から 1 顔を選び、cosine `similarity`、`threshold`、`matched` を返します。Similarity は確率ではありません。
 
 **検索** で Collection と画像を選択します。Collection の戦略で顔を選び、人物の全 FaceSample 中の最高 similarity を人物スコアとして降順に返します。一致なしは空リストです。新規 FaceSample は SQLite へ commit 後、応答前にメモリ索引へ追加されます。再起動時は SQLite から再構築します。
+
+有効時は評価した顔に `liveness.status`、`liveness.is_live`、`liveness.live_score` を返します。fake と `input_rejected` も HTTP 200 で、認識特徴は抽出しません。`input_rejected` は端に近すぎる顔など評価に不適切な入力を示します。`liveness` がなければ未評価です。
+
+`liveness_compare_scope`（`both`・`source`・`target`）で指定した側を認識前に検査します。`normal` では HTTP 422 `liveness_fake` または `liveness_input_rejected` と `error.details.liveness`、`error.details.side` を返し、類似度は返しません。`observe` は比較を続行し、各評価済みの顔に結果を返します。
+
+生体検知が有効な `normal` では fake・入力拒否に HTTP 422 `liveness_fake` / `liveness_input_rejected` と `error.details.liveness` を返し、検索しません。これは検索成功時の空リストとは異なります。`observe` は検索を続行し、クエリ顔に結果を返します。
 
 ## 5. RTSP カメラ監視
 
@@ -59,9 +145,11 @@ Collection はモデル ID、バージョン、digest、次元、前処理に固
 
 Monitor はブラウザーと独立して動作し、有効な task は Server 再起動後に復元されます。設定は SQLite、RTSP 認証情報は `/data` に暗号化保存されますが、動画 frame と event は保存しません。Event は上限付き memory buffer だけに残り、再起動で失われます。Decoder は最新 frame だけを保持し、遅い処理では古い frame を queue に積まず skip します。
 
+生体検知が有効な `normal` では拒否した顔を `status: liveness_blocked` とし、生体検知結果を別に表示します。`liveness_blocked_faces` に計上し、`unknown_faces` や入場イベントには含めません。`observe` は認識を続けます。入力拒否と fake は別々に表示されます。
+
 ## 6. データと安全性
 
-`/data` を永続化し、`/models` は読み取り専用にします。大量削除前に SQLite と顔画像領域を一緒にバックアップしてください。API Key は hash 保存され、同じデータ volume で異なる `INSIGHTFACE_API_KEY` を指定して再起動すると Key がローテーションされます。画像、embedding、Key をログへ出力しないでください。
+`/data` を永続化し、基本モデルの `/models` は読み取り専用に保ちます。Web 管理の書き込み対象は `/models/addons` と設定ディレクトリだけです。大量削除前に SQLite と顔画像領域を一緒にバックアップしてください。API Key は hash 保存され、同じデータ volume で異なる `INSIGHTFACE_API_KEY` を指定して再起動すると Key がローテーションされます。画像、embedding、Key をログへ出力しないでください。
 
 開発者向け OpenAPI スキーマエクスプローラーは `/docs`、操作別の API 説明はこのヘルプ内にあります。障害報告には応答ヘッダーの `x-request-id` を含めてください。`401` は Key、`409 collection_model_mismatch` はモデル契約、`422 face_not_found` は有効顔を確認します。
 
@@ -81,10 +169,28 @@ docker compose -f server/deploy/compose.cpu.yml \
 `buffalo_m`、`buffalo_s`、`buffalo_sc`、`antelopev2`、`raccoon_s`、
 `raccoon_l` です。インストール後は
 `manifest.json` と署名済み `MODEL.LICENSE` が残ります。
-`--accept-license` がない場合は条項を表示してダウンロードせず終了します。
+`--accept-license` を省略した場合、対話型端末ではダウンロード前に確認を求めます。
+非対話型のコマンドではこのフラグが必須で、省略するとダウンロードせず終了します。
+`models verify` はパッケージの識別情報、署名、有効期間、現在の許諾を検証します。
+実行時のライセンス表示の代替処理とは異なり、この明示的な検証には署名済みの
+ライセンスファイルが必要です。
 公開 InsightFace 学習済みモデルは、別途商用ライセンスがない限り非商用研究用です。
 
+`raccoon_s` と `raccoon_l` はサポート対象です。Server は各パッケージの検出・認識モデルのみをインストールし、Raccoon verifier はロードしません。モデル名だけで識別し、独立したモデルバージョン番号は使いません。基本モデルの変更は Web の生体検知操作では行えません。認識モデルが変わる場合、従来の特徴量を新しいモデルの特徴量として扱わず、適合する Collection を用意してください。
+
 ## 8. 起動設定と検索
+
+```toml
+[inference]
+addons = []
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = []
+```
 
 `server/config/server.toml` は起動時に一度だけ読み込まれ、変更にはコンテナ再起動が
 必要です。既定値は `input_sizes=[[96,96],[512,512]]`、検出しきい値 `0.50`、
@@ -121,10 +227,77 @@ make -C server build-cuda12
 ```
 
 ローカルイメージを使う Compose 操作には `--pull never` を付けます。公開固定 Tag は
-`0.2.0-cpu` と `0.2.0-cuda12`、移動 Tag は `cpu` と `cuda12` で、`latest` は
+`0.3.0-cpu` と `0.3.0-cuda12`、移動 Tag は `cpu` と `cuda12` で、`latest` は
 ありません。アップグレード前に書き込みを止め、SQLite-safe な方法で `/data` と
 crop を一緒にバックアップしてください。`docker compose down -v` は Volume を
 削除するため使わないでください。
+
+### 0.3.0 へのアップグレード
+
+このバージョンでは `raccoon_s` と `raccoon_l` およびモデル記述ファイルへの対応、
+任意の生体検知、Web からの追加モデルのインストール、BMP 画像入力を追加しました。
+Server は Raccoon の検出・認識モデルを使用し、パッケージの verifier はロードしません。
+
+**1.** `server/config/server.toml` の設定とデプロイ環境固有の上書き設定を保持し、Server の
+ソースと Compose ファイルを 0.3.0 に更新します。既存のモデルパス、`/data` の
+ボリューム名、顔画像の保存先、ポート、API キー設定を維持してください。独自の
+Compose ファイルを使う場合は、`server` と `models` 両サービスのイメージを環境に
+合わせて `0.3.0-cpu` または `0.3.0-cuda12` に更新します。以下のコマンドにも、
+普段と同じ Compose ファイル、上書き設定、プロジェクト名を適用してください。
+
+**2.** 新しいイメージを取得し、Server コンテナを再作成します。リポジトリのルートで、
+既存の環境に合うコマンドを選びます。
+
+CPU:
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml pull server models
+docker compose -f server/deploy/compose.cpu.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18097/v1/health
+```
+
+CUDA:
+
+```bash
+docker compose -f server/deploy/compose.cuda12.yml pull server models
+docker compose -f server/deploy/compose.cuda12.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18098/v1/health
+```
+
+ローカルでビルドする場合は、先に 0.3.0 のイメージをビルドし、取得する代わりに
+`up -d --no-build --pull never --force-recreate server` を使います。
+`docker compose restart` だけでは新しいイメージへの切り替えやマウント変更は
+適用されません。
+
+**3.** 起動時にデータベースの移行が自動で適用されます。`/v1/health` が `ready` と
+バージョン `0.3.0` を返すまで待ち、**システム**でモデルと実行プロバイダーが
+想定どおりか確認します。既存の Collection と人物が残っていることを確かめ、
+既知の画像で検索してください。同じモデルと特徴量の契約を維持する場合、サンプル、
+特徴量、Collection の契約 ID は保持され、再登録は不要です。
+
+**アップグレード後も生体検知は任意です。** 同梱設定と追加モデルのキーがない旧設定は
+どちらも生体検知を無効にするため、更新するだけならモデルの追加ダウンロードは不要です。
+Server は起動時にモデルをダウンロードしません。有効にするには
+[生体検知の設定](#任意の生体検知-addon)に従って
+[Web ダウンロードのマウントと権限](#web-ダウンロードのマウントと権限)を準備し、
+**システム → 生体検知 → ダウンロードして再起動後に有効化** を選びます。
+モデルのインストールと設定保存が成功してから、Server を手動で再起動してください。
+既定値は `normal`、しきい値 `0.8`、`liveness_on_registration=false` です。
+モデルの保存先は `<models_dir>/addons/liveness.onnx` です。
+
+**Raccoon の導入は別のモデル変更です。** Server を更新しても、現在のモデルパッケージは
+変わりません。`raccoon_s` または `raccoon_l` を使う場合は、
+[モデルのインストール手順](#7-モデルとライセンス)に従って別のモデルディレクトリへ
+インストールし、その保存先を使う環境を設定します。Collection は新しいモデルの特徴量の
+契約に適合する必要があります。対応する Collection を作って再登録するか、別途データ移行を
+行ってください。Web UI から基本モデルパッケージを切り替えることはできません。
+
+**API と SDK の互換性:** モデル、Collection、FaceSample の結果には `model_version` が
+含まれなくなります。モデルは `model_id`、Collection の互換性は `embedding_contract_id` で
+識別します。削除されたフィールドを必須とするクライアントを修正し、同梱の Python クライアントを
+更新する場合は SDK `0.3.0` を使ってください。生体検知を実行した場合、`liveness` に含まれるのは
+`status`、`is_live`、`live_score` の3項目だけです。実行しなかった場合は `liveness` 自体を省略します。
+認識リクエストに生体検知を有効にする前に、[結果とエラーの扱い](#生体検知の結果)を確認してください。
 
 ## 10. GPU、ネットワーク、トラブルシュート
 

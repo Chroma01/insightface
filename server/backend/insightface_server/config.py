@@ -29,6 +29,7 @@ DEFAULT_CPU_INFERENCE_MAX_CONCURRENCY = 4
 DEFAULT_CUDA_INFERENCE_MAX_CONCURRENCY = 8
 MAX_INFERENCE_MAX_CONCURRENCY = 256
 SUPPORTED_SINGLE_FACE_SELECTIONS = ("largest", "center_largest")
+SUPPORTED_ADDONS = ("liveness",)
 MAX_DETECTOR_INPUT_SIZE_COUNT = 4
 MIN_DETECTOR_INPUT_SIDE = 32
 MAX_DETECTOR_INPUT_SIDE = 2048
@@ -42,6 +43,16 @@ def _finite_unit_interval(value: object, *, name: str) -> float:
     if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
         raise ValueError(f"{name} must be finite and within 0.0..1.0")
     return normalized
+
+
+def normalize_addons(value: object, *, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        raise ValueError(f"{name} must be a list of addon names")
+    if any(not isinstance(item, str) or item not in SUPPORTED_ADDONS for item in value):
+        raise ValueError(f"{name} supports only: {', '.join(SUPPORTED_ADDONS)}")
+    if len(set(value)) != len(value):
+        raise ValueError(f"{name} must not contain duplicate names")
+    return tuple(value)
 
 
 def normalize_single_face_selection(value: object) -> SingleFaceSelection:
@@ -163,6 +174,12 @@ class ServerFileConfig:
     max_detected_faces: int = DEFAULT_MAX_DETECTED_FACES
     inference_max_concurrency: int | None = None
     web_ui_disabled: bool = False
+    addons: tuple[str, ...] = ()
+    auto_download_addons: tuple[str, ...] = ()
+    liveness_mode: str = "normal"
+    liveness_threshold: float = 0.8
+    liveness_compare_scope: str = "both"
+    liveness_on_registration: bool = False
 
 
 def default_inference_max_concurrency(execution_provider: str) -> int:
@@ -202,7 +219,7 @@ def load_server_config(
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"INSIGHTFACE_CONFIG_FILE '{path}' is not valid TOML: {exc}") from exc
 
-    unknown_sections = set(document) - {"detection", "inference", "web"}
+    unknown_sections = set(document) - {"detection", "inference", "web", "addons"}
     if unknown_sections:
         names = ", ".join(sorted(unknown_sections))
         raise ValueError(f"Unsupported server configuration section(s): {names}")
@@ -232,13 +249,32 @@ def load_server_config(
     inference = document.get("inference", {})
     if not isinstance(inference, dict):
         raise ValueError("[inference] must be a TOML table")
-    unknown_inference = set(inference) - {"max_concurrency"}
+    unknown_inference = set(inference) - {
+        "max_concurrency", "addons", "liveness_mode", "liveness_threshold",
+        "liveness_compare_scope", "liveness_on_registration",
+    }
     if unknown_inference:
         names = ", ".join(sorted(unknown_inference))
         raise ValueError(f"Unsupported [inference] setting(s): {names}")
     inference_max_concurrency = normalize_inference_max_concurrency(
         inference.get("max_concurrency", "auto")
     )
+    addon_config = document.get("addons", {})
+    if not isinstance(addon_config, dict) or set(addon_config) - {"auto_download"}:
+        raise ValueError("[addons] supports only the auto_download list")
+    addons = normalize_addons(inference.get("addons", []), name="[inference].addons")
+    auto_download_addons = normalize_addons(
+        addon_config.get("auto_download", []), name="[addons].auto_download"
+    )
+    liveness_mode = inference.get("liveness_mode", "normal")
+    if liveness_mode not in ("normal", "observe"):
+        raise ValueError("[inference].liveness_mode must be normal or observe")
+    compare_scope = inference.get("liveness_compare_scope", "both")
+    if compare_scope not in ("both", "source", "target"):
+        raise ValueError("[inference].liveness_compare_scope must be both, source or target")
+    liveness_on_registration = inference.get("liveness_on_registration", False)
+    if not isinstance(liveness_on_registration, bool):
+        raise ValueError("[inference].liveness_on_registration must be a boolean")
     max_detected_faces = detection.get(
         "max_detected_faces", DEFAULT_MAX_DETECTED_FACES
     )
@@ -258,6 +294,14 @@ def load_server_config(
         max_detected_faces=max_detected_faces,
         inference_max_concurrency=inference_max_concurrency,
         web_ui_disabled=web_ui_disabled,
+        addons=addons,
+        auto_download_addons=auto_download_addons,
+        liveness_mode=liveness_mode,
+        liveness_threshold=_finite_unit_interval(
+            inference.get("liveness_threshold", 0.8), name="[inference].liveness_threshold"
+        ),
+        liveness_compare_scope=compare_scope,
+        liveness_on_registration=liveness_on_registration,
     )
 
 
@@ -346,6 +390,12 @@ class Settings:
     rtsp_open_timeout_seconds: float = 5.0
     rtsp_read_timeout_seconds: float = 5.0
     rtsp_reconnect_delay_seconds: float = 1.0
+    addons: tuple[str, ...] = ()
+    auto_download_addons: tuple[str, ...] = ()
+    liveness_mode: str = "normal"
+    liveness_threshold: float = 0.8
+    liveness_compare_scope: str = "both"
+    liveness_on_registration: bool = False
 
     @property
     def detection_profile(self) -> DetectionProfile:
@@ -459,6 +509,12 @@ class Settings:
             detector_single_face_selection=file_config.detection.single_face_selection,
             max_detected_faces=file_config.max_detected_faces,
             config_file=config_file,
+            addons=file_config.addons,
+            auto_download_addons=file_config.auto_download_addons,
+            liveness_mode=file_config.liveness_mode,
+            liveness_threshold=file_config.liveness_threshold,
+            liveness_compare_scope=file_config.liveness_compare_scope,
+            liveness_on_registration=file_config.liveness_on_registration,
             default_search_profile=_choice(
                 "INSIGHTFACE_COLLECTION_DEFAULT_SEARCH_PROFILE",
                 "fp32_v1",

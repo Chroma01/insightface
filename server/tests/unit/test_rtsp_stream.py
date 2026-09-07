@@ -10,6 +10,7 @@ from insightface_server.services.rtsp import (
     MonitorOptions,
     MonitorPreviewDisabledError,
     MonitorSession,
+    _monitor_result,
     next_inference_time,
     redacted_rtsp_source,
 )
@@ -230,3 +231,53 @@ def test_requested_rate_maps_to_start_interval(fps: float, expected: float) -> N
         finished=4.01,
         inference_fps=fps,
     ) == pytest.approx(4.0 + expected)
+
+
+def test_blocked_face_is_not_unknown_and_restarts_identity_confirmation() -> None:
+    session, service = _session(_options(confirm_frames=2))
+    items, _ = service.search_all_faces()
+    matched = _monitor_result(items[0])
+    face = {**items[0]["face"], "liveness": {"status": "ok", "is_live": False, "live_score": 0.1}}
+    blocked = _monitor_result({"status": "liveness_blocked", "face": face, "match": None})
+    session._update_tracks([matched], 0.0)
+    session._results = session._update_tracks([blocked], 0.01)
+    session._results = session._update_tracks([blocked], 0.02)
+    state = session.state()
+    assert state["matched_faces"] == state["unknown_faces"] == 0
+    assert state["liveness_blocked_faces"] == 1
+    assert state["faces"][0]["person"] is None
+    assert state["faces"][0]["face"]["liveness"] == face["liveness"]
+    assert not session.event_page(cursor_epoch=None, after_sequence=None, limit=10)["events"]
+    session._update_tracks([matched], 0.03)
+    assert not session.event_page(cursor_epoch=None, after_sequence=None, limit=10)["events"]
+    session._update_tracks([matched], 0.04)
+    session._update_tracks([blocked], 0.05)
+    events = session.event_page(cursor_epoch=None, after_sequence=None, limit=10)["events"]
+    assert [event["type"] for event in events] == ["person_enter", "person_exit"]
+
+
+def test_liveness_failure_clears_previous_video_identity(monkeypatch) -> None:
+    from insightface_server.errors import ApiError
+
+    session, service = _session(_options(confirm_frames=1))
+    session.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while session.state()["matched_faces"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert session.state()["matched_faces"] == 1
+
+        def fail(*args, **kwargs):
+            raise ApiError("liveness_unavailable", "Liveness inference is unavailable.", 503)
+
+        monkeypatch.setattr(service, "search_all_faces", fail)
+        deadline = time.monotonic() + 2.0
+        while session.state()["inference_errors"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        state = session.state()
+        assert state["inference_errors"] > 0
+        assert state["faces"] == []
+        assert state["matched_faces"] == 0
+        assert not session._tracks
+    finally:
+        session.stop()

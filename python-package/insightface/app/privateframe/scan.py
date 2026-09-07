@@ -1,4 +1,4 @@
-"""Every-frame, 10G-only multi-view SCRFD scan using ONNX Runtime."""
+"""Multi-view SCRFD detection for frames selected by the streaming pipeline."""
 
 from __future__ import annotations
 

@@ -92,8 +92,8 @@ def _invalid_result(case: str) -> dict[str, object] | list[object]:
         value["observations"][0]["track_id"] = ""
     elif case == "source":
         value["observations"][0]["source"] = None
-    elif case == "force_blur":
-        value["observations"][0]["force_blur"] = 1
+    elif case == "identity_unconfirmed":
+        value["observations"][0]["identity_unconfirmed"] = 1
     elif case == "box_length":
         value["observations"][0]["box"] = [1.0, 2.0, 11.0]
     elif case == "box_type":
@@ -199,7 +199,7 @@ INVALID_CASES = [
     ),
     pytest.param("track_id", "track_id must be a non-empty string", id="track-id"),
     pytest.param("source", "source must be a non-empty string", id="source"),
-    pytest.param("force_blur", "force_blur must be boolean", id="force-blur"),
+    pytest.param("identity_unconfirmed", "identity_unconfirmed must be boolean", id="identity-unconfirmed"),
     pytest.param(
         "box_length", "box must be an array of four finite numbers", id="box-length"
     ),

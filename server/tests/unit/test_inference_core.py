@@ -170,7 +170,7 @@ def test_factory_and_summary_use_simple_public_contract() -> None:
         )
     )
     assert engine.summary.embedding_dimension == 16
-    summary = EngineSummary("id", "1", "a" * 64, 16, "1", "CPUExecutionProvider")
+    summary = EngineSummary("id", "a" * 64, 16, "1", "CPUExecutionProvider")
     assert summary.as_dict()["model_id"] == "id"
     with pytest.raises(ValueError, match="Unsupported inference_mode"):
         create_engine({"inference_mode": "remote"})
@@ -271,7 +271,7 @@ def test_v2_engine_license_and_digest_ignore_verification_task(tmp_path: Path) -
         )
     )
 
-    assert first.summary.model_version == "buffalo_l"
+    assert "model_version" not in first.summary.as_dict()
     assert first.summary.license is not None
     assert first.summary.license["model_id"] == "buffalo_l"
     assert "status" not in first.summary.license
@@ -330,7 +330,6 @@ def test_v2_embedded_preprocessing_uses_session_input_dtype(tmp_path: Path) -> N
 
     embedded = ModelSpec(
         model_id="test",
-        model_version="test",
         task="face_recognition",
         path=tmp_path / "recognizer.onnx",
         input_size=(112, 112),
@@ -351,7 +350,6 @@ def test_v2_embedded_preprocessing_uses_session_input_dtype(tmp_path: Path) -> N
 
     mean_std = ModelSpec(
         model_id="test",
-        model_version="test",
         task="face_recognition",
         path=tmp_path / "recognizer.onnx",
         input_size=(112, 112),

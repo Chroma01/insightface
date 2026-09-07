@@ -8,7 +8,7 @@
 NVIDIA GPU 人脸识别推理。**
 
 ```text
-上传图片 -> 检测、比对、注册或搜索
+上传图片 -> 检测、活体检测、比对、注册或搜索
 ```
 
 > **模型许可：** InsightFace 公开预训练模型通常仅限非商业研究用途。商业使用
@@ -18,15 +18,20 @@ InsightFace Server 面向常见的人脸识别流程，是比 AWS Rekognition �
 更注重数据隐私的自托管方案。图片、特征、模型和索引都可以留在自己的网络内。
 它**不是** AWS 兼容替代品，不实现 SigV4、IAM、Region 或 AWS 资源语义。
 
-当前版本：**0.2.0**，Linux x86_64。
+当前版本：**0.3.0**，Linux x86_64。
 
 | 运行环境 | 镜像 |
 | --- | --- |
-| CPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cpu` |
-| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cuda12` |
+| CPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cpu` |
+| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cuda12` |
 
 滚动标签 `cpu` 和 `cuda12` 分别指向对应运行环境的最新稳定版本，不提供含义模糊的
 `latest`。发布规则见[维护者指南（仅英文）](docs/maintainer-guide.md)。
+
+**0.3.0 更新与升级：**新增 `raccoon_s`、`raccoon_l` 及其模型描述文件支持，
+集成可选活体检测、网页模型安装和 BMP 输入。已有部署可以保留原模型、配置和数据
+挂载；活体默认关闭，需按需启用。API 和 SDK 结果不再包含 `model_version`。
+详见[升级步骤](docs/user-guide.zh-CN.md#升级到-030)。
 
 ![InsightFace Server 英文仪表盘](docs/images/customer/dashboard-en.jpg)
 
@@ -43,13 +48,15 @@ InsightFace Server 面向常见的人脸识别流程，是比 AWS Rekognition �
 - GPU 精确检索支持 FP32、FP16、BF16 和 INT8 向量存储。
 - 多语言 Web UI 覆盖仪表盘、人员库、人员、人脸检测、比对、搜索、RTSP 监控、
   系统诊断和帮助。
-- `/v1` 下提供 29 个 snake_case REST 接口，包括受保护的
+- `/v1` 下提供 31 个 snake_case REST 接口，包括受保护的
   `/v1/embeddings`，并附带轻量 Python SDK。
 - 服务端 RTSP Monitor 独立运行、保存有限的内存事件、支持多个客户端，并可选
   `preview.mjpeg`；关闭浏览器不会停止监控。
-- SQLite 是持久化事实来源；内存精确索引可重建；`/models` 只读、`/data`
+- SQLite 是持久化事实来源；内存精确索引可重建；基础模型只读、addon 和配置目录可写、`/data`
   持久化，并提供 migration、健康检查和禁止静默 CPU 回退的严格 CUDA 启动验证。
-- 支持 JPEG、PNG 和 WebP；默认不保留原始上传图片。
+- 支持 JPEG、PNG、WebP 和 BMP；默认不保留原始上传图片。
+
+活体默认关闭：`server/config/server.toml` 中 `inference.addons = []`、`addons.auto_download = []`。在 **系统 → 活体检测** 下载并校验模型后，Server 自动保存启用配置，手动重启才生效；已校验的缓存直接复用。启动时不下载模型，手动启用但缺少模型时会报错并给出安装方法。执行活体后，每张脸只返回 `status`、`is_live`、`live_score` 三个字段；默认模式为 `normal`，注册默认跳过活体（`liveness_on_registration = false`）。详见[配置、网页权限和升级步骤](docs/user-guide.zh-CN.md#可选活体检测-addon)。
 
 ### RTX 5090 GPU 检索性能
 
@@ -233,7 +240,7 @@ Server 不内置 TLS、用户账户、RBAC、云 IAM 或法律合规层。部署
 
 当前版本不实现 AWS/CompreFace 兼容、CUDA 11、Jetson、ARM64、Windows
 Container、TensorRT、Kubernetes、分布式 Worker、持久化 Monitor 事件或录像/NVR，
-也不实现活体、Deepfake Detection 和人口属性分析。
+也不实现 Deepfake Detection 和人口属性分析。
 
 ## 文档
 

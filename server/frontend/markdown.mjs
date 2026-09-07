@@ -10,10 +10,39 @@ function escapeHtml(value) {
 function safeHref(value) {
   const href = String(value).trim();
   if (/^(?:https?:\/\/|\/|#|\.\.?\/)/i.test(href)) return escapeHtml(href);
-  if (/^(?:(?:user-guide|api)(?:\.(?:zh-CN|ja|de|es|fr|ru|pt|ko))?|maintainer-guide)\.md(?:#[A-Za-z0-9_.-]+)?$/.test(href)) {
+  if (documentationLink(href)) {
     return escapeHtml(href);
   }
   return "#";
+}
+
+export function documentationLink(href, currentDocument = "", currentLocale = "en") {
+  const value = String(href || "").trim();
+  const hash = value.indexOf("#");
+  const path = hash < 0 ? value : value.slice(0, hash);
+  let anchor;
+  try {
+    anchor = hash < 0 ? "" : decodeURIComponent(value.slice(hash + 1));
+  } catch {
+    return null;
+  }
+  if (!path && hash === 0 && ["user-guide", "api", "maintainer"].includes(currentDocument)) {
+    return { document: currentDocument, locale: currentDocument === "maintainer" ? "en" : currentLocale, anchor };
+  }
+  const local = /^(?:\.\/)?(user-guide|api)(?:\.(zh-CN|ja|de|es|fr|ru|pt|ko))?\.md$/.exec(path);
+  if (local) return { document: local[1], locale: local[2] === "zh-CN" ? "zh" : local[2] || "en", anchor };
+  if (/^(?:\.\/)?maintainer-guide\.md$/.test(path)) return { document: "maintainer", locale: "en", anchor };
+  const bundled = /^\/guide-content\/(en|zh|ja|de|es|fr|ru|pt|ko)\/(user-guide|api|maintainer)\.md$/.exec(path);
+  return bundled ? { document: bundled[2], locale: bundled[2] === "maintainer" ? "en" : bundled[1], anchor } : null;
+}
+
+function headingAnchor(value) {
+  return String(value)
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/<[^>]*>/g, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, "")
+    .replace(/\s/g, "-");
 }
 
 function safeImageHref(value) {
@@ -43,6 +72,7 @@ function tableCells(value) {
 export function renderMarkdown(markdown) {
   const lines = String(markdown || "").replaceAll("\r\n", "\n").split("\n");
   const output = [];
+  const anchors = new Set();
   let index = 0;
 
   while (index < lines.length) {
@@ -68,7 +98,12 @@ export function renderMarkdown(markdown) {
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       const level = heading[1].length;
-      output.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+      const base = headingAnchor(heading[2]);
+      let anchor = base;
+      let suffix = 0;
+      while (anchors.has(anchor)) anchor = `${base}-${++suffix}`;
+      anchors.add(anchor);
+      output.push(`<h${level} id="${escapeHtml(anchor)}">${inline(heading[2])}</h${level}>`);
       index += 1;
       continue;
     }

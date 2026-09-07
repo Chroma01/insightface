@@ -8,7 +8,7 @@
 API, SQLite, and local CPU or NVIDIA GPU inference in one container.**
 
 ```text
-upload an image -> detect, compare, enroll, or search
+upload an image -> detect, check liveness, compare, enroll, or search
 ```
 
 > **Model license:** Public InsightFace pretrained models are generally
@@ -21,16 +21,22 @@ embeddings, models, and indexes can remain inside your network. It is **not** an
 AWS-compatible replacement and does not implement SigV4, IAM, Region, or AWS
 resource semantics.
 
-Current release: **0.2.0**, Linux x86_64.
+Current release: **0.3.0**, Linux x86_64.
 
 | Runtime | Image |
 | --- | --- |
-| CPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cpu` |
-| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cuda12` |
+| CPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cpu` |
+| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cuda12` |
 
 The moving `cpu` and `cuda12` tags identify the latest stable release in each
 runtime family. There is no ambiguous `latest` tag. See
 [Maintainer Guide — English](docs/maintainer-guide.md) for the release policy.
+
+**0.3.0 update and upgrade:** Adds `raccoon_s` and `raccoon_l` with support for
+their model manifests, optional liveness with Web model installation, and BMP
+input. Existing deployments can keep their models, configuration, and data
+mounts; liveness remains off unless enabled. API and SDK results no longer
+include `model_version`. See [upgrade steps](docs/user-guide.md#upgrade-to-030).
 
 ![InsightFace Server dashboard in English](docs/images/customer/dashboard-en.jpg)
 
@@ -48,15 +54,17 @@ runtime family. There is no ambiguous `latest` tag. See
 - Exact GPU search with FP32, FP16, BF16, and INT8 vector storage.
 - Multilingual Web UI for Dashboard, Collections, People, Detect, Compare,
   Search, RTSP monitoring, System diagnostics, and Help.
-- 29 snake_case REST operations under `/v1`, including authenticated
+- 31 snake_case REST operations under `/v1`, including authenticated
   `/v1/embeddings`, plus a typed lightweight Python SDK.
 - Persistent server-side RTSP Monitors with bounded in-memory events,
   independent clients, and optional `preview.mjpeg`; closing the browser does
   not stop monitoring.
 - SQLite as the durable source of truth, disposable in-memory exact indexes,
-  read-only `/models`, persistent `/data`, migrations, health checks, and
+  read-only base models, writable addon/config directories, persistent `/data`, migrations, health checks, and
   strict CUDA startup validation without silent CPU fallback.
-- JPEG, PNG, and WebP input; original uploads are not retained by default.
+- JPEG, PNG, WebP, and BMP input; original uploads are not retained by default.
+
+Liveness is disabled by default: `inference.addons = []` and `addons.auto_download = []` in `server/config/server.toml`. **System → Liveness** downloads and verifies the model, then saves activation for the next manual restart; a verified cached model is reused. Startup never downloads models. An enabled addon missing its model stops startup with an installation hint. When evaluated, each face returns only `status`, `is_live`, and `live_score`. The default mode is `normal`; registration skips liveness by default (`liveness_on_registration = false`). See [configuration, Web permissions and upgrade instructions](docs/user-guide.md#optional-liveness-addon).
 
 ### RTX 5090 GPU search performance
 
@@ -260,7 +268,7 @@ legal-compliance layer. Deployment and security guidance is in the
 
 This release does not implement AWS/CompreFace compatibility, CUDA 11, Jetson,
 ARM64, Windows containers, TensorRT, Kubernetes, distributed Workers, persistent
-Monitor events or recording/NVR, liveness, deepfake detection, or demographic
+Monitor events or recording/NVR, deepfake detection, or demographic
 attributes.
 
 ## Documentation

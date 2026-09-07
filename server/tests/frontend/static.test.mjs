@@ -88,8 +88,8 @@ test("repository README and bundled help sources exist for every supported local
   ];
   const requiredReadmeMarkers = [
     "Rekognition",
-    "0.2.0-cpu",
-    "0.2.0-cuda12",
+    "0.3.0-cpu",
+    "0.3.0-cuda12",
     "dashboard-en.jpg",
     "collections-en.jpg",
     "monitoring-en.jpg",
@@ -142,7 +142,7 @@ test("repository README and bundled help sources exist for every supported local
     );
     assert.ok(guide.length > 3500, `user-guide${suffix}.md is unexpectedly short`);
     assert.ok(api.length > 7000, `api${suffix}.md is unexpectedly short`);
-    assert.equal((api.match(/^### `(?:GET|POST|PATCH|DELETE) \/v1\//gm) || []).length, 29);
+    assert.equal((api.match(/^### `(?:GET|POST|PATCH|DELETE) \/v1\//gm) || []).length, 31);
     for (const marker of requiredReadmeMarkers) {
       assert.ok(
         readme.includes(marker),
@@ -242,10 +242,10 @@ test("frontend assets use the server's /assets mount and no external CDN", async
   const index = await source("index.html");
   const docs = await source("openapi.html");
   assert.doesNotMatch(`${index}\n${docs}`, /\/static\//);
-  assert.match(index, /href="\/assets\/styles\.css\?v=0\.2\.0-r14"/);
-  assert.match(index, /src="\/assets\/app\.mjs\?v=0\.2\.0-r14"/);
+  assert.match(index, /href="\/assets\/styles\.css\?v=0\.3\.0-r1"/);
+  assert.match(index, /src="\/assets\/app\.mjs\?v=0\.3\.0-r1"/);
   assert.match(docs, /href="\/assets\/openapi\.css"/);
-  assert.match(docs, /src="\/assets\/openapi\.js\?v=0\.2\.0-r14"/);
+  assert.match(docs, /src="\/assets\/openapi\.js\?v=0\.3\.0-r1"/);
   const externalReferences = [...`${index}\n${docs}`.matchAll(/(?:src|href)="(https?:\/\/[^\"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(externalReferences, ["https://www.insightface.ai"]);
 });
@@ -279,7 +279,7 @@ test("console and API reference use the InsightFace.ai brand system", async () =
 });
 
 test("API key and images are not persisted by browser code", async () => {
-  const scripts = `${await source("app.mjs")}\n${await source("api.mjs")}`;
+  const scripts = `${await source("app.mjs")}\n${await source("api.mjs")}\n${await source("rejections.mjs")}\n${await source("liveness.mjs")}`;
   assert.doesNotMatch(scripts, /localStorage|sessionStorage|indexedDB/);
   assert.doesNotMatch(scripts, /console\.(?:log|info|debug)/);
 });
@@ -361,12 +361,12 @@ test("camera monitoring uses persistent Monitors, memory events, and raw lazy pr
   assert.match(app, /drawMonitorOverlay/);
 });
 
-test("image uploads advertise JPEG, PNG, and WebP and search fields share a baseline", async () => {
+test("image uploads advertise JPEG, PNG, WebP, and BMP and search fields share a baseline", async () => {
   const html = await source("index.html");
   const app = await source("app.mjs");
   const styles = await source("styles.css");
-  assert.equal([...html.matchAll(/accept="image\/jpeg,image\/png,image\/webp"/g)].length, 5);
-  assert.match(app, /accept="image\/jpeg,image\/png,image\/webp"/);
+  assert.equal([...html.matchAll(/accept="image\/jpeg,image\/png,image\/webp,image\/bmp,image\/x-ms-bmp,\.bmp"/g)].length, 5);
+  assert.match(app, /accept="image\/jpeg,image\/png,image\/webp,image\/bmp,image\/x-ms-bmp,\.bmp"/);
   assert.doesNotMatch(`${html}\n${app}`, /accept="image\/jpeg,image\/png"/);
   assert.match(html, /class="form-grid two search-parameters"/);
   assert.match(styles, /\.search-parameters \{ align-items: end; \}/);
@@ -392,7 +392,7 @@ test("all static console and API-reference copy is translated in every supported
 
 test("dynamic result, status, and action copy is translated in every supported locale", async () => {
   const app = await source("app.mjs");
-  const messages = translatedLiteralStrings(`${app}\n${await source("openapi.js")}`);
+  const messages = translatedLiteralStrings(`${app}\n${await source("openapi.js")}\n${await source("rejections.mjs")}\n${await source("liveness.mjs")}`);
   for (const template of app.matchAll(/innerHTML\s*=\s*`([\s\S]*?)`/g)) {
     for (const message of staticUiStrings(template[1])) messages.add(message);
   }
@@ -442,4 +442,12 @@ test("Collection crop storage is opt-in and previews use revocable authenticated
   assert.match(api, /Authorization/);
   assert.match(app, /URL\.createObjectURL\(blob\)/);
   assert.match(app, /URL\.revokeObjectURL\(url\)/);
+});
+
+test("model surfaces identify packages by name without a separate model version", async () => {
+  const app = await source("app.mjs");
+  const html = await source("index.html");
+  assert.doesNotMatch(`${app}\n${html}`, /model_version|metric-model-version/);
+  assert.match(html, /id="metric-model"/);
+  assert.match(app, /collection\.model_id/);
 });

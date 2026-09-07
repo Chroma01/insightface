@@ -75,7 +75,7 @@ def test_loads_compact_manifest_and_calculates_diagnostic_digest(tmp_path: Path)
     bundle = load_manifest(tmp_path)
 
     assert bundle.model_id == "test_model"
-    assert bundle.model_version == "v1"
+    assert not hasattr(bundle, "model_version")
     assert bundle.detector.task == "face_detection"
     assert bundle.recognizer.embedding_dimension == 512
     assert bundle.recognizer.public_summary()["model_id"] == "test_model"
@@ -113,7 +113,7 @@ def test_v2_loads_only_active_models_and_ignores_verifier_and_extensions(
     bundle = load_manifest(tmp_path)
 
     assert bundle.model_id == "raccoon_s"
-    assert bundle.model_version == "raccoon_s"
+    assert not hasattr(bundle, "model_version")
     assert bundle.detector.preprocessing == "mean_std"
     assert bundle.detector.input_mean == 125.0
     assert bundle.detector.input_std == 126.0
@@ -323,3 +323,18 @@ def test_legacy_manifest_is_read_without_enforcing_declared_sha256(tmp_path: Pat
     bundle = load_manifest(tmp_path)
     assert bundle.legacy_manifest is True
     assert bundle.model_id == "buffalo_l"
+
+
+def test_old_manifest_version_metadata_does_not_change_model_identity(tmp_path: Path) -> None:
+    detector, recognizer = _models(tmp_path)
+    manifest = _manifest(detector, recognizer)
+    path = tmp_path / 'manifest.json'
+    path.write_text(json.dumps(manifest))
+    original = load_manifest(tmp_path)
+    manifest['model_version'] = 'another-obsolete-version'
+    path.write_text(json.dumps(manifest))
+    assert load_manifest(tmp_path) == original
+    manifest.pop('model_version')
+    path.write_text(json.dumps(manifest))
+    assert load_manifest(tmp_path) == original
+    assert all('model_version' not in model.public_summary() for model in original.models)

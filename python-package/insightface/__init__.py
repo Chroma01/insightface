@@ -3,6 +3,12 @@
 """InsightFace: A Face Analysis Toolkit."""
 from __future__ import absolute_import
 
+import os
+
+# ORT reads this during native initialization, so set it before importing ORT.
+# Older runtimes that do not recognize this variable simply ignore it.
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+
 try:
     #import mxnet as mx
     import onnxruntime

@@ -11,6 +11,7 @@ import yaml
 
 from ... import __version__ as _INSIGHTFACE_VERSION
 from .base_config import DEFAULT_CONFIG_PATH, _current_config_schema
+from .config_options import DESCRIBE_OPTION_GROUPS, DESCRIBE_OPTION_METADATA
 
 _TOOL_NAME = "insightface-privateframe"
 _MISSING = object()
@@ -94,6 +95,7 @@ _DOTTED_METADATA: dict[str, dict[str, Any]] = {
         "description": "auto selects CoreML, then CUDA, then CPU when available.",
     },
     "recognition.mode": {"enum": ["all", "blur_only", "exempt"]},
+    "recognition.unknown_action": {"enum": ["auto", "blur", "keep"]},
     "recognition.profile": {"enum": ["fast", "balanced", "accurate"]},
     "recognition.similarity_threshold": {"minimum": 0.0, "maximum": 1.0},
     "recognition.max_frames_per_track": {
@@ -101,11 +103,59 @@ _DOTTED_METADATA: dict[str, dict[str, Any]] = {
         "minimum": 1,
         "maximum": 32,
     },
-    "recognition.gallery_dir": {"type": ["string", "null"]},
+    "recognition.reference_dir": {"type": ["string", "null"]},
+    "revalidation.passes": {
+        "type": ["array", "null"],
+        "min_items": 1,
+        "description": "Optional local-review cascade; null uses the shared revalidation settings.",
+        "items": {
+            "type": "object",
+            "required": ["name", "input_size", "crop_expansion"],
+            "name": {
+                "description": "Converted to text; the resulting name must be nonempty and unique within the cascade.",
+            },
+            "input_size": {"type": "integer", "minimum": 32, "multiple_of": 32},
+            "crop_expansion": {
+                "type": "number",
+                "exclusive_minimum": 0,
+                "finite": True,
+            },
+        },
+    },
     "scan.max_analysis_fps": {
         "type": "number",
         "exclusive_minimum": 0.0,
-        "description": "Maximum regular full-frame analysis rate; stride is derived per video.",
+        "unit": "frames_per_second_of_input_video",
+        "description": (
+            "Approximate ceiling on regular full-frame face detection sampling, "
+            "default 30. This controls sampling along the input video timeline; "
+            "it is not a wall-clock processing speed target and does not change "
+            "the output video's frame count or frame rate. A uniform integer "
+            "stride with 5% rate tolerance is derived per video: at 30, 25/30 FPS "
+            "input is scanned every frame and 60 FPS every 2 frames. At 15, 30 FPS "
+            "input is scanned every 2 frames (15/s), 60 FPS every 4 (15/s), and "
+            "25 FPS every 2 (12.5/s). Input at or below the setting is scanned "
+            "every frame. Scene boundaries, endpoints, and new-track bursts can "
+            "add scans above this soft ceiling. Sampled-out frames are still "
+            "decoded and rendered; by default their face regions are interpolated."
+        ),
+        "tuning_guidance": {
+            "keep_default": (
+                "Keep 30 for greater temporal coverage, fast motion, or frequent occlusion."
+            ),
+            "increase": (
+                "For source video above 30 FPS, raise toward the source FPS for "
+                "fast motion, briefly visible faces, or greater detection coverage. "
+                "Setting the source FPS scans every frame. "
+                "Higher sampling costs more compute and cannot guarantee detection."
+            ),
+            "decrease": (
+                "Lower to 15 (or e.g. 10) when faster processing and less detector "
+                "work take priority, especially in limited-motion scenes. "
+                "Wider gaps increase the risk of missing faces "
+                "that appear only between samples; review representative output."
+            ),
+        },
     },
     "scan.session_sharing": {
         "enum": ["single_session_parallel", "single_session_serial"],
@@ -139,7 +189,7 @@ _DOTTED_METADATA: dict[str, dict[str, Any]] = {
     "render.video_output.rate_control.buffer_size": {
         "type": ["integer", "string"],
         "format": "positive_integer_or_k_m_g_suffix",
-        "maximum_bps": 9_223_372_036_854_775_807,
+        "maximum_bits": 9_223_372_036_854_775_807,
     },
     "render.video_output.audio.debug": {"enum": ["none", "copy", "aac"]},
     "render.video_output.audio.redacted": {"enum": ["none", "copy", "aac"]},
@@ -149,6 +199,24 @@ _DOTTED_METADATA: dict[str, dict[str, Any]] = {
         "maximum_bps": 9_223_372_036_854_775_807,
     },
 }
+_CANDIDATE_FILTER_METADATA: dict[str, dict[str, Any]] = {
+    "enabled": {"type": "boolean"},
+    "min_box_area_fraction": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "min_height_width_ratio": {"type": "number", "exclusive_minimum": 0.0},
+    "max_height_width_ratio": {
+        "type": ["number", "null"],
+        "description": "null omits the maximum; otherwise it must be at least min_height_width_ratio.",
+    },
+    "aspect_ratio_exempt_min_area_fraction": {
+        "type": "number",
+        "minimum": 0.0,
+        "maximum": 1.0,
+        "description": "Must be at least min_box_area_fraction when the filter is enabled.",
+    },
+}
+
+for _path, _guidance in DESCRIBE_OPTION_METADATA.items():
+    _DOTTED_METADATA.setdefault(_path, {}).update(deepcopy(_guidance))
 
 
 def _json_compatible(value: Any) -> Any:
@@ -396,6 +464,13 @@ def _add_dotted_option(
         "nullable": bool(has_default and default is None),
     }
     spec.update(deepcopy(_DOTTED_METADATA.get(path, {})))
+    if (
+        len(parts) == 5
+        and parts[:2] == ("scan", "passes")
+        and parts[2].isdigit()
+        and parts[3] == "candidate_filter"
+    ):
+        spec.update(deepcopy(_CANDIDATE_FILTER_METADATA.get(parts[4], {})))
     declared_type = spec.get("type")
     if isinstance(declared_type, list) and "null" in declared_type:
         spec["nullable"] = True
@@ -447,7 +522,7 @@ def _flatten_dotted_options(
     )
 
 
-def _config_contract() -> dict[str, Any]:
+def _full_config_contract() -> dict[str, Any]:
     raw_defaults = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
     if not isinstance(raw_defaults, dict):
         raise TypeError(f"invalid built-in config: {DEFAULT_CONFIG_PATH}")
@@ -485,6 +560,35 @@ def _config_contract() -> dict[str, Any]:
                 "authoritative for encoder-specific and cross-field rules"
             ),
         },
+    }
+
+
+def _config_contract() -> dict[str, Any]:
+    full = _full_config_contract()
+    selected = {
+        path: deepcopy(full["dotted_options"][path])
+        for group in DESCRIBE_OPTION_GROUPS
+        for path in group["fields"]
+    }
+    for option in selected.values():
+        option.pop("authoritative_validation", None)
+    return {
+        "schema_version": full["schema_version"],
+        "scope": "common_and_intermediate",
+        "default_path": full["default_path"],
+        "layer_precedence": full["layer_precedence"],
+        "render_layer_precedence": full["render_layer_precedence"],
+        "dotted_syntax": full["dotted_syntax"],
+        "groups": deepcopy(DESCRIBE_OPTION_GROUPS),
+        "dotted_options": selected,
+        "unlisted_options_supported": True,
+        "full_reference": {
+            "format": "markdown",
+            "path": str((Path(__file__).parent / "docs" / "configuration.md").resolve()),
+            "scope": "all_supported_configuration",
+            "when_to_read": "Read for advanced fields or complete constraints; all documented YAML and CLI overrides remain supported.",
+        },
+        "validation": full["validation"],
     }
 
 
@@ -569,14 +673,67 @@ def _artifact_contract() -> dict[str, Any]:
                         },
                     },
                 },
-                "render_defaults": {"type": "object"},
-                "recognition": {"type": "object"},
+                "render_defaults": {
+                    "type": "object",
+                    "recognition_policy": {
+                        "type": "object",
+                        "required": ["mode", "unknown_action"],
+                        "mode": {"enum": ["all", "blur_only", "exempt"]},
+                        "unknown_action": {"enum": ["blur", "keep"]},
+                        "description": (
+                            "Resolved photo policy from analysis, reused by render. "
+                            "auto is resolved before saving; all always blurs."
+                        ),
+                    },
+                },
+                "recognition": {
+                    "type": "object",
+                    "required": ["enabled"],
+                    "enabled": {"type": "boolean"},
+                    "fields_when_enabled": {
+                        "references": {
+                            "type": "object",
+                            "accepted_images": {"type": "integer", "minimum": 1},
+                            "skipped_images": {"type": "integer", "minimum": 0},
+                            "files": {
+                                "type": "array",
+                                "items": {
+                                    "file": {"type": "string"},
+                                    "detected_face_count": {"type": "integer", "minimum": 1},
+                                    "selected_box": {"type": "array", "length": 4},
+                                },
+                            },
+                            "skipped": {
+                                "type": "array",
+                                "items": {
+                                    "file": {"type": "string"},
+                                    "reason": {"type": "string"},
+                                },
+                            },
+                            "fingerprint": {"type": "string"},
+                        },
+                        "tracks": {
+                            "type": "object",
+                            "keys": "track_id",
+                            "values": {
+                                "status": {"enum": ["CONFIRMED", "UNKNOWN", "CONFLICT"]},
+                                "matched_reference_files": {"type": "array", "items": {"type": "string"}},
+                                "similarity": {"type": ["number", "null"]},
+                                "reason": {"type": "string"},
+                            },
+                        },
+                    },
+                },
                 "observations": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "required": ["frame_idx", "track_id", "box", "source"],
-                        "frame_idx": {"type": "integer", "minimum": 0},
+                        "frame_idx": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "constraint": "frame_idx < source_video.metadata.frame_count",
+                        },
                         "track_id": {"type": "string", "min_length": 1},
                         "source": {
                             "enum": [
@@ -594,9 +751,38 @@ def _artifact_contract() -> dict[str, Any]:
                             "constraint": "x2 > x1 and y2 > y1",
                         },
                         "reduced_assurance": {"type": "boolean"},
-                        "force_blur": {"type": "boolean"},
+                        "identity_unconfirmed": {
+                            "type": "boolean",
+                            "description": "True makes this region follow unknown_action even if its track has a confirmed match.",
+                        },
                         "additional_fields_allowed": True,
                     },
+                },
+            },
+            "schema_semantics": {
+                "stable_render_input_schema": (
+                    "Canonical structure emitted by current analysis and recommended "
+                    "for new or edited documents. The renderer also accepts the "
+                    "legacy variations listed in accepted_input_compatibility."
+                ),
+                "authoritative_validation": "render --dry-run",
+            },
+            "accepted_input_compatibility": {
+                "source_video_optional_fields": [
+                    "file_name",
+                    "coordinate_system",
+                    "frame_index_origin",
+                    "timing_contract",
+                ],
+                "source_video_file_name_nullable": True,
+                "source_video_labels": (
+                    "When supplied, coordinate_system, frame_index_origin, and "
+                    "timing_contract must match their canonical values."
+                ),
+                "observation_source": {
+                    "type": "string",
+                    "min_length": 1,
+                    "accepts_unlisted_values": True,
                 },
             },
             "source_compatibility": {
@@ -674,6 +860,8 @@ def _discovery_contract() -> dict[str, Any]:
         "machine_discovery_argv": [_TOOL_NAME, "describe"],
         "use_when_user_intent_matches": [
             "blur faces in a video",
+            "blur only people shown in reference photos",
+            "keep people shown in reference photos visible and blur everyone else",
             "pixelate or mosaic faces in a video",
             "redact faces for privacy",
             "anonymize faces in local video",
@@ -874,10 +1062,18 @@ def _status_output_contract() -> dict[str, Any]:
             "text_exceptions": ["--help", "--version"],
         },
         "stderr": {
-            "contains": "human logs and optional progress events only",
+            "contains": "Application progress and reference-photo diagnostics are JSONL in jsonl mode, otherwise text; third-party runtime diagnostics may still be plain text.",
             "progress_option": "--progress",
             "progress_choices": ["auto", "text", "jsonl", "none"],
             "jsonl_progress_stream": "stderr",
+            "jsonl_log_record": {
+                "log_schema_version": 1,
+                "event": "log",
+                "level": "logging severity, such as info or warning",
+                "stage": "recognition",
+                "message": "reference-photo selection, skipped-photo reason, or import summary",
+            },
+            "none_semantics": "Suppresses progress events; reference-photo diagnostics still appear as text on stderr.",
             "auto": {
                 "interactive": "text",
                 "non_interactive": "jsonl",
@@ -961,8 +1157,9 @@ def _status_output_contract() -> dict[str, Any]:
                 "process": ["total_seconds"],
             },
             "timing_semantics": (
-                "total_seconds is the complete elapsed time for the selected "
-                "execution command"
+                "total_seconds is the reported pipeline time: analysis for analyze, "
+                "rendering for render, and their sum for process. It is not the "
+                "complete CLI process wall time and excludes CLI startup and orchestration."
             ),
             "runtime_provider_semantics": (
                 "resolved inference provider for analyze/process; null for render, "
@@ -996,6 +1193,10 @@ def _status_output_contract() -> dict[str, Any]:
                 "readiness reports still exit 0 when diagnostics complete; "
                 "inspect the ready field"
             ),
+            "diagnostic_failure": (
+                "Internal diagnostic failures return ok=false, ready=false, "
+                "an error envelope, and exit code 1."
+            ),
         },
     }
 
@@ -1028,14 +1229,15 @@ def _examples(commands: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
                     "/data/output/video_privateframe.mp4",
                 ],
                 "stdout": "one final status JSON object",
-                "stderr": "JSONL progress because --progress jsonl is selected",
+                "stderr": "Application progress and reference-photo diagnostics are JSONL because --progress jsonl is selected; third-party runtime diagnostics may still be plain text.",
             }
         )
         values.append(
             {
                 "name": "fast_analysis_cap",
                 "description": (
-                    "Optional lower-analysis-rate variant for a constrained device."
+                    "Lower the default 30 to 15 for faster processing on a "
+                    "constrained device; wider sampling gaps can miss brief faces."
                 ),
                 "argv": [*process, "--scan.max_analysis_fps", "15"],
             }
@@ -1051,6 +1253,24 @@ def _examples(commands: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
                 ],
             }
         )
+        for mode, name, description in (
+            (
+                "blur_only", "blur_reference_people",
+                "Blur people matched to photos in one folder; unmatched or uncertain people remain visible by default.",
+            ),
+            (
+                "exempt", "keep_reference_people_visible",
+                "Keep people matched to photos in one folder visible; blur unmatched or uncertain people by default.",
+            ),
+        ):
+            values.append({
+                "name": name,
+                "description": description,
+                "argv": [
+                    *process, "--recognition.mode", mode,
+                    "--recognition.reference_dir", "/data/reference_photos",
+                ],
+            })
     if "analyze" in commands:
         values.append(
             {
@@ -1118,7 +1338,7 @@ def build_describe_payload(
 
     global_parameters, commands = _command_specs(parser)
     return {
-        "contract_schema_version": 1,
+        "contract_schema_version": 2,
         "status_schema_version": 1,
         "ok": True,
         "command": "describe",

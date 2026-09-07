@@ -54,7 +54,7 @@ def test_database_migration_is_idempotent_and_data_survives_restart(
         restored_monitor = restarted.get("/v1/monitors/front-gate")
 
     assert status.status_code == 200
-    assert status.json()["database"]["migration_count"] == 7
+    assert status.json()["database"]["migration_count"] == 9
     assert restored_monitor.status_code == 200
     assert restored_monitor.json()["monitor"]["source"]["url"] == (
         "rtsp://camera.test/live"
@@ -102,7 +102,6 @@ def test_sqlite_serializes_concurrent_writers(tmp_path: Path) -> None:
                 "default_threshold": 0.68,
                 "metadata": {},
                 "model_id": "mock",
-                "model_version": "1",
                 "model_digest": "a" * 64,
                 "embedding_dimension": 8,
                 "preprocessing_version": "1",

@@ -7,6 +7,8 @@
 使用；每个HTTP字段和响应的完整说明请查看
 [API使用手册](api.zh-CN.md)。
 
+活体检测的使用方法请查看[活体配置、模型安装和返回值说明](#可选活体检测-addon)；下方各操作章节也说明了活体对该流程的影响。
+
 ## 从这里开始：从零启动到第一次成功搜索
 
 CPU版需要Linux x86_64、Docker Engine和Docker Compose。CUDA版还需要兼容的
@@ -41,11 +43,137 @@ CPU访问`http://服务器地址:18097/`，GPU访问`http://服务器地址:1809
 再用该人员的另一张图片执行Search。没有匹配时返回空列表，这是正常成功结果。
 停止服务使用`docker compose ... down`且不要加`-v`；`-v`会永久删除命名数据卷。
 
+## 可选活体检测 addon
+
+### 启用与模型安装
+
+`server/config/server.toml` 默认关闭活体：`inference.addons` 和 `addons.auto_download` 均为 `[]`。旧配置缺少这些键时也保持关闭。以下是手动启用的配置示例；请先安装模型，再重启：
+
+在 **系统 → 活体检测** 点击 **下载并在重启后启用**。Server 下载发布的模型并校验 SHA-256 后，自动把同一份配置文件的上述两个列表设为 `["liveness"]`，保留其他设置；已校验的缓存直接复用。当前进程保持原状态，必须**手动重启 Server**后才启用。下载或配置保存失败会显示错误并允许重试；下载失败不会启用活体。仅有模型文件不代表已启用。
+
+系统页面区分已校验的安装状态（`installed`）、当前运行状态（`enabled`）、已保存的下次启动配置（`configured_enabled`）和是否需要重启（`restart_required`）。下载或保存不改变当前推理。需要关闭时，在同一文件将 `inference.addons=[]` 和 `addons.auto_download=[]` 保存后手动重启。网页操作不修改注册开关，其默认值仍为 `liveness_on_registration=false`。
+
+```toml
+[inference]
+addons = ["liveness"]
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = ["liveness"]
+```
+
+`inference.addons` 控制运行时启用；`addons.auto_download` 独立控制模型安装时的附带下载。将后者设为 `["liveness"]` 后，安装任意受支持的基础包时都会补齐 addon，基础包已缓存也一样。**启动 Server 时不下载模型。** 安装工具和 Server 读取同一份配置文件。
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l --accept-license
+# 或者只安装 addon：
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
+docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+CUDA 部署改用 `compose.cuda12.yml`。独立 CLI 也支持
+`models --config-file PATH --models-dir ROOT addons install liveness`。
+模型来自[指定的 Release](https://github.com/deepinsight/insightface-model-addons/releases/download/addons/liveness.onnx)，
+下载后校验固定 SHA-256。宿主机路径为 `server/.models/addons/liveness.onnx`，
+容器路径为 `/models/addons/liveness.onnx`；所有 addon 平铺在同一 `addons/` 目录。
+基础模型目录继续只读挂载；addon 子目录和配置目录允许 Web 管理写入。
+
+Docker 镜像只包含代码和依赖，不包含预训练权重。重建镜像不会给用户原有挂载目录补充
+模型。默认关闭活体，旧用户升级无需额外下载。若用户手动启用活体但未安装模型，启动会报 `addon_model_missing`，并显示
+完整路径和安装命令；文件损坏或无法读取则报 `addon_model_invalid`。不会静默关闭
+活体。执行安装工具补齐模型后重新启动；损坏文件需要替换为经过校验的发布文件。
+只升级代码、未启用活体的用户保持原有行为。数据库迁移保留已有样本和历史
+embedding；活体功能不改变识别模型摘要或 `embedding_contract_id`。
+
+### 网页下载所需的挂载与权限
+
+Compose 保持 `/models` 只读，只把宿主机 `server/.models/addons` 单独可写挂载到
+`/models/addons`；整个 `server/config` 目录可写挂载到 `/etc/insightface`，使 Server
+能够原子保存 `server.toml`。Linux 部署在仓库根目录执行以下一次性准备，为 Server
+用户（UID/GID 10001）开放这几个路径的权限：
+
+```bash
+mkdir -p server/.models/addons
+sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
+sudo chmod g+rws server/.models/addons server/config
+sudo chmod g+rw server/config/server.toml
+docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
+```
+
+自定义部署替换为实际挂载路径；CUDA 使用 `compose.cuda12.yml`。旧只读挂载仍可在
+关闭活体时正常运行，网页会说明无法在线修改的原因；也可以继续使用 CLI 安装并手动
+修改配置。文件已存在不会自动启用活体。网页保存成功后，执行
+`docker compose -f server/deploy/compose.cpu.yml restart server` 即可应用。
+修改挂载或代理环境变量则需要重新创建容器。下载需要代理时，在创建容器前设置
+`HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`，Compose 会传给 Server 和模型工具。
+代理应使用容器可访问的局域网地址；容器内的 `127.0.0.1` 不代表 Mac。
+该操作沿用 API Key 认证；关闭认证时，能访问 API 的用户也能准备活体。
+本功能只下载固定发布的活体模型，不接受自定义下载地址，也不提供基础模型包切换。
+
+### 读取活体结果
+
+每张已执行活体的人脸增加 `liveness`，其中只保留三个字段：
+
+| 结果 | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| 活体通过 | `ok` | `true` | `[0, 1]` 分数 |
+| fake | `ok` | `false` | `[0, 1]` 分数 |
+| 输入不合格，例如太靠近图像边缘 | `input_rejected` | `null` | `null` |
+
+`live_score >= liveness_threshold` 判为通过。未启用、注册跳过活体或比对范围未选中的一侧不返回
+`liveness`；这与 `is_live: null` 表示输入被拒绝有明确区别。
+
+- `normal`（默认）：先检测并选择人脸，再做活体，通过后才提取识别特征。选中的人脸
+  不通过时，不会换用背景中另一张通过的人脸。
+- `observe`：记录活体结果，fake 或输入不合格也继续识别；推理故障仍返回错误。
+- `liveness_compare_scope` 支持 `both`（默认）、`source`、`target`，只决定
+  `/v1/compare` 哪一侧做活体。注册使用下述独立开关。请求参数不能覆盖这些启动配置。
+
+### 检测、识别和错误返回
+
+`/v1/detect` 始终不提取 embedding，fake 和输入不合格都以 HTTP 200 返回逐脸结果。
+`normal` 下，embedding、比对和 Collection 搜索在活体不通过时返回 HTTP 422：
+错误码分别为 `liveness_fake` 和 `liveness_input_rejected`，
+`error.details.liveness` 包含上述三个字段；比对还提供 `error.details.side`
+（`source` 或 `target`）。被拦截的操作不返回相似度或匹配结果。
+推理故障返回 HTTP 503 `liveness_unavailable`，不归类为 fake。
+
+### 注册默认跳过活体
+
+注册默认跳过活体。`[inference].liveness_on_registration = false` 时，新建人员和
+追加 FaceSample 均不运行活体模型，新样本不包含 `liveness`。人脸检测、识别特征提取或
+外部特征校验，以及所选 `review_mode` 的审核仍正常执行。此开关只能通过启动配置设置，
+请求参数不能覆盖。
+
+活体 addon 已启用时，设为 `liveness_on_registration = true`，注册才遵循
+`normal`/`observe` 策略。`normal` 下活体拒绝项包含对应 `reason` 和 `liveness`，
+批量注册允许部分成功；新建人员时全部被拒绝，仍返回 `registration_failed`，
+其 `details.rejected_images` 提供逐图结果。`review_mode=off` 和
+`embedding_mode=external_trusted` 不能绕过已开启的注册活体检查。
+`observe` 下注册继续并保存活体结果。历史已保存的结果仍可查询，未做过活体的样本不包含该字段。
+
+Web UI 的新建人员和追加样本拒绝列表优先显示实际 `reason`，活体结果另起一行显示。
+例如，`low_quality` 可以与“活体通过”同时出现；活体通过不代表通过注册质量审核。
+
+### RTSP 和 Web UI
+
+RTSP 在 `normal` 下把未通过的人脸标为外层 `status: liveness_blocked`，不返回身份，
+单独计入 `liveness_blocked_faces`，不计入 `unknown_faces`，不触发人员或陌生人进入事件，
+并重新累计身份确认帧数。活体推理异常会清除过期的识别展示；`observe` 继续匹配。
+Web UI 展示活体结果和明确的拒绝状态；`/v1/models` 与 `/v1/system` 在基础模型之外
+单独列出已启用的 addon。
+
 ## 1. 登录并检查就绪状态
 
 CPU 打开 `http://服务器地址:18097/`，CUDA 12 打开 `http://服务器地址:18098/`。如果启用了认证，点击 **配置 API Key**，粘贴管理员提供的 Key，再选择 **在此标签页使用**。Key 只保留在当前标签页内存中，刷新或关闭页面后即清除。
 
 注册数据前请查看 **仪表盘** 或 **系统**。服务、数据库、模型和 Provider 均应为就绪。CUDA 部署必须显示 `CUDAExecutionProvider`，不会静默回退到 CPU。
+
+仪表盘的模型名称下始终显示 **活体检测已启用**或**活体检测已禁用**。系统页面分别显示模型是否已安装、当前运行状态和待重启状态。
 
 ## 2. 创建 Collection
 
@@ -60,11 +188,11 @@ CPU 打开 `http://服务器地址:18097/`，CUDA 12 打开 `http://服务器地
 - 是否保存缩放为 112×112 的 `bounding-box crop` JPEG；它不是识别模型使用的
   对齐输入，默认关闭。
 
-Collection 会固定绑定模型 ID、版本、digest、特征维度和预处理版本。检测配置在创建时复制系统默认值，之后可以单独修改；修改从下一次请求生效并递增 `detection_revision`，但不会重新处理已有 FaceSample。`largest` 优先面积；`center_largest` 最大化 `人脸面积 - 2.0 × 人脸框中心到图像中心的像素距离平方`，检测置信度不参与该分数。
+Collection 会固定绑定模型 ID、digest、特征维度和预处理版本。检测配置在创建时复制系统默认值，之后可以单独修改；修改从下一次请求生效并递增 `detection_revision`，但不会重新处理已有 FaceSample。`largest` 优先面积；`center_largest` 最大化 `人脸面积 - 2.0 × 人脸框中心到图像中心的像素距离平方`，检测置信度不参与该分数。
 
 ## 3. 注册 Person
 
-打开 **人员**，选择 Collection，再点击 **注册人员**。可填写稳定的 Person ID、姓名、外部 ID 和 JSON metadata，然后拖入一张或多张 JPEG、PNG 或 WebP 图片。
+打开 **人员**，选择 Collection，再点击 **注册人员**。可填写稳定的 Person ID、姓名、外部 ID 和 JSON metadata，然后拖入一张或多张 JPEG、PNG、WebP 或 BMP 图片。
 
 入库审查模式：
 
@@ -78,17 +206,25 @@ Collection 会固定绑定模型 ID、版本、digest、特征维度和预处理
 
 可信系统可以用 `external_trusted` 提交预先抽取并 L2 归一化的 embedding。仍须同时提供图片完成检测和质量审查，但服务不会再次抽取特征；embedding contract 必须与 Collection 完全一致。
 
+新建人员和追加 FaceSample 默认跳过活体（`liveness_on_registration=false`）。管理员开启后，`normal` 拒绝 fake 和输入不合格的图片，`observe` 保留结果并继续注册；入库质量审查仍遵循所选 `review_mode`。拒绝列表分别显示实际 `reason` 和活体结果，活体通过不代表质量审查通过。
+
 ## 4. 检测与比对
 
 在 **检测** 中上传单图，可查看人脸框、五点关键点、检测分数和启发式质量信息。无人脸是成功的空列表。
 
 在 **比对** 中分别上传 source 和 target，并可选择系统或 Collection 检测配置。配置中的策略从两张图各挑选一张可用脸，返回原始 cosine `similarity`、`threshold` 和 `matched`。Similarity 不是概率；任一图片没有可用脸时返回 `422 face_not_found`。
 
+启用活体后，每张执行过活体的人脸会包含 `liveness.status`、`liveness.is_live`、`liveness.live_score`。检测对 fake 和 `input_rejected` 都返回 HTTP 200，且不提取识别特征。`input_rejected` 表示图片不满足评估条件，例如人脸太靠近边缘；应换用人脸周围留有空间的图片。缺少 `liveness` 表示这张脸未执行活体。
+
+活体在识别前执行，`liveness_compare_scope` 决定检查 `both`、`source` 或 `target`。`normal` 下任一被检查侧未通过时，返回 HTTP 422 `liveness_fake` 或 `liveness_input_rejected`，并提供 `error.details.liveness` 和 `error.details.side`，不返回相似度。`observe` 继续比对，并在执行过检查的人脸上返回活体结果。
+
 ## 5. 搜索人员库
 
 打开 **搜索**，选择 Collection，上传查询图片并设置返回数量；也可以临时覆盖阈值。系统按 Collection 检测配置挑选查询脸，按相似度降序返回。Person 得分取其所有 FaceSample 的最高相似度。无匹配是成功的空列表。
 
 新 FaceSample 会先提交到 SQLite，再加入内存索引，然后才返回成功；删除同时更新两处。重启时从 SQLite 重建索引，SQLite 始终是权威数据源。
+
+启用活体且为 `normal` 时，查询图片的 fake 或输入不合格返回 HTTP 422 `liveness_fake` 或 `liveness_input_rejected`，详情为 `error.details.liveness`，不会执行搜索；这与搜索成功但匹配列表为空不同。`observe` 继续搜索，并在查询人脸上返回活体结果。
 
 ## 6. RTSP 摄像头监控
 
@@ -109,6 +245,8 @@ Monitor配置保存在SQLite中，RTSP凭据加密保存在`/data`且API不会�
 保存；进入、离开、错误和恢复事件只保留在有上限的内存环形缓冲区，进程重启后丢失。
 Web UI/API跨越不可信网络时应使用HTTPS，并只允许可信管理员管理Monitor。
 
+启用活体且为 `normal` 时，未通过的人脸显示外层 `status: liveness_blocked` 和独立活体结果，计入 `liveness_blocked_faces`，不计入 `unknown_faces`，也不触发人员或陌生人进入事件。`observe` 继续识别。界面会区分“输入被拒绝”和“活体未通过”。
+
 ## 7. 修改与删除
 
 可在列表中修改 Collection 和 Person。删除 FaceSample 会同时删除 embedding 和可选裁剪图。删除非空 Collection 需要明确确认 `force`。批量或破坏性操作前先备份 `/data`。
@@ -128,7 +266,7 @@ matches = client.search("employees", "query.jpg", limit=5)
 
 ## 9. 数据、备份与安全
 
-- 持久化挂载 `/data`，`/models` 只读挂载。
+- 持久化挂载 `/data`，基础模型只读，网页管理只需要 addon 子目录和配置目录可写。
 - 停止写入后备份 SQLite 和裁剪图目录，或使用 SQLite 安全快照方式。
 - API Key 只以 hash 保存。后续启动同一数据卷时传入不同 `INSIGHTFACE_API_KEY`，会主动轮换当前 Key。
 - 不要记录图片、embedding 或 Key；除非确有需要，不要开启宽泛 CORS。
@@ -160,8 +298,8 @@ docker compose -f server/deploy/compose.cpu.yml \
 （`det_10g_wo.onnx` + `w600k_mbf.onnx`）以及`raccoon_l`
 （`det_10g_wo.onnx` + `w600k_r50.onnx`）。Server只安装各包中的检测和识别
 模型，不安装或加载Raccoon中供PrivateFrame使用的verifier。安装会生成`manifest.json`
-与签名的`MODEL.LICENSE`。不带`--accept-license`时，工具只显示许可并退出，不会
-下载。`models verify`会核验包身份、签名、有效期和当前授权状态；与运行时的缺失
+与签名的`MODEL.LICENSE`。不带`--accept-license`时，交互终端会在下载前询问确认；
+非交互命令必须带该参数，否则会退出且不下载。`models verify`会核验包身份、签名、有效期和当前授权状态；与运行时的缺失
 文件显示回退不同，这个显式核验命令仍要求存在有效的签名许可文件。
 
 InsightFace公开预训练模型默认仅限非商业研究；商业使用需另行获取授权。私有模型也
@@ -170,12 +308,20 @@ InsightFace公开预训练模型默认仅限非商业研究；商业使用需另
 
 ## 12. 仅启动时生效的配置
 
-通用配置文件为`server/config/server.toml`，Compose将其只读挂载到
-`/etc/insightface/server.toml`。修改后必须重启容器，默认值如下：
+通用配置文件为`server/config/server.toml`，Compose将其所在目录可写挂载到
+`/etc/insightface`，容器内文件为 `/etc/insightface/server.toml`。修改后必须重启容器，默认值如下：
 
 ```toml
 [inference]
 max_concurrency = "auto" # CPU为4，CUDA为8
+addons = []
+liveness_mode = "normal"
+liveness_threshold = 0.8
+liveness_compare_scope = "both"
+liveness_on_registration = false
+
+[addons]
+auto_download = []
 
 [detection]
 input_sizes = [[96, 96], [512, 512]]
@@ -189,7 +335,8 @@ disabled = false
 ```
 
 动态SCRFD会分别运行所有分辨率，把候选框映射回原图后合并，并只执行一次全局NMS。
-系统配置只在启动时读取，不提供运行时修改API。新Collection会复制系统检测配置，
+推理设置只在启动时读取。网页活体操作可以保存下次启动的配置，不会热更新当前进程。
+新Collection会复制系统检测配置，
 之后可独立修改并从下一次请求生效。无状态Detect和Embeddings使用系统配置；Compare
 可使用系统配置或指定Collection；注册与Search始终使用Collection配置。
 
@@ -243,7 +390,7 @@ make -C server build-cuda12
 
 随后在Compose的模型安装与`up`命令中加入`--pull never`，即可使用本地镜像。构建
 使用固定基础镜像和锁定依赖，但仍需联网获取这些输入。公开版本Tag为
-`0.2.0-cpu`和`0.2.0-cuda12`；移动Tag `cpu`/`cuda12`分别指向最新稳定版本，
+`0.3.0-cpu`和`0.3.0-cuda12`；移动Tag `cpu`/`cuda12`分别指向最新稳定版本，
 明确不发布含义模糊的`latest`。
 
 升级前停止写入，使用SQLite安全方式备份`/data`以及可选裁剪图，并保留`/models`
@@ -251,6 +398,68 @@ make -C server build-cuda12
 已知Search，再切换正式数据。停止使用`docker compose down`且不要带`-v`；
 `docker compose down -v`会删除命名数据卷。
 
+### 升级到 0.3.0
+
+本版新增 `raccoon_s`、`raccoon_l` 及其模型描述文件支持，集成可选活体检测、
+网页 addon 安装和 BMP 图片输入。Server 使用 Raccoon 的检测与识别模型，
+不加载包内的 verifier。
+
+**1.** 将 Server 代码和 Compose 文件更新到 0.3.0 对应版本，同时保留自己的
+`server/config/server.toml` 设置及部署覆盖配置。保持原有模型路径、`/data`
+数据卷名称、裁剪图存储、端口和 API Key 设置。自定义 Compose 文件需要将
+`server` 和 `models` 两个服务的镜像都更新为对应的 `0.3.0-cpu` 或
+`0.3.0-cuda12`。以下命令应使用你原部署的 Compose 文件、覆盖配置和项目名称。
+
+**2.** 拉取新镜像并重新创建 Server 容器。在仓库根目录选择已有部署对应的命令：
+
+CPU：
+
+```bash
+docker compose -f server/deploy/compose.cpu.yml pull server models
+docker compose -f server/deploy/compose.cpu.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18097/v1/health
+```
+
+CUDA：
+
+```bash
+docker compose -f server/deploy/compose.cuda12.yml pull server models
+docker compose -f server/deploy/compose.cuda12.yml up -d --no-build --force-recreate server
+curl -fsS http://127.0.0.1:18098/v1/health
+```
+
+自行构建时，先构建 0.3.0 镜像，使用
+`up -d --no-build --pull never --force-recreate server`，无需拉取镜像。
+仅执行 `docker compose restart` 不会切换到新镜像，也不会应用挂载变更。
+
+**3.** 启动时自动执行数据库迁移。等待 `/v1/health` 返回 `ready` 和版本 `0.3.0`，
+再在 **系统** 页面确认模型和执行提供程序符合预期。检查原有人员库、人员是否
+保留，并执行一次已知图片的搜索。保持同一模型和特征契约时，已有样本、
+embedding 和人员库契约 ID 均会保留，无需重新注册。
+
+**升级后按需启用活体。** 默认配置以及未包含 addon 配置项的旧配置都保持活体
+关闭，因此普通升级无需下载活体模型，Server 启动时也不会下载。需要启用时，
+按照[活体设置说明](#可选活体检测-addon)准备[网页下载所需的挂载与权限](#网页下载所需的挂载与权限)，
+在 **系统 → 活体检测** 点击 **下载并在重启后启用**，等待模型安装及配置保存
+成功后手动重启 Server。默认模式为 `normal`、阈值为 `0.8`，
+`liveness_on_registration=false`；模型位于 `<models_dir>/addons/liveness.onnx`。
+
+**使用 Raccoon 是独立的模型切换。** 升级 Server 会保留当前模型包。需要使用
+`raccoon_s` 或 `raccoon_l` 时，按照[模型安装说明](#11-模型与模型许可)，
+在独立的模型目录中安装选定的包，再配置相应部署使用该目录。人员库必须匹配
+新模型的特征契约，需要新建匹配的人员库并重新注册，或单独进行数据迁移。
+Web UI 不提供基础模型包切换。
+
+**API 与 SDK 兼容性：**模型、Collection 和 FaceSample 结果不再包含
+`model_version`；模型身份使用 `model_id`，人员库兼容性使用
+`embedding_contract_id`。自有客户端应取消对旧字段的依赖，使用随项目提供的
+Python SDK 时同步升级到 `0.3.0`。执行活体时，`liveness` 只包含 `status`、
+`is_live`、`live_score` 三个字段；未执行时省略该结果。对识别请求启用活体前，
+请了解[活体响应与错误规则](#检测识别和错误返回)。
+
 跨网络使用时，应在可信反向代理终止HTTPS，只开放必要的CORS origin，并在边缘限制
 速率、请求体和超时。数据卷及备份应按生物识别数据保护。第一阶段只有一个不区分权限
 的API Key，不应把它当作多租户授权系统。
+
+
+模型包直接以名字（例如 `buffalo_l`）标识，不再提供独立的 `model_version`。在识别模型和特征契约保持一致的情况下，Server 升级会保留已有人员库的特征契约 ID、样本和 embedding，无需重新注册。切换识别模型属于单独迁移，契约不匹配的人员库在注册和搜索时返回 `collection_model_mismatch`；新建人员库使用不含模型版本号的特征契约。

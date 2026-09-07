@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Create a legacy compact V1 manifest for Buffalo-style Server bundles.
 
-New task-aware packages use manifest V2 and intentionally have no
-``model_version`` field. This helper remains V1-only for existing bundles.
+Model identity is defined by its name; no separate model version is emitted.
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ def main() -> int:
     parser.add_argument("--detector", default="det_10g.onnx")
     parser.add_argument("--recognizer", default="w600k_r50.onnx")
     parser.add_argument("--model-id", default="buffalo_l")
-    parser.add_argument("--model-version", default="v0.7")
     parser.add_argument("--display-name", default="Buffalo_L")
     parser.add_argument("--license", default="MODEL.LICENSE")
     parser.add_argument("--output", default="manifest.json")
@@ -35,7 +33,6 @@ def main() -> int:
     manifest = {
         "manifest_version": 1,
         "model_id": args.model_id,
-        "model_version": args.model_version,
         "display_name": args.display_name,
         "files": {
             "detector": detector.name,

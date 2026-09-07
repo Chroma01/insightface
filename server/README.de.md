@@ -8,7 +8,7 @@
 REST API, SQLite und lokaler CPU- oder NVIDIA-GPU-Inferenz in einem Container.**
 
 ```text
-Bild hochladen -> erkennen, vergleichen, registrieren oder suchen
+Bild hochladen -> erkennen, Lebenderkennung durchführen, vergleichen, registrieren oder suchen
 ```
 
 > **Modelllizenz:** Öffentliche vortrainierte InsightFace-Modelle sind in der
@@ -22,16 +22,24 @@ Infrastruktur. Bilder, Embeddings, Modelle und Indizes können im eigenen Netz
 bleiben. Er ist **kein** AWS-kompatibler Ersatz und implementiert weder SigV4,
 IAM, Region noch AWS-Ressourcensemantik.
 
-Aktuelle Version: **0.2.0**, Linux x86_64.
+Aktuelle Version: **0.3.0**, Linux x86_64.
 
 | Laufzeit | Image |
 | --- | --- |
-| CPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cpu` |
-| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cuda12` |
+| CPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cpu` |
+| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cuda12` |
 
 Die beweglichen Tags `cpu` und `cuda12` bezeichnen die neueste stabile Version
 der jeweiligen Laufzeitfamilie. Ein mehrdeutiges `latest` gibt es nicht. Siehe
 [Maintainer Guide — English](docs/maintainer-guide.md) für die Release-Regeln.
+
+**Neuerungen und Upgrade auf 0.3.0:** Diese Version ergänzt `raccoon_s` und
+`raccoon_l` samt Unterstützung ihrer Modell-Manifeste, optionale Lebenderkennung
+mit Modellinstallation über die Web UI sowie BMP-Eingaben. Bestehende
+Installationen können ihre Modell-, Konfigurations- und Daten-Mounts behalten;
+die Lebenderkennung bleibt bis zur Aktivierung ausgeschaltet. API- und
+SDK-Ergebnisse enthalten kein `model_version` mehr. Siehe
+[Upgrade-Anleitung](docs/user-guide.de.md#upgrade-auf-030).
 
 ![InsightFace Server Dashboard auf Englisch](docs/images/customer/dashboard-en.jpg)
 
@@ -48,16 +56,18 @@ der jeweiligen Laufzeitfamilie. Ein mehrdeutiges `latest` gibt es nicht. Siehe
 - Exakte GPU-Suche mit FP32-, FP16-, BF16- und INT8-Vektorspeicherung.
 - Mehrsprachige Web UI für Dashboard, Collections, Personen, Detect, Compare,
   Search, RTSP-Monitoring, Systemdiagnose und Hilfe.
-- 29 snake_case-REST-Operationen unter `/v1`, einschließlich geschütztem
+- 31 snake_case-REST-Operationen unter `/v1`, einschließlich geschütztem
   `/v1/embeddings`, plus schlankem typisierten Python SDK.
 - Serverseitige RTSP Monitors mit begrenzten In-Memory-Ereignissen, mehreren
   Clients und optionalem `preview.mjpeg`; das Schließen des Browsers beendet
   die Überwachung nicht.
 - SQLite als dauerhafte Quelle, rekonstruierbare exakte In-Memory-Indizes,
-  schreibgeschütztes `/models`, persistentes `/data`, Migrationen,
+  schreibgeschützte Basismodelle, beschreibbare Addon-/Konfigurationsverzeichnisse, persistentes `/data`, Migrationen,
   Healthchecks und strikte CUDA-Prüfung ohne stillen CPU-Fallback.
-- JPEG-, PNG- und WebP-Eingaben; Originaluploads werden standardmäßig nicht
+- JPEG-, PNG-, WebP- und BMP-Eingaben; Originaluploads werden standardmäßig nicht
   gespeichert.
+
+Liveness ist standardmäßig deaktiviert: `inference.addons = []` und `addons.auto_download = []` in `server/config/server.toml`. **System → Lebenderkennung** lädt das Modell herunter, prüft es und speichert die Aktivierung für den nächsten manuellen Neustart. Ein geprüfter Cache wird wiederverwendet. Beim Start wird nichts heruntergeladen; fehlt ein aktiviertes Modell, stoppt der Start mit Installationshinweis. Ausgewertete Gesichter liefern nur `status`, `is_live` und `live_score`. Der Standardmodus ist `normal`; bei der Registrierung wird Liveness standardmäßig übersprungen (`liveness_on_registration = false`). Siehe [Konfiguration, Web-Berechtigungen und Upgrade](docs/user-guide.de.md#optionales-liveness-addon).
 
 ### GPU-Suchleistung auf der RTX 5090
 
@@ -264,7 +274,7 @@ Rechtskonformitätsmodul. Betrieb und Sicherheit stehen im
 
 Nicht enthalten sind AWS-/CompreFace-Kompatibilität, CUDA 11, Jetson, ARM64,
 Windows Container, TensorRT, Kubernetes, verteilte Worker, persistente
-Monitor-Ereignisse oder Aufnahme/NVR sowie Liveness-, Deepfake- oder
+Monitor-Ereignisse oder Aufnahme/NVR sowie Deepfake- oder
 demografische Analysen.
 
 ## Dokumentation

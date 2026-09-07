@@ -7,8 +7,8 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import time
-import unicodedata
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ import numpy as np
 from .artifacts import sha256_file
 from .geometry import clip
 from .packet_cache import iter_oriented_frames
-from .recognition import apply_identity_policy
+from .recognition import apply_identity_policy, _reference_file_name
 from .video import paths_are_distinct, probe_video, temporary_video_path
 
 
@@ -52,6 +52,16 @@ def _release_native_writer_cycles(
         return
     writers.clear()
     gc.collect()
+
+
+def _abort_writers(writers: list[_VideoWriter], *, pyav: bool) -> None:
+    """Clean every writer without replacing the error that caused the abort."""
+
+    for index in range(len(writers)):
+        with suppress(BaseException):
+            writers[index].abort()
+    with suppress(BaseException):
+        _release_native_writer_cycles(writers, pyav=pyav)
 
 
 def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
@@ -285,65 +295,44 @@ def _identity_should_blur(
     policy: dict[str, Any],
     recognition: dict[str, Any] | None,
 ) -> tuple[bool, str]:
-    """Apply a render-only identity policy with privacy-safe fallbacks."""
+    """Apply reference membership and the selected unconfirmed-face action."""
 
     mode = str(policy.get("mode", "all"))
-    if mode not in {"all", "blur_only", "exempt"}:
-        return True, "fail_safe_invalid_recognition_policy"
-    if (
-        mode != "all"
-        and (
-            item.get("force_blur") is True
-            # Backward compatibility for result documents produced before the
-            # public force_blur rendering semantic was introduced.
-            or item.get("endpoint_repair_reason")
-            == "interpolate_unanchored_endpoint"
-        )
-    ):
-        # Sparse endpoint review proves that a geometrically propagated crop
-        # still contains a face, but it does not provide per-frame identity
-        # continuity. Never extend a selective exemption from geometry alone.
-        return True, "fail_safe_reduced_assurance_interpolate_endpoint"
-    if mode != "all" and (
-        not isinstance(recognition, dict)
-        or recognition.get("enabled") is not True
-    ):
-        # ``render_streaming_artifacts`` rejects this mismatch. The lower-level
-        # renderer remains privacy safe when called directly with an incomplete
-        # result rather than trusting any stray track mappings.
-        return True, "fail_safe_missing_recognition_artifact"
-    tracks = recognition.get("tracks", {}) if isinstance(recognition, dict) else {}
+    action = policy.get("unknown_action", "auto")
+    if mode == "all":
+        decision = apply_identity_policy(mode, None, action)
+        return decision.should_blur, decision.reason
+    if not isinstance(recognition, dict) or recognition.get("enabled") is not True:
+        raise ValueError("selective rendering requires recognition results")
+    references = recognition.get("references")
+    files = references.get("files") if isinstance(references, dict) else None
+    if not isinstance(files, list) or not files:
+        raise ValueError("selective rendering requires usable reference photos")
+    known_files = set()
+    for value in files:
+        if not isinstance(value, dict) or not isinstance(value.get("file"), str) or not value["file"]:
+            raise ValueError("invalid reference photo record in analysis result")
+        known_files.add(_reference_file_name(value["file"]))
+    tracks = recognition.get("tracks")
     record = tracks.get(str(item.get("track_id"))) if isinstance(tracks, dict) else None
-    if mode != "all":
-        gallery_people = recognition.get("gallery_persons")
-        if gallery_people is None and isinstance(recognition.get("gallery"), dict):
-            gallery_people = recognition["gallery"].get("persons")
-        if not isinstance(gallery_people, list):
-            return True, "fail_safe_missing_gallery_identity"
-        known_people = {
-            unicodedata.normalize("NFC", value.strip())
-            for value in gallery_people
-            if isinstance(value, str) and value.strip()
-        }
-        if isinstance(record, dict) and record.get("status") == "CONFIRMED":
-            person_id = record.get("person_id")
-            if not isinstance(person_id, str) or unicodedata.normalize("NFC", person_id) not in known_people:
-                return True, "fail_safe_unknown_gallery_identity"
-        raw_targets = policy.get("target_persons")
-        if not isinstance(raw_targets, list) or not raw_targets:
-            return True, "fail_safe_invalid_target_persons"
-        targets: list[str] = []
-        for value in raw_targets:
-            if not isinstance(value, str) or not value.strip():
-                return True, "fail_safe_invalid_target_persons"
-            targets.append(unicodedata.normalize("NFC", value.strip()))
-        if len(set(targets)) != len(targets) or not set(targets) <= known_people:
-            return True, "fail_safe_invalid_target_persons"
-    decision = apply_identity_policy(
-        mode,
-        record,
-        targets if mode != "all" else (),
-    )
+    if not isinstance(record, dict):
+        raise ValueError("missing reference-match decision for rendered track")
+    # Validate the stored match before considering any per-observation override.
+    decision = apply_identity_policy(mode, record, action)
+    matched_files = {_reference_file_name(name) for name in record.get("matched_reference_files", [])}
+    if not matched_files <= known_files:
+        raise ValueError("track match names a photo absent from the analyzed reference set")
+    if item.get("identity_unconfirmed") is True or (
+        item.get("endpoint_repair_reason") == "interpolate_unanchored_endpoint"
+    ):
+        # Endpoint geometry alone does not establish identity continuity. Both
+        # public JSON and in-memory artifacts use the same unknown-face policy.
+        decision = apply_identity_policy(
+            mode,
+            {"status": "UNKNOWN", "matched_reference_files": [],
+             "reason": "unconfirmed_interpolate_endpoint"},
+            action,
+        )
     return bool(decision.should_blur), str(decision.reason)
 
 
@@ -426,22 +415,22 @@ def _copy_audio(
 ) -> bool:
     """Remux source audio with the encoded video; return false if absent."""
 
-    video_input = av.open(str(silent_video))
-    audio_input = av.open(str(source))
-    audio_stream = next(iter(audio_input.streams.audio), None)
-    if audio_stream is None:
-        video_input.close()
-        audio_input.close()
-        return False
-    if requested_mode == "aac" and audio_stream.codec_context.name != "aac":
-        video_input.close()
-        audio_input.close()
-        raise RuntimeError(
-            "PyAV audio mode aac currently requires AAC source audio; "
-            "choose copy/none or use the ffmpeg backend for transcoding"
-        )
-    output = av.open(str(destination), "w", options={"movflags": "+faststart"})
+    containers = []
     try:
+        video_input = av.open(str(silent_video))
+        containers.append(video_input)
+        audio_input = av.open(str(source))
+        containers.append(audio_input)
+        audio_stream = next(iter(audio_input.streams.audio), None)
+        if audio_stream is None:
+            return False
+        if requested_mode == "aac" and audio_stream.codec_context.name != "aac":
+            raise RuntimeError(
+                "PyAV audio mode aac currently requires AAC source audio; "
+                "choose copy/none or use the ffmpeg backend for transcoding"
+            )
+        output = av.open(str(destination), "w", options={"movflags": "+faststart"})
+        containers.append(output)
         output_video = _stream_from_template(output, video_input.streams.video[0])
         output_audio = _stream_from_template(output, audio_stream)
         for packet in video_input.demux(video_input.streams.video[0]):
@@ -462,9 +451,16 @@ def _copy_audio(
             packet.stream = output_audio
             output.mux(packet)
     finally:
-        output.close()
-        video_input.close()
-        audio_input.close()
+        propagating_error = sys.exc_info()[0] is not None
+        close_error = None
+        for container in reversed(containers):
+            try:
+                container.close()
+            except BaseException as error:
+                if close_error is None:
+                    close_error = error
+        if close_error is not None and not propagating_error:
+            raise close_error
     return True
 
 
@@ -489,23 +485,30 @@ class _PyAVWriter:
         self.fps = fps
         self.frames = 0
         self.audio_mode = audio_mode
-        self.container = av.open(
-            str(self.temporary),
-            "w",
-            options={"movflags": "+faststart"} if bool(settings.get("faststart", True)) else None,
-        )
-        rate = Fraction(str(fps)).limit_denominator(1_000_000)
-        self.stream = self.container.add_stream(str(settings["encoder"]), rate=rate)
-        self.stream.width = width
-        self.stream.height = height
-        self.stream.pix_fmt = str(settings["pixel_format"])
-        self.stream.options = _pyav_video_options(settings)
-        rate_control = settings["rate_control"]
-        if str(rate_control["mode"]) in {"vbr", "cbr"}:
-            self.stream.bit_rate = _bitrate(rate_control["bitrate"])
-        if int(settings.get("keyframe_interval", 0)) > 0:
-            self.stream.codec_context.gop_size = int(settings["keyframe_interval"])
-        self.closed = False
+        self.closed = True
+        try:
+            self.container = av.open(
+                str(self.temporary),
+                "w",
+                options={"movflags": "+faststart"} if bool(settings.get("faststart", True)) else None,
+            )
+            self.closed = False
+            rate = Fraction(str(fps)).limit_denominator(1_000_000)
+            self.stream = self.container.add_stream(str(settings["encoder"]), rate=rate)
+            self.stream.width = width
+            self.stream.height = height
+            self.stream.pix_fmt = str(settings["pixel_format"])
+            self.stream.options = _pyav_video_options(settings)
+            rate_control = settings["rate_control"]
+            if str(rate_control["mode"]) in {"vbr", "cbr"}:
+                self.stream.bit_rate = _bitrate(rate_control["bitrate"])
+            if int(settings.get("keyframe_interval", 0)) > 0:
+                self.stream.codec_context.gop_size = int(settings["keyframe_interval"])
+        except BaseException:
+            # The caller cannot register this writer until construction succeeds.
+            with suppress(BaseException):
+                self.abort()
+            raise
 
     def write(self, frame: np.ndarray) -> None:
         if frame.shape != (self.height, self.width, 3):
@@ -540,7 +543,7 @@ class _PyAVWriter:
 
     def abort(self) -> None:
         if not self.closed:
-            with suppress(Exception):
+            with suppress(BaseException):
                 self.container.close()
             self.closed = True
         for path in (self.temporary, self.muxed):
@@ -637,11 +640,17 @@ class _FFmpegWriter:
         os.replace(self.temporary, self.destination)
 
     def abort(self) -> None:
-        if self.process.poll() is None:
-            self.process.kill()
-            self.process.wait()
-        if self.temporary.exists():
-            self.temporary.unlink()
+        try:
+            if self.process.poll() is None:
+                self.process.kill()
+                self.process.wait()
+        finally:
+            for stream in (self.process.stdin, self.process.stderr):
+                if stream is not None:
+                    with suppress(BaseException):
+                        stream.close()
+            if self.temporary.exists():
+                self.temporary.unlink()
 
 
 def render_artifacts(
@@ -693,7 +702,7 @@ def render_artifacts(
     _raise_if_cancelled(is_cancelled)
     observations = analysis_result["observations"]
     recognition = analysis_result.get("recognition")
-    recognition_policy = settings.get("recognition_policy", {"mode": "all", "target_persons": []})
+    recognition_policy = settings.get("recognition_policy", {"mode": "all", "unknown_action": "blur"})
     by_frame: dict[int, list[tuple[dict[str, Any], bool, str]]] = {}
     blurred_observations = 0
     kept_observations = 0
@@ -703,7 +712,7 @@ def render_artifacts(
         by_frame.setdefault(int(item["frame_idx"]), []).append((item, should_blur, reason))
         if should_blur:
             blurred_observations += 1
-            if reason.startswith("fail_safe_"):
+            if reason in {"unknown_blur", "conflict_blur"}:
                 fail_safe_observations += 1
         else:
             kept_observations += 1
@@ -731,12 +740,8 @@ def render_artifacts(
                     str(audio.get(target.mode, "none")),
                 )
             )
-    except Exception:
-        try:
-            for index in range(len(writers)):
-                writers[index].abort()
-        finally:
-            _release_native_writer_cycles(writers, pyav=pyav_writer)
+    except BaseException:
+        _abort_writers(writers, pyav=pyav_writer)
         raise
     count = 0
     try:
@@ -762,12 +767,8 @@ def render_artifacts(
             writers[index].finish()
         for index in range(len(writers)):
             writers[index].commit()
-    except Exception:
-        try:
-            for index in range(len(writers)):
-                writers[index].abort()
-        finally:
-            _release_native_writer_cycles(writers, pyav=pyav_writer)
+    except BaseException:
+        _abort_writers(writers, pyav=pyav_writer)
         raise
 
     outputs = []

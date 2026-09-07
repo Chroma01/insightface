@@ -77,9 +77,7 @@ def test_catalog_contains_all_supported_packages_with_signed_licenses() -> None:
         assert package.url == f"{MODEL_ZOO_RELEASE_BASE_URL}{name}.zip"
         assert package.archive_sha256 == archive_sha256
         assert tuple(item.filename for item in package.files) == filenames
-        assert _manifest(package, Path("."))["model_version"] == (
-            name if name.startswith("raccoon_") else "v0.7"
-        )
+        assert "model_version" not in _manifest(package, Path("."))
         assert tuple(item.task for item in package.files) == (
             "face_detection",
             "face_recognition",
@@ -108,7 +106,6 @@ def _package(tmp_path: Path) -> tuple[ModelPackage, Path]:
         archive.writestr("MODEL.LICENSE", "untrusted archive license")
     package = ModelPackage(
         name="buffalo_l",
-        release="v1",
         display_name="Synthetic Buffalo_L",
         url="https://example.invalid/test.zip",
         archive_sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
@@ -117,7 +114,6 @@ def _package(tmp_path: Path) -> tuple[ModelPackage, Path]:
                 filename="det.onnx",
                 sha256=_sha256(detector),
                 model_id="test-detector",
-                model_version="1",
                 task="face_detection",
                 input_size=(640, 640),
                 preprocessing_version="test-detector-1",
@@ -128,7 +124,6 @@ def _package(tmp_path: Path) -> tuple[ModelPackage, Path]:
                 filename="rec.onnx",
                 sha256=_sha256(recognizer),
                 model_id="test-recognizer",
-                model_version="1",
                 task="face_recognition",
                 input_size=(112, 112),
                 preprocessing_version="test-recognizer-1",
@@ -172,11 +167,11 @@ def test_install_is_verified_atomic_and_idempotent(tmp_path: Path) -> None:
     license_path.unlink()
     bundle_dir = relative_license.parent
     legacy_manifest = {
-        "package": {"name": package.name, "release": package.release},
+        "package": {"name": package.name, "release": "legacy-release"},
         "models": [
             {
                 "model_id": item.model_id,
-                "model_version": item.model_version,
+                "model_version": "legacy-version",
                 "task": item.task,
                 "file": (bundle_dir / item.filename).as_posix(),
                 "input_size": list(item.input_size),
@@ -225,7 +220,6 @@ def test_extract_rejects_model_digest_mismatch(tmp_path: Path) -> None:
         filename=package.files[0].filename,
         sha256="0" * 64,
         model_id=package.files[0].model_id,
-        model_version="1",
         task="face_detection",
         input_size=(640, 640),
         preprocessing_version="test",
@@ -234,7 +228,6 @@ def test_extract_rejects_model_digest_mismatch(tmp_path: Path) -> None:
     )
     bad_package = ModelPackage(
         name="bad",
-        release="v1",
         display_name="Bad",
         url=package.url,
         archive_sha256=package.archive_sha256,

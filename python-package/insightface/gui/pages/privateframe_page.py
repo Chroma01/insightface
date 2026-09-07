@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import math
+import logging
+import threading
+from contextlib import contextmanager
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 import av
 import numpy as np
-from PySide6.QtCore import QStandardPaths, Qt, QUrl
+from PySide6.QtCore import QStandardPaths, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QTextCursor
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
+    QGroupBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -25,18 +30,19 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
+    QScrollArea,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from ...app.privateframe.base_config import DEFAULT_CONFIG_PATH
+from ...app.privateframe.base_config import DEFAULT_CONFIG_PATH, read_default_config
 from ...app.privateframe.output_paths import default_output_paths
+from ...app.privateframe.recognition import scan_gallery, resolve_unknown_action
 from ...app.privateframe.pipeline import (
     analyze_streaming_pipeline,
     run_streaming_pipeline,
@@ -61,18 +67,13 @@ from .base import BasePage
 
 
 _MODEL_PACKAGES = PRIVATEFRAME_MODEL_PACKAGES
-_MAX_ANALYSIS_FPS_OPTIONS = {15.0, 30.0}
 _REDACTION_METHODS = {"gaussian", "mosaic"}
 _OUTPUT_MODES = {"json_and_video", "json_only"}
 _BETWEEN_SCAN_MODES = {"auto", "interpolate", "visual"}
-_BOX_SCALES = {1.0, 1.15, 1.30}
-_VIDEO_PRESETS = {"veryfast", "medium", "slow"}
-_VIDEO_CRF_VALUES = {18, 23, 28}
 _RECOGNITION_MODES = {"all", "exempt", "blur_only"}
 _RECOGNITION_PROFILES = {"fast", "balanced", "accurate"}
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm"}
-_VIDEO_PREVIEW_SIZE = 216
-_TWO_COLUMN_OPTIONS_MIN_WIDTH = 760
+_VIDEO_PREVIEW_SIZE = 120
 _UNAVAILABLE_CONTENT_OPACITY = 0.46
 _PROVIDER_NAMES = {
     "auto": "auto",
@@ -237,23 +238,39 @@ def build_privateframe_job(
     input_path: str | Path,
     output_dir: str | Path,
     model_package: str,
-    max_analysis_fps: int | float,
-    redaction_method: str,
+    max_analysis_fps: int | float | None = None,
+    redaction_method: str | None = None,
     runtime_provider: str,
-    model_root: str | Path = "~/.insightface",
-    preserve_aac_audio: bool = True,
+    model_root: str | Path | None = None,
+    preserve_aac_audio: bool | None = None,
     output_mode: str = "json_and_video",
-    between_scan_frames: str = "auto",
-    box_scale: float = 1.0,
-    video_preset: str = "medium",
-    video_crf: int = 18,
-    recognition_mode: str = "all",
-    recognition_gallery_dir: str | Path | None = None,
-    recognition_target_persons: Sequence[str] = (),
-    recognition_profile: str = "balanced",
+    between_scan_frames: str | None = None,
+    box_scale: float | None = None,
+    video_preset: str | None = None,
+    video_crf: int | None = None,
+    recognition_mode: str | None = None,
+    recognition_reference_dir: str | Path | None = None,
+    recognition_profile: str | None = None,
+    recognition_similarity_threshold: float | None = None,
+    base_defaults: dict[str, Any] | None = None,
 ) -> PrivateFrameJob:
     """Validate GUI selections and materialize deterministic output paths."""
 
+    defaults = read_default_config(DEFAULT_CONFIG_PATH) if base_defaults is None else base_defaults
+    scan_defaults = defaults["scan"]
+    redaction_defaults = defaults["render"]["redaction"]
+    video_defaults = defaults["render"]["video_output"]
+    recognition_defaults = defaults["recognition"]
+    max_analysis_fps = scan_defaults["max_analysis_fps"] if max_analysis_fps is None else max_analysis_fps
+    redaction_method = redaction_defaults["method"] if redaction_method is None else redaction_method
+    model_root = defaults["models"]["root"] if model_root is None else model_root
+    between_scan_frames = defaults["tracking"]["between_scan_frames"] if between_scan_frames is None else between_scan_frames
+    box_scale = redaction_defaults["box_scale"] if box_scale is None else box_scale
+    video_preset = video_defaults["preset"] if video_preset is None else video_preset
+    recognition_mode = recognition_defaults["mode"] if recognition_mode is None else recognition_mode
+    recognition_profile = recognition_defaults["profile"] if recognition_profile is None else recognition_profile
+    recognition_similarity_threshold = recognition_defaults["similarity_threshold"] if recognition_similarity_threshold is None else recognition_similarity_threshold
+    audio_mode = video_defaults["audio"]["redacted"] if preserve_aac_audio is None else "aac" if preserve_aac_audio else "none"
     source = Path(input_path).expanduser().resolve()
     destination = Path(output_dir).expanduser().resolve()
     if model_package not in _MODEL_PACKAGES:
@@ -262,10 +279,10 @@ def build_privateframe_job(
         isinstance(max_analysis_fps, bool)
         or not isinstance(max_analysis_fps, (int, float))
         or not math.isfinite(float(max_analysis_fps))
-        or float(max_analysis_fps) not in _MAX_ANALYSIS_FPS_OPTIONS
+        or float(max_analysis_fps) <= 0
     ):
         raise ValueError(f"Unsupported maximum analysis FPS: {max_analysis_fps}")
-    normalized_max_analysis_fps = int(max_analysis_fps)
+    normalized_max_analysis_fps = float(max_analysis_fps)
     if redaction_method not in _REDACTION_METHODS:
         raise ValueError(f"Unsupported redaction method: {redaction_method}")
     if output_mode not in _OUTPUT_MODES:
@@ -278,16 +295,24 @@ def build_privateframe_job(
         normalized_box_scale = float(box_scale)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Unsupported redaction box scale: {box_scale}") from exc
-    if normalized_box_scale not in _BOX_SCALES:
+    if isinstance(box_scale, bool) or not math.isfinite(normalized_box_scale) or not 0.1 <= normalized_box_scale <= 4.0:
         raise ValueError(f"Unsupported redaction box scale: {box_scale}")
-    if video_preset not in _VIDEO_PRESETS:
+    if video_preset is not None and not isinstance(video_preset, str):
         raise ValueError(f"Unsupported video preset: {video_preset}")
-    if type(video_crf) is not int or video_crf not in _VIDEO_CRF_VALUES:
+    if video_crf is not None and (type(video_crf) is not int or not 0 <= video_crf <= 51):
         raise ValueError(f"Unsupported video CRF quality: {video_crf}")
     if recognition_mode not in _RECOGNITION_MODES:
         raise ValueError(f"Unsupported recognition policy: {recognition_mode}")
     if recognition_profile not in _RECOGNITION_PROFILES:
         raise ValueError(f"Unsupported recognition profile: {recognition_profile}")
+
+    if (
+        isinstance(recognition_similarity_threshold, bool)
+        or not isinstance(recognition_similarity_threshold, (int, float))
+        or not math.isfinite(float(recognition_similarity_threshold))
+        or not 0.0 <= float(recognition_similarity_threshold) <= 1.0
+    ):
+        raise ValueError("Match threshold must be between 0 and 1.")
 
     provider = _PROVIDER_NAMES.get(
         runtime_provider, _PROVIDER_NAMES.get(runtime_provider.lower())
@@ -307,57 +332,32 @@ def build_privateframe_job(
         "render.redaction.method": redaction_method,
         "render.redaction.box_scale": normalized_box_scale,
         "render.video_output.preset": video_preset,
-        "render.video_output.rate_control.mode": "crf",
-        "render.video_output.rate_control.quality": video_crf,
-        "render.video_output.audio.redacted": (
-            "aac" if render_video and preserve_aac_audio else "none"
-        ),
+        "render.video_output.audio.redacted": audio_mode,
         "recognition.mode": recognition_mode,
+        "recognition.unknown_action": recognition_defaults["unknown_action"],
     }
+    overrides["render.video_output.rate_control"] = (
+        dict(video_defaults["rate_control"]) if video_crf is None
+        else {"mode": "crf", "quality": video_crf}
+    )
     if between_scan_frames != "auto":
         overrides["tracking.between_scan_frames"] = between_scan_frames
 
-    # ``all`` is deliberately a complete early exit: stale GUI gallery text is
-    # not resolved, inspected, or sent to the PrivateFrame configuration.
+    # All mode never resolves or reads any reference photo argument.
     if recognition_mode != "all":
-        gallery_text = str(recognition_gallery_dir or "").strip()
-        if not gallery_text:
-            raise ValueError(
-                "Select a recognition gallery directory for the selected privacy policy."
-            )
-        unresolved_gallery = Path(gallery_text).expanduser()
-        if unresolved_gallery.is_symlink():
-            raise ValueError("The recognition gallery directory must not be a symlink.")
-        gallery = unresolved_gallery.resolve()
-        if not gallery.is_dir():
-            raise ValueError("The recognition gallery directory does not exist.")
-        if isinstance(recognition_target_persons, (str, bytes)):
-            raise ValueError("Select at least one target person from the gallery.")
-        targets = [str(person).strip() for person in recognition_target_persons]
-        if not targets or any(not person for person in targets):
-            raise ValueError("Select at least one target person from the gallery.")
-        if len(set(targets)) != len(targets):
-            raise ValueError("Target persons must not contain duplicates.")
-        gallery_people = {
-            child.name
-            for child in gallery.iterdir()
-            if child.is_dir()
-            and not child.is_symlink()
-            and not child.name.startswith(".")
-        }
-        missing = sorted(set(targets) - gallery_people)
-        if missing:
-            raise ValueError(
-                "Selected target persons are absent from the gallery: "
-                + ", ".join(missing)
-            )
-        overrides.update(
-            {
-                "recognition.gallery_dir": str(gallery),
-                "recognition.target_persons": targets,
-                "recognition.profile": recognition_profile,
-            }
-        )
+        if recognition_reference_dir is None:
+            reference = recognition_defaults["reference_dir"]
+            if reference is not None:
+                reference_path = Path(str(reference)).expanduser()
+                if not reference_path.is_absolute():
+                    reference_path = DEFAULT_CONFIG_PATH.parent / reference_path
+                recognition_reference_dir = reference_path
+        reference_dir, _images = _scan_reference_folder(recognition_reference_dir)
+        overrides.update({
+            "recognition.reference_dir": str(reference_dir),
+            "recognition.profile": recognition_profile,
+            "recognition.similarity_threshold": float(recognition_similarity_threshold),
+        })
     return PrivateFrameJob(
         input_path=source,
         output_dir=destination,
@@ -373,7 +373,131 @@ def build_privateframe_job(
     )
 
 
+def _scan_reference_folder(value: str | Path | None):
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Select a reference photo folder.")
+    unresolved = Path(text).expanduser()
+    if unresolved.is_symlink():
+        raise ValueError("The reference photo folder must not be a symlink.")
+    root = unresolved.resolve()
+    if not root.is_dir():
+        raise ValueError("The reference photo folder does not exist.")
+    scanned = scan_gallery(root)
+    if not scanned.images:
+        raise ValueError("No supported reference photos were found in this folder.")
+    return root, scanned.images
+
+
+_REFERENCE_REJECTION_LABELS = {
+    "duplicate_content": "Duplicate photo",
+    "unreadable_image": "Image could not be read",
+    "no_face": "No face detected",
+    "invalid_face_box": "Invalid face box",
+    "missing_landmarks": "Facial landmarks unavailable",
+    "invalid_landmarks": "Invalid facial landmarks",
+    "invalid_confidence": "Invalid face detection confidence",
+    "invalid_geometry": "Face could not be aligned",
+    "low_quality": "Largest face is not clear enough for matching",
+}
+_REFERENCE_LOG_LOCK = threading.RLock()
+_REFERENCE_LOG_USERS = 0
+_REFERENCE_LOG_ORIGINAL_LEVEL = logging.NOTSET
+
+
+class _ReferenceLogHandler(logging.Handler):
+    """Forward only reference import records emitted by this worker thread."""
+
+    def __init__(self, callback: Callable[[dict[str, Any]], None]):
+        super().__init__(logging.INFO)
+        self.thread_id = threading.get_ident()
+        self.callback = callback
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread != self.thread_id:
+            return
+        args = record.args
+        if not isinstance(args, tuple):
+            return
+        if record.msg == "Reference photo %s was not used: %s":
+            self.callback({"kind": "skip", "file": args[0], "reason": args[1]})
+        elif str(record.msg).startswith("Reference photo %s: detected %d faces;"):
+            self.callback({"kind": "largest", "file": args[0], "count": args[1]})
+        elif record.msg == "Reference photos: read %d, used %d, skipped %d":
+            self.callback({"kind": "summary", "total": args[0], "used": args[1], "skipped": args[2]})
+
+
+@contextmanager
+def _forward_reference_logs(callback):
+    global _REFERENCE_LOG_USERS, _REFERENCE_LOG_ORIGINAL_LEVEL
+    logger = logging.getLogger("insightface.app.privateframe.recognition")
+    handler = _ReferenceLogHandler(callback)
+    with _REFERENCE_LOG_LOCK:
+        if not _REFERENCE_LOG_USERS:
+            _REFERENCE_LOG_ORIGINAL_LEVEL = logger.level
+            logger.setLevel(min(logger.getEffectiveLevel(), logging.INFO))
+        _REFERENCE_LOG_USERS += 1
+        logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        with _REFERENCE_LOG_LOCK:
+            logger.removeHandler(handler)
+            handler.close()
+            _REFERENCE_LOG_USERS -= 1
+            if not _REFERENCE_LOG_USERS:
+                logger.setLevel(_REFERENCE_LOG_ORIGINAL_LEVEL)
+
+
+def _reference_log_text(event: dict[str, Any], language: str | None) -> str:
+    kind = event.get("kind")
+    if kind == "summary":
+        return tr("Reference photos: {used} used, {skipped} skipped ({total} total).", language).format(**event)
+    if kind == "largest":
+        return tr("{file}: detected {count} faces; using only the largest face.", language).format(**event)
+    reason = tr(_REFERENCE_REJECTION_LABELS.get(str(event.get("reason")), str(event.get("reason", ""))), language)
+    return tr("{file}: photo was not used ({reason}).", language).format(file=event.get("file", ""), reason=reason)
+
+
+def _privateframe_error_parts(message: str) -> tuple[str, dict[str, str]]:
+    prefix = "Reference photo "
+    for suffix, source in (
+        (": face detector inference failed", "Reference photo {file}: face detection failed."),
+        (": recognizer inference failed", "Reference photo {file}: face matching failed."),
+    ):
+        if message.startswith(prefix) and message.endswith(suffix):
+            return source, {"file": message[len(prefix):-len(suffix)]}
+    return _privateframe_error_source(message), {}
+
+
+def _privateframe_error_source(message: str) -> str:
+    if message.startswith("No usable faces were found in the reference photos"):
+        return "No usable faces were found in the reference photos. Choose clearer photos and try again."
+    return message
+
+
 def run_privateframe_job(
+    job: PrivateFrameJob,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    reference_log: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    logs: list[dict[str, Any]] = []
+
+    def receive(event):
+        logs.append(dict(event))
+        if reference_log is not None:
+            reference_log(event)
+
+    with _forward_reference_logs(receive):
+        result = _run_privateframe_job(job, progress=progress, is_cancelled=is_cancelled)
+    if logs:
+        result["gui"]["reference_logs"] = logs
+    return result
+
+
+def _run_privateframe_job(
     job: PrivateFrameJob,
     *,
     progress: Callable[[int, int, str], None] | None = None,
@@ -402,6 +526,7 @@ def run_privateframe_job(
                 "output_mode": job.output_mode,
                 "source_audio_codec": None,
                 "audio_output_mode": "none",
+                "audio_preference": str(overrides["render.video_output.audio.redacted"]),
             },
         }
     requested_audio_mode = str(overrides["render.video_output.audio.redacted"])
@@ -553,16 +678,19 @@ def _localized_model_reason(reason: str, language: str | None) -> str:
 
 
 class PrivateFramePage(BasePage):
+    reference_log_received = Signal(object)
+
     def __init__(self, context, parent=None):
         super().__init__(
             context,
             "PrivateFrame Video Privacy",
-            "Upload a local video, analyze faces to JSON, and optionally create "
-            "a face-redacted video without uploading media.",
+            "Blur faces or add mosaic to a video before sharing it. Choose everyone or use reference photos to select people. Your video stays on this computer.",
             parent,
         )
+        self._base_defaults = read_default_config(DEFAULT_CONFIG_PATH)
         self.setObjectName("privateFramePage")
-        self.root_layout.setSpacing(10)
+        self.root_layout.setSpacing(6)
+        self._configured_combo_entries: list[tuple[QComboBox, int, str, dict[str, str]]] = []
         self._worker = None
         self._running = False
         self._privateframe_activity_registered = False
@@ -576,11 +704,14 @@ class PrivateFramePage(BasePage):
         self._stage_source = "Ready"
         self._stage_values: dict[str, object] = {}
         self._progress_format_source: str | None = "Ready"
-        self._gallery_status_source = "Select a gallery to list people."
-        self._gallery_status_values: dict[str, object] = {}
+        self._reference_status_source = "Select a reference photo folder."
+        self._reference_status_values: dict[str, object] = {}
+        self._reference_log_entries: list[dict[str, Any]] = []
+        self.reference_log_received.connect(self._reference_log_received)
         self._summary_state = "empty"
         self._summary_result: dict[str, Any] | None = None
         self._summary_error = ""
+        self._summary_error_values: dict[str, str] = {}
         self._resolved_provider = ""
         self._primary_options_two_columns: bool | None = None
 
@@ -648,11 +779,17 @@ class PrivateFramePage(BasePage):
         self.operation_panel.setObjectName("privateFrameOperationPanel")
         self.operation_layout = QVBoxLayout(self.operation_panel)
         self.operation_layout.setContentsMargins(0, 0, 0, 0)
-        self.operation_layout.setSpacing(10)
+        self.operation_layout.setSpacing(8)
         self.operation_opacity = QGraphicsOpacityEffect(self.operation_panel)
         self.operation_opacity.setOpacity(1.0)
         self.operation_panel.setGraphicsEffect(self.operation_opacity)
-        self.content.addWidget(self.operation_panel, 1)
+        self.operation_scroll = QScrollArea()
+        self.operation_scroll.setObjectName("privateFrameOperationScroll")
+        self.operation_scroll.setFrameShape(QFrame.NoFrame)
+        self.operation_scroll.setWidgetResizable(True)
+        self.operation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.operation_scroll.setWidget(self.operation_panel)
+        self.content.addWidget(self.operation_scroll, 1)
 
         self.video_input = UploadPreview(
             "Input Video",
@@ -662,12 +799,14 @@ class PrivateFramePage(BasePage):
         )
         self.video_input.setObjectName("privateFrameVideoInput")
         self.video_input.setFixedSize(_VIDEO_PREVIEW_SIZE, _VIDEO_PREVIEW_SIZE)
+        self.video_input.placeholder.setStyleSheet("font-size: 13px; padding: 8px;")
         self.video_input.file_label.hide()
         self.video_input.pathChanged.connect(self._video_input_changed)
 
         input_card, input_layout = self.card()
+        input_layout.setSpacing(6)
         video_row = QHBoxLayout()
-        video_row.setSpacing(18)
+        video_row.setSpacing(14)
         video_row.addWidget(self.video_input, 0, Qt.AlignmentFlag.AlignTop)
 
         self.video_metadata = QWidget()
@@ -679,32 +818,31 @@ class PrivateFramePage(BasePage):
         metadata_title.setObjectName("privateFrameVideoMetadataTitle")
         metadata_title.setStyleSheet("font-weight: 650;")
         metadata_layout.addWidget(metadata_title)
-        metadata_form = QFormLayout()
+        metadata_form = QGridLayout()
         metadata_form.setContentsMargins(0, 0, 0, 0)
-        metadata_form.setHorizontalSpacing(16)
-        metadata_form.setVerticalSpacing(2)
+        metadata_form.setHorizontalSpacing(12)
+        metadata_form.setVerticalSpacing(4)
         self.video_metadata_values: dict[str, QLabel] = {}
-        for key, label_text in (
-            ("file", "File name"),
-            ("resolution", "Resolution"),
-            ("duration", "Duration"),
-            ("fps", "Frame rate"),
-            ("frames", "Frame count"),
-            ("video_codec", "Video codec"),
-            ("audio", "Audio"),
-            ("size", "File size"),
-        ):
+        metadata_fields = (
+            ("file", "File name"), ("duration", "Duration"),
+            ("resolution", "Resolution"), ("fps", "Frame rate"),
+            ("frames", "Frame count"), ("size", "File size"),
+            ("video_codec", "Video codec"), ("audio", "Audio"),
+        )
+        for index, (key, label_text) in enumerate(metadata_fields):
+            caption = QLabel(label_text)
+            caption.setProperty("role", "muted")
             value_label = QLabel("—")
-            value_label.setObjectName(
-                "privateFrameVideoMetadata"
-                + "".join(part.capitalize() for part in key.split("_"))
-            )
-            value_label.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
+            value_label.setObjectName("privateFrameVideoMetadata" + "".join(part.capitalize() for part in key.split("_")))
+            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             value_label.setWordWrap(True)
+            value_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             self.video_metadata_values[key] = value_label
-            metadata_form.addRow(label_text, value_label)
+            row, column = index // 2, (index % 2) * 2
+            metadata_form.addWidget(caption, row, column)
+            metadata_form.addWidget(value_label, row, column + 1)
+        metadata_form.setColumnStretch(1, 1)
+        metadata_form.setColumnStretch(3, 1)
         metadata_layout.addLayout(metadata_form)
         metadata_layout.addStretch(1)
         video_row.addWidget(self.video_metadata, 1, Qt.AlignmentFlag.AlignTop)
@@ -720,16 +858,21 @@ class PrivateFramePage(BasePage):
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_dir, 1)
         output_row.addWidget(self.browse_output_button)
-        metadata_layout.addWidget(QLabel("Output Directory"))
-        metadata_layout.addLayout(output_row)
+        output_form = QFormLayout()
+        # Native macOS forms can keep the entire nested row at its size hint.
+        # Let the row grow so its path field receives the remaining width.
+        output_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        output_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        output_form.addRow("Output Directory", output_row)
+        input_layout.addLayout(output_form)
         self.output_preview = QLabel()
         self.output_preview.setObjectName("privateFrameOutputPreview")
         self.output_preview.setWordWrap(True)
         self.output_preview.setProperty("role", "muted")
-        metadata_layout.addWidget(self.output_preview)
         self.operation_layout.addWidget(input_card)
 
         options_card, options_layout = self.card()
+        options_layout.setSpacing(6)
         self.options_grid = QGridLayout()
         self.options_grid.setContentsMargins(0, 0, 0, 0)
         self.options_grid.setHorizontalSpacing(10)
@@ -752,16 +895,14 @@ class PrivateFramePage(BasePage):
         )
         self.model_root_label.setWordWrap(True)
         model_summary_layout.addWidget(self.model_label)
-        model_summary_layout.addWidget(self.model_root_label)
+        self.model_root_label.setParent(self.model_summary)
+        self.model_root_label.hide()
         self.analysis_mode = QComboBox()
         self.analysis_mode.setObjectName("privateFrameAnalysisMode")
         self.analysis_mode.setProperty("i18nItems", True)
         self.analysis_mode.addItem("Normal (target 30 analysis FPS)", 30)
         self.analysis_mode.addItem("Fast (target 15 analysis FPS)", 15)
-        analysis_fps_tooltip = (
-            "Sets the target sampling rate for face analysis. Extra safety scans "
-            "may occur. It does not change the output video's frame rate."
-        )
+        analysis_fps_tooltip = "Regular face detections per second of input video. Higher values check faces more often; lower values reduce work for faster processing but may miss brief appearances. Extra scans may occur. Output video FPS is unchanged. Current default: {default}."
         self.analysis_mode.setToolTip(analysis_fps_tooltip)
         self.redaction_method = QComboBox()
         self.redaction_method.setObjectName("privateFrameRedactionMethod")
@@ -771,19 +912,15 @@ class PrivateFramePage(BasePage):
         self.output_mode = QComboBox()
         self.output_mode.setObjectName("privateFrameOutputMode")
         self.output_mode.setProperty("i18nItems", True)
-        self.output_mode.addItem("JSON + redacted video", "json_and_video")
-        self.output_mode.addItem("JSON only (edit or render later)", "json_only")
+        self.output_mode.addItem("Video and analysis results", "json_and_video")
+        self.output_mode.addItem("Analysis only (render video later)", "json_only")
         self.output_mode.currentIndexChanged.connect(self._output_mode_changed)
         self.recognition_policy = QComboBox()
         self.recognition_policy.setObjectName("privateFrameRecognitionPolicy")
         self.recognition_policy.setProperty("i18nItems", True)
-        self.recognition_policy.addItem(
-            "Blur every face (no identity recognition)", "all"
-        )
-        self.recognition_policy.addItem(
-            "Exempt selected people; blur everyone else", "exempt"
-        )
-        self.recognition_policy.addItem("Blur selected people only", "blur_only")
+        self.recognition_policy.addItem("Blur everyone", "all")
+        self.recognition_policy.addItem("Blur only people in the photos", "blur_only")
+        self.recognition_policy.addItem("Keep people in the photos clear", "exempt")
         self.recognition_policy.currentIndexChanged.connect(
             self._recognition_policy_changed
         )
@@ -800,39 +937,107 @@ class PrivateFramePage(BasePage):
         set_button_tooltip(self.more_options_button)
         self.analysis_fps_label = QLabel("Target analysis FPS")
         self.analysis_fps_label.setToolTip(analysis_fps_tooltip)
+        self.preserve_audio = QCheckBox("Preserve original audio when supported")
+        self.preserve_audio.setObjectName("privateFramePreserveAudio")
+        self.preserve_audio.setChecked(self._base_value("render.video_output.audio.redacted") != "none")
+        self.preserve_audio.setToolTip("Existing AAC audio is copied without re-encoding. Other audio formats are omitted; they are not converted automatically.")
+        self.preserve_audio.toggled.connect(self._update_audio_notice)
+        self.audio_notice = QLabel()
+        self.audio_notice.setObjectName("privateFrameAudioNotice")
+        self.audio_notice.setWordWrap(True)
+        self.audio_notice.setProperty("role", "muted")
+        audio_widget = QWidget()
+        audio_layout = QHBoxLayout(audio_widget)
+        audio_layout.setContentsMargins(0, 0, 0, 0)
+        audio_layout.setSpacing(8)
+        audio_layout.addWidget(self.preserve_audio)
+        self.audio_notice.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        audio_layout.addWidget(self.audio_notice, 1)
         self._primary_option_rows: list[tuple[QLabel, QWidget]] = [
-            (QLabel("Global model"), self.model_summary),
-            (self.analysis_fps_label, self.analysis_mode),
-            (QLabel("Privacy policy"), self.recognition_policy),
             (QLabel("Redaction"), self.redaction_method),
-            (QLabel("Output mode"), self.output_mode),
-            (QLabel("Advanced settings"), self.more_options_button),
+            (self.analysis_fps_label, self.analysis_mode),
         ]
         for label, _field in self._primary_option_rows:
-            label.setAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            _field.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        policy_form = QFormLayout()
+        policy_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        policy_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        policy_form.addRow("Who should be blurred?", self.recognition_policy)
+        options_layout.addLayout(policy_form)
+        self.selective_privacy_note = QLabel()
+        self.selective_privacy_note.setObjectName("privateFrameRecognitionNotice")
+        self.selective_privacy_note.setWordWrap(True)
+        self.selective_privacy_note.setProperty("role", "muted")
+        options_layout.addWidget(self.selective_privacy_note)
+        self.reference_panel = QWidget()
+        self.reference_panel.setObjectName("privateFrameReferencePanel")
+        reference_layout = QVBoxLayout(self.reference_panel)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.setSpacing(4)
+        self.reference_dir = QLineEdit()
+        self.reference_dir.setObjectName("privateFrameReferenceDirectory")
+        self.reference_dir.setPlaceholderText("Choose a folder of reference photos")
+        self.reference_dir.editingFinished.connect(self._refresh_reference_photos)
+        self.browse_reference_button = QPushButton("Browse")
+        self.browse_reference_button.setObjectName("privateFrameBrowseReferenceButton")
+        self.browse_reference_button.clicked.connect(self._browse_reference_directory)
+        set_button_tooltip(self.browse_reference_button)
+        reference_row = QHBoxLayout()
+        reference_row.addWidget(self.reference_dir, 1)
+        reference_row.addWidget(self.browse_reference_button)
+        reference_form = QFormLayout()
+        reference_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        reference_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        reference_form.addRow("Reference photos", reference_row)
+        reference_layout.addLayout(reference_form)
+        self.reference_dir.setToolTip("Each photo uses only its largest face. Use clear single-person photos when possible. JPG, JPEG, PNG and WebP files directly in this folder are included; subfolders are ignored.")
+        self.reference_status = QLabel()
+        self.reference_status.setObjectName("privateFrameReferenceStatus")
+        self.reference_status.setWordWrap(True)
+        reference_layout.addWidget(self.reference_status)
+        options_layout.addWidget(self.reference_panel)
         options_layout.addLayout(self.options_grid)
+        audio_options_row = QHBoxLayout()
+        audio_options_row.addWidget(audio_widget, 1)
+        audio_options_row.addWidget(self.more_options_button)
+        options_layout.addLayout(audio_options_row)
         self.model_status_label = QLabel()
         self.model_status_label.setObjectName("privateFrameModelStatus")
         self.model_status_label.setWordWrap(True)
         self.model_status_label.setProperty("role", "status")
         options_layout.addWidget(self.model_status_label)
+        self.model_settings_panel = QWidget()
+        model_settings_layout = QVBoxLayout(self.model_settings_panel)
+        model_settings_layout.setContentsMargins(0, 0, 0, 0)
+        model_settings_layout.setSpacing(4)
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Global model"))
+        model_row.addWidget(self.model_summary, 1)
+        model_settings_layout.addLayout(model_row)
         provider_row = QHBoxLayout()
         provider_row.setContentsMargins(0, 2, 0, 0)
-        provider_row.addStretch(1)
         provider_row.addWidget(QLabel("Provider"))
         provider_row.addWidget(self.provider_label)
+        provider_row.addStretch(1)
         self.open_models_button = QPushButton("Open Models")
         self.open_models_button.setObjectName("privateFrameOpenModelsButton")
         self.open_models_button.clicked.connect(self._open_models)
         set_button_tooltip(self.open_models_button)
         provider_row.addWidget(self.open_models_button)
-        options_layout.addLayout(provider_row)
+        model_settings_layout.addLayout(provider_row)
         self._layout_primary_options(two_columns=True)
         self.operation_layout.addWidget(options_card)
+        self.operation_layout.addStretch(1)
 
         self._create_more_options_dialog()
+        self._initialize_default_controls()
+        self.execution_panel = QWidget()
+        self.execution_panel.setObjectName("privateFrameExecutionPanel")
+        self.execution_layout = QVBoxLayout(self.execution_panel)
+        self.execution_layout.setContentsMargins(0, 0, 0, 0)
+        self.execution_layout.setSpacing(6)
+        self.content.addWidget(self.execution_panel)
 
         self.start_button = QPushButton("Start Processing")
         self.start_button.setObjectName("privateFrameStartButton")
@@ -851,7 +1056,7 @@ class PrivateFramePage(BasePage):
             self.open_output_button,
         ):
             set_button_tooltip(button)
-        self.operation_layout.addWidget(
+        self.execution_layout.addWidget(
             self.row(
                 self.start_button,
                 self.cancel_button,
@@ -867,11 +1072,24 @@ class PrivateFramePage(BasePage):
         self.stage_label = QLabel("Ready")
         self.stage_label.setObjectName("privateFrameStage")
         self.stage_label.setWordWrap(True)
+        self.stage_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.processing_details_button = QPushButton("Processing details…")
+        self.processing_details_button.setObjectName("privateFrameProcessingDetailsButton")
+        self.processing_details_button.clicked.connect(self._show_processing_details)
+        set_button_tooltip(self.processing_details_button)
         progress_row = QHBoxLayout()
         progress_row.addWidget(self.progress_bar, 2)
         progress_row.addWidget(self.stage_label, 1)
-        self.operation_layout.addLayout(progress_row)
+        progress_row.addWidget(self.processing_details_button)
+        self.execution_layout.addLayout(progress_row)
 
+        self.processing_details_dialog = QDialog(self)
+        self.processing_details_dialog.setObjectName("privateFrameProcessingDetailsDialog")
+        self.processing_details_dialog.setWindowTitle("PrivateFrame Processing Details")
+        self.processing_details_dialog.setModal(False)
+        self.processing_details_dialog.resize(720, 440)
+        details_layout = QVBoxLayout(self.processing_details_dialog)
+        details_layout.addWidget(self.output_preview)
         self.summary = QPlainTextEdit()
         self.summary.setObjectName("privateFrameSummary")
         self.summary.setReadOnly(True)
@@ -881,131 +1099,113 @@ class PrivateFramePage(BasePage):
                 context.config.ui_language,
             )
         )
-        self.summary.setMinimumHeight(80)
-        self.summary.setMaximumHeight(180)
-        self.summary.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Ignored,
-        )
-        self.operation_layout.addWidget(self.summary)
-        self.operation_layout.addWidget(
-            self.notice(
-                "PrivateFrame runs locally and uses the global model, model root, "
-                "and provider shown above. A missing Raccoon package may be "
-                "downloaded to that model root on first use."
-            )
-        )
+        details_layout.addWidget(self.summary, 1)
+        self.close_processing_details_button = QPushButton("Close")
+        self.close_processing_details_button.clicked.connect(self.processing_details_dialog.close)
+        set_button_tooltip(self.close_processing_details_button)
+        close_details_row = QHBoxLayout()
+        close_details_row.addStretch(1)
+        close_details_row.addWidget(self.close_processing_details_button)
+        details_layout.addLayout(close_details_row)
         self._update_output_option_controls()
+        self._render_reference_status(context.config.ui_language)
         self._update_output_preview()
         self._refresh_global_model_status()
+        self._refresh_default_help(context.config.ui_language)
+        if self.recognition_policy.currentData() != "all":
+            self._refresh_reference_photos()
 
     def _create_more_options_dialog(self) -> None:
-        """Create the persistent non-modal dialog once so closing keeps values."""
-
+        """Keep choices when the non-modal dialog is closed; groups can reset."""
         self.more_options_dialog = QDialog(self)
         self.more_options_dialog.setObjectName("privateFrameMoreOptionsDialog")
         self.more_options_dialog.setWindowTitle("PrivateFrame More Options")
         self.more_options_dialog.setModal(False)
         self.more_options_dialog.setMinimumWidth(560)
-
         layout = QVBoxLayout(self.more_options_dialog)
-        form = QFormLayout()
-        self.more_options_form = form
+        layout.addWidget(self.model_settings_panel)
+        self.more_option_groups = {}
+        self.reset_option_buttons = {}
 
+        def group(key, title):
+            box = QGroupBox(title)
+            box.setObjectName("privateFrameOptions" + key.capitalize())
+            group_layout = QVBoxLayout(box)
+            form = QFormLayout()
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            group_layout.addLayout(form)
+            reset = QPushButton("Restore defaults")
+            reset.clicked.connect(lambda _checked=False, group_key=key: self._reset_option_group(group_key))
+            row = QHBoxLayout()
+            row.addStretch(1)
+            row.addWidget(reset)
+            group_layout.addLayout(row)
+            layout.addWidget(box)
+            self.more_option_groups[key] = box
+            self.reset_option_buttons[key] = reset
+            return form
+
+        appearance = group("appearance", "Redaction appearance")
         self.between_scan_frames = QComboBox()
         self.between_scan_frames.setObjectName("privateFrameBetweenScanFrames")
         self.between_scan_frames.setProperty("i18nItems", True)
-        self.between_scan_frames.addItem("Automatic", "auto")
-        self.between_scan_frames.addItem("Interpolate", "interpolate")
-        self.between_scan_frames.addItem("Visual tracking", "visual")
-
+        for label, value in (("Automatic", "auto"), ("Interpolate", "interpolate"), ("Visual tracking", "visual")):
+            self.between_scan_frames.addItem(label, value)
+        self.between_scan_frames.setToolTip("Automatic follows the default tracking method. Interpolation is faster; visual tracking follows motion between detection frames and takes more work.")
         self.box_scale = QComboBox()
         self.box_scale.setObjectName("privateFrameBoxScale")
         self.box_scale.setProperty("i18nItems", True)
-        self.box_scale.addItem("Standard (1.00×)", 1.0)
-        self.box_scale.addItem("Extra margin (1.15×)", 1.15)
-        self.box_scale.addItem("Maximum margin (1.30×)", 1.30)
+        for label, value in (("Standard (1.00×)", 1.0), ("Extra margin (1.15×)", 1.15), ("Maximum margin (1.30×)", 1.30)):
+            self.box_scale.addItem(label, value)
+        self.box_scale.setToolTip("A larger margin blurs more area around each detected face.")
+        appearance.addRow("Face coverage", self.box_scale)
+        appearance.addRow("Follow faces between detections", self.between_scan_frames)
 
+        video = group("video", "Video output")
         self.video_preset = QComboBox()
         self.video_preset.setObjectName("privateFrameVideoPreset")
         self.video_preset.setProperty("i18nItems", True)
-        self.video_preset.addItem("Very fast encoding", "veryfast")
-        self.video_preset.addItem("Medium encoding", "medium")
-        self.video_preset.addItem("Slow encoding", "slow")
-        self.video_preset.setCurrentIndex(self.video_preset.findData("medium"))
-
+        for label, value in (("Very fast encoding", "veryfast"), ("Medium encoding", "medium"), ("Slow encoding", "slow")):
+            self.video_preset.addItem(label, value)
+        self.video_preset.setToolTip("Encoding speed changes processing time and file size, not face detection or matching. Slower encoding can produce smaller files at the same quality.")
         self.video_crf = QComboBox()
         self.video_crf.setObjectName("privateFrameVideoCrf")
         self.video_crf.setProperty("i18nItems", True)
-        self.video_crf.addItem("High quality (CRF 18)", 18)
-        self.video_crf.addItem("Balanced size (CRF 23)", 23)
-        self.video_crf.addItem("Smaller file (CRF 28)", 28)
+        for label, value in (("High quality (CRF 18)", 18), ("Balanced (CRF 23)", 23), ("Smaller file (CRF 28)", 28)):
+            self.video_crf.addItem(label, value)
+        self.video_crf.setToolTip("Video quality affects compression and file size, not face detection or matching. 18 keeps more detail and makes larger files; 23 is balanced; 28 makes smaller files with less detail.")
+        video.addRow("Video quality", self.video_crf)
+        video.addRow("Encoding speed", self.video_preset)
+        video.addRow("Output content", self.output_mode)
 
-        self.preserve_audio = QCheckBox("Preserve AAC audio when available")
-        self.preserve_audio.setObjectName("privateFramePreserveAudio")
-        self.preserve_audio.setChecked(True)
-        self.preserve_audio.setToolTip(
-            "Existing AAC audio is remuxed. Other source audio formats are omitted automatically."
-        )
-        form.addRow("Between scanned frames", self.between_scan_frames)
-        form.addRow("Face coverage", self.box_scale)
-        form.addRow("Encoding speed", self.video_preset)
-        form.addRow("Video quality", self.video_crf)
-        form.addRow("Audio", self.preserve_audio)
-
-        self.gallery_dir = QLineEdit()
-        self.gallery_dir.setObjectName("privateFrameGalleryDirectory")
-        self.gallery_dir.setPlaceholderText(
-            "Folder containing one first-level folder per person"
-        )
-        self.gallery_dir.editingFinished.connect(self._refresh_gallery_people)
-        self.browse_gallery_button = QPushButton("Browse")
-        self.browse_gallery_button.setObjectName("privateFrameBrowseGalleryButton")
-        self.browse_gallery_button.clicked.connect(self._browse_gallery_directory)
-        set_button_tooltip(self.browse_gallery_button)
-        self.gallery_row = QWidget()
-        gallery_layout = QHBoxLayout(self.gallery_row)
-        gallery_layout.setContentsMargins(0, 0, 0, 0)
-        gallery_layout.addWidget(self.gallery_dir, 1)
-        gallery_layout.addWidget(self.browse_gallery_button)
-        form.addRow("Recognition gallery", self.gallery_row)
-
-        self.target_persons = QListWidget()
-        self.target_persons.setObjectName("privateFrameTargetPersons")
-        self.target_persons.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.target_persons.setMinimumHeight(110)
-        form.addRow("Target people", self.target_persons)
-
-        self.gallery_status = QLabel("Select a gallery to list people.")
-        self.gallery_status.setObjectName("privateFrameGalleryStatus")
-        self.gallery_status.setWordWrap(True)
-        self.gallery_status.setProperty("role", "muted")
-        form.addRow("", self.gallery_status)
-
+        matching = group("matching", "Person matching")
         self.recognition_profile = QComboBox()
         self.recognition_profile.setObjectName("privateFrameRecognitionProfile")
         self.recognition_profile.setProperty("i18nItems", True)
-        self.recognition_profile.addItem("Fast recognition", "fast")
-        self.recognition_profile.addItem("Balanced recognition", "balanced")
-        self.recognition_profile.addItem("Accurate recognition", "accurate")
-        self.recognition_profile.setCurrentIndex(
-            self.recognition_profile.findData("balanced")
-        )
-        form.addRow("Recognition profile", self.recognition_profile)
-        layout.addLayout(form)
-
-        self.selective_privacy_note = QLabel(
-            "Selective policies are fail-safe: faces with uncertain identity remain blurred."
-        )
-        self.selective_privacy_note.setObjectName("privateFrameRecognitionNotice")
-        self.selective_privacy_note.setWordWrap(True)
-        self.selective_privacy_note.setProperty("role", "muted")
-        layout.addWidget(self.selective_privacy_note)
-
+        for label, value in (("Quick check", "fast"), ("Balanced check", "balanced"), ("Extended check", "accurate")):
+            self.recognition_profile.addItem(label, value)
+        self.recognition_profile.setToolTip("Checks up to 1, 3 or 5 selected frames per track unless overridden in the configuration. More checks take longer and provide more evidence; they do not guarantee a correct match.")
+        self.recognition_threshold = QDoubleSpinBox()
+        self.recognition_threshold.setObjectName("privateFrameRecognitionThreshold")
+        self.recognition_threshold.setRange(0.0, 1.0)
+        self.recognition_threshold.setSingleStep(0.01)
+        self.recognition_threshold.setDecimals(2)
+        self.recognition_threshold.setToolTip("Minimum face similarity for a match (0–1). Increase it to reduce incorrect matches; decrease it if the right person is often missed. Keep the default ({default}) unless you have reviewed the results.")
+        matching.addRow("Matching checks", self.recognition_profile)
+        matching.addRow("Match threshold", self.recognition_threshold)
+        self._group_defaults = {
+            "appearance": [(self.box_scale, "render.redaction.box_scale"), (self.between_scan_frames, "tracking.between_scan_frames")],
+            "video": [(self.video_crf, "render.video_output.rate_control"), (self.video_preset, "render.video_output.preset"), (self.output_mode, None)],
+            "matching": [(self.recognition_profile, "recognition.profile"), (self.recognition_threshold, "recognition.similarity_threshold")],
+        }
+        for values in self._group_defaults.values():
+            for widget, _value in values:
+                if isinstance(widget, QComboBox):
+                    widget.currentIndexChanged.connect(self._update_more_options_marker)
+                else:
+                    widget.valueChanged.connect(self._update_more_options_marker)
         self.close_more_options_button = QPushButton("Close")
-        self.close_more_options_button.setObjectName(
-            "privateFrameCloseMoreOptionsButton"
-        )
+        self.close_more_options_button.setObjectName("privateFrameCloseMoreOptionsButton")
         self.close_more_options_button.clicked.connect(self.more_options_dialog.close)
         set_button_tooltip(self.close_more_options_button)
         close_row = QHBoxLayout()
@@ -1013,17 +1213,130 @@ class PrivateFramePage(BasePage):
         close_row.addWidget(self.close_more_options_button)
         layout.addLayout(close_row)
 
+    def _base_value(self, path: str) -> Any:
+        value = self._base_defaults
+        for key in path.split("."):
+            value = value[key]
+        return value
+
+    def _control_default(self, path: str | None) -> Any:
+        # Output content is a GUI workflow choice, not a processing parameter.
+        if path is None:
+            return "json_and_video"
+        value = self._base_value(path)
+        if path == "render.video_output.rate_control":
+            return value["quality"] if value["mode"] == "crf" else None
+        return value
+
+    def _select_configured_value(self, widget: QComboBox, value: Any, *, source: str = "Configured value ({value})", values: dict[str, str] | None = None) -> None:
+        index = next((index for index in range(widget.count()) if widget.itemData(index) == value), -1)
+        if index < 0:
+            if values is None and value in (None, ""):
+                source, values = "Automatic", {}
+            values = values if values is not None else {"value": str(value)}
+            widget.addItem(tr(source, self.context.config.ui_language).format(**values), value)
+            index = widget.count() - 1
+            widget.setItemData(index, source, Qt.UserRole + 3000)
+            self._configured_combo_entries.append((widget, index, source, values))
+        widget.setCurrentIndex(index)
+
+    def _initialize_default_controls(self) -> None:
+        fields = [
+            (self.analysis_mode, "scan.max_analysis_fps"),
+            (self.redaction_method, "render.redaction.method"),
+            (self.recognition_policy, "recognition.mode"),
+            *(entry for group in self._group_defaults.values() for entry in group),
+        ]
+        for widget, path in fields:
+            previous = widget.blockSignals(True)
+            value = self._control_default(path)
+            if isinstance(widget, QComboBox):
+                if path == "render.video_output.rate_control" and value is None:
+                    self._select_configured_value(widget, None, source="From configuration ({mode})", values={"mode": str(self._base_value(path)["mode"])})
+                else:
+                    self._select_configured_value(widget, value)
+            else:
+                widget.setDecimals(max(2, -Decimal(str(value)).as_tuple().exponent))
+                widget.setValue(value)
+            widget.blockSignals(previous)
+        reference = self._base_value("recognition.reference_dir")
+        if reference is not None:
+            reference_path = Path(str(reference)).expanduser()
+            if not reference_path.is_absolute():
+                reference_path = DEFAULT_CONFIG_PATH.parent / reference_path
+            self.reference_dir.setText(str(reference_path))
+        else:
+            self.reference_dir.clear()
+
+    def _reset_option_group(self, group: str) -> None:
+        for widget, path in self._group_defaults[group]:
+            value = self._control_default(path)
+            if isinstance(widget, QComboBox):
+                self._select_configured_value(widget, value)
+            else:
+                widget.setValue(value)
+        self._update_more_options_marker()
+
+    def _refresh_default_help(self, language: str | None) -> None:
+        analysis_source = "Regular face detections per second of input video. Higher values check faces more often; lower values reduce work for faster processing but may miss brief appearances. Extra scans may occur. Output video FPS is unchanged. Current default: {default}."
+        analysis_text = tr(analysis_source, language).format(default=format(float(self._base_value("scan.max_analysis_fps")), "g"))
+        self.analysis_mode.setToolTip(analysis_text)
+        self.analysis_fps_label.setToolTip(analysis_text)
+        threshold_source = "Minimum face similarity for a match (0–1). Increase it to reduce incorrect matches; decrease it if the right person is often missed. Keep the default ({default}) unless you have reviewed the results."
+        self.recognition_threshold.setToolTip(tr(threshold_source, language).format(default=format(float(self._base_value("recognition.similarity_threshold")), "g")))
+        for widget, index, source, values in self._configured_combo_entries:
+            widget.setItemText(index, tr(source, language).format(**values))
+
+    def _current_control_value(self, widget: QWidget, path: str | None) -> Any:
+        value = widget.currentData() if isinstance(widget, QComboBox) else widget.value()
+        if path == "tracking.between_scan_frames" and value == "auto":
+            return self._control_default(path)
+        return value
+
+    def _update_more_options_marker(self, *_args, language: str | None = None) -> None:
+        if not hasattr(self, "_group_defaults"):
+            return
+        changed = False
+        for group, fields in self._group_defaults.items():
+            if group == "matching" and self.recognition_policy.currentData() == "all":
+                continue
+            if any(self._current_control_value(widget, path) != self._control_default(path) for widget, path in fields):
+                changed = True
+                break
+        source = "More Options… (modified)" if changed else "More Options…"
+        self.more_options_button.setProperty("_insightface_i18n_source", source)
+        self.more_options_button.setText(tr(source, language or self.context.config.ui_language))
+
     def _show_more_options(self) -> None:
         self.more_options_dialog.show()
         self.more_options_dialog.raise_()
         self.more_options_dialog.activateWindow()
 
+    def _show_processing_details(self) -> None:
+        self.processing_details_dialog.show()
+        self.processing_details_dialog.raise_()
+        self.processing_details_dialog.activateWindow()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         if hasattr(self, "options_grid"):
-            self._layout_primary_options(
-                two_columns=event.size().width() >= _TWO_COLUMN_OPTIONS_MIN_WIDTH
-            )
+            self._fit_primary_options(event.size().width())
+
+    def _fit_primary_options(self, width: int) -> None:
+        # Measure translated controls instead of reserving two rows at a fixed
+        # window width. Reserve scrollbar space so showing it cannot cause a
+        # repeated one-column/two-column layout switch.
+        page_margins = self.root_layout.contentsMargins()
+        card_margins = self.options_grid.parentWidget().layout().contentsMargins()
+        required = sum(
+            label.minimumSizeHint().width() + field.minimumSizeHint().width()
+            for label, field in self._primary_option_rows
+        )
+        required += 3 * self.options_grid.horizontalSpacing()
+        required += page_margins.left() + page_margins.right()
+        required += card_margins.left() + card_margins.right() + 2
+        required += self.operation_scroll.verticalScrollBar().sizeHint().width()
+        self._layout_primary_options(two_columns=width >= required)
 
     def _layout_primary_options(self, two_columns: bool) -> None:
         """Lay out primary controls in one or two columns without recreating them."""
@@ -1075,6 +1388,7 @@ class PrivateFramePage(BasePage):
             self._video_preview_data = None
             self._reset_video_metadata()
             self._render_video_preview_state(self.context.config.ui_language)
+            self._update_audio_notice()
             return
 
         source = Path(path).expanduser().resolve()
@@ -1082,8 +1396,9 @@ class PrivateFramePage(BasePage):
         self._video_preview_path = source
         self._video_preview_data = None
         self._set_video_metadata_pending(source)
-        self.video_input.viewer.set_image(None)
+        self.video_input.set_image(None)
         self._render_video_preview_state(self.context.config.ui_language)
+        self._update_audio_notice()
 
         def task(progress=None, is_cancelled=None):
             if is_cancelled is not None and is_cancelled():
@@ -1152,6 +1467,7 @@ class PrivateFramePage(BasePage):
         self.video_input.set_image(preview.image, str(preview.path))
         self.video_input.file_label.hide()
         self._render_video_preview_metadata(preview, language)
+        self._update_audio_notice(language=language)
 
         main = self.window()
         if main is not self and hasattr(main, "set_status"):
@@ -1194,7 +1510,7 @@ class PrivateFramePage(BasePage):
         self._video_preview_state = "failed"
         self._video_preview_path = source
         self._video_preview_data = None
-        self.video_input.viewer.set_image(None)
+        self.video_input.set_image(None)
         self._reset_video_metadata()
         self.video_metadata_values["file"].setText(source.name)
         self.video_metadata_values["file"].setToolTip(str(source))
@@ -1208,6 +1524,7 @@ class PrivateFramePage(BasePage):
             self._video_preview_worker = None
 
     def _render_video_preview_state(self, language: str | None) -> None:
+        self.video_input.file_label.hide()
         state = self._video_preview_state
         source = self._video_preview_path
         if state == "empty":
@@ -1215,10 +1532,10 @@ class PrivateFramePage(BasePage):
                 f"{tr(self.video_input.title, language)}\n"
                 f"{tr(self.video_input.prompt, language)}"
             )
-            self.video_input.placeholder.show()
+            self.video_input.stack.setCurrentWidget(self.video_input.placeholder)
         elif state == "loading" and source is not None:
             self.video_input.placeholder.setText(tr("Reading video preview…", language))
-            self.video_input.placeholder.show()
+            self.video_input.stack.setCurrentWidget(self.video_input.placeholder)
             self.video_metadata_values["resolution"].setText(
                 tr("Reading…", language)
             )
@@ -1232,95 +1549,49 @@ class PrivateFramePage(BasePage):
                     )
                 )
             )
-            self.video_input.placeholder.show()
+            self.video_input.stack.setCurrentWidget(self.video_input.placeholder)
             self.video_input.file_label.hide()
             self.video_metadata_values["resolution"].setText(
                 tr("Unavailable", language)
             )
         elif state == "ready" and self._video_preview_data is not None:
             self._render_video_preview_metadata(self._video_preview_data, language)
-            self.video_input.placeholder.hide()
+            self.video_input.stack.setCurrentWidget(self.video_input.viewer)
 
-    def _browse_gallery_directory(self) -> None:
-        initial = self.gallery_dir.text().strip() or str(Path.home())
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            tr("Select Recognition Gallery", self.context.config.ui_language),
-            str(Path(initial).expanduser()),
-        )
+    def _browse_reference_directory(self) -> None:
+        initial = self.reference_dir.text().strip() or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, tr("Select Reference Photo Folder", self.context.config.ui_language), str(Path(initial).expanduser()))
         if folder:
-            self.gallery_dir.setText(folder)
-            self._refresh_gallery_people()
+            self.reference_dir.setText(folder)
+            self._refresh_reference_photos()
 
-    def _refresh_gallery_people(self, language: str | None = None) -> None:
-        """Populate targets from real first-level folders in selective mode."""
-
+    def _refresh_reference_photos(self, language: str | None = None) -> None:
         if self.recognition_policy.currentData() == "all":
             return
-        selected_before = {item.text() for item in self.target_persons.selectedItems()}
-        self.target_persons.clear()
-        text = self.gallery_dir.text().strip()
-        language = language or self.context.config.ui_language
-        if not text:
-            self._set_gallery_status(
-                "Select a gallery to list people.",
-                language=language,
-            )
-            return
-        unresolved = Path(text).expanduser()
-        if unresolved.is_symlink():
-            self._set_gallery_status(
-                "Gallery directories cannot be symlinks.",
-                language=language,
-            )
-            return
-        gallery = unresolved.resolve()
-        if not gallery.is_dir():
-            self._set_gallery_status(
-                "The gallery directory does not exist.",
-                language=language,
-            )
-            return
-        people = sorted(
-            child.name
-            for child in gallery.iterdir()
-            if child.is_dir()
-            and not child.is_symlink()
-            and not child.name.startswith(".")
-        )
-        self.target_persons.addItems(people)
-        for index in range(self.target_persons.count()):
-            item = self.target_persons.item(index)
-            if item.text() in selected_before:
-                item.setSelected(True)
-        if people:
-            self._set_gallery_status(
-                "Found {count} people. Select one or more targets.",
-                language=language,
-                count=len(people),
-            )
+        try:
+            _root, images = _scan_reference_folder(self.reference_dir.text())
+        except (OSError, ValueError) as error:
+            self._set_reference_status(str(error), language=language)
         else:
-            self._set_gallery_status(
-                "No first-level person folders were found in this gallery.",
-                language=language,
-            )
+            self._set_reference_status("Found {count} reference photos. Faces will be checked when processing starts.", language=language, count=len(images))
 
-    def _set_gallery_status(
-        self,
-        source: str,
-        *,
-        language: str | None = None,
-        **values: object,
-    ) -> None:
-        self._gallery_status_source = source
-        self._gallery_status_values = dict(values)
-        self._render_gallery_status(language or self.context.config.ui_language)
+    def _set_reference_status(self, source: str, *, language: str | None = None, **values: object) -> None:
+        self._reference_status_source = source
+        self._reference_status_values = dict(values)
+        self._render_reference_status(language or self.context.config.ui_language)
 
-    def _render_gallery_status(self, language: str | None) -> None:
-        text = tr(self._gallery_status_source, language)
-        if self._gallery_status_values:
-            text = text.format(**self._gallery_status_values)
-        self.gallery_status.setText(text)
+    def _render_reference_status(self, language: str | None) -> None:
+        text = tr(self._reference_status_source, language)
+        if self._reference_status_values:
+            text = text.format(**self._reference_status_values)
+        self.reference_status.setText(text)
+
+    @Slot(object)
+    def _reference_log_received(self, event: dict[str, Any]) -> None:
+        self._reference_log_entries.append(dict(event))
+        if event.get("kind") == "summary":
+            self._set_reference_status("Reference photos: {used} used, {skipped} skipped ({total} total).", **{key: event[key] for key in ("used", "skipped", "total")})
+        self.summary.appendPlainText(_reference_log_text(event, self.context.config.ui_language))
 
     def _browse_output_directory(self) -> None:
         initial = self.output_dir.text().strip() or str(
@@ -1350,10 +1621,12 @@ class PrivateFramePage(BasePage):
             job = self._last_job
             self.model_label.setText(job.model_name)
             self.model_root_label.setText(str(job.model_root))
+            self.model_label.setToolTip(str(job.model_root))
             self.model_root_label.setToolTip(str(job.model_root))
             current_name = str(self.context.config.model_name)
             current_root = Path(self.context.config.model_root).expanduser().resolve()
             if current_name != job.model_name or current_root != job.model_root:
+                self.model_status_label.show()
                 self.model_status_label.setText(
                     tr(
                         "This run is using its startup model snapshot. The new global "
@@ -1362,6 +1635,7 @@ class PrivateFramePage(BasePage):
                     )
                 )
             else:
+                self.model_status_label.hide()
                 self.model_status_label.setText(
                     tr(
                         "This run is using the global model snapshot captured at startup.",
@@ -1383,11 +1657,13 @@ class PrivateFramePage(BasePage):
         self._update_model_requirement_state(status, language)
         self.model_label.setText(status.model_name or "—")
         self.model_root_label.setText(str(status.model_root))
+        self.model_label.setToolTip(str(status.model_root))
         self.model_root_label.setToolTip(str(status.model_root))
         download_count = context_activity_count(
             self.context, "model_downloads_in_progress"
         )
         if download_count:
+            self.model_status_label.show()
             self.model_status_label.setText(
                 tr(
                     "A model download is in progress. Wait for it to finish before "
@@ -1397,7 +1673,9 @@ class PrivateFramePage(BasePage):
             )
             self.start_button.setEnabled(False)
         else:
-            self.model_status_label.setText(_localized_model_status(status, language))
+            self.model_status_label.setVisible(status.state not in {"ready", "unsupported"})
+            self.model_status_label.setText(tr("Ready", language) if status.state == "ready" else _localized_model_status(status, language))
+            self.model_status_label.setToolTip(_localized_model_status(status, language))
             self.start_button.setEnabled(status.can_start)
         return status
 
@@ -1461,31 +1739,27 @@ class PrivateFramePage(BasePage):
                 )
             )
         recognition_mode = str(self.recognition_policy.currentData())
-        recognition_targets = (
-            [item.text() for item in self.target_persons.selectedItems()]
-            if recognition_mode != "all"
-            else []
-        )
         job = build_privateframe_job(
             input_path=source,
             output_dir=output,
             model_package=str(self.context.config.model_name),
             model_root=str(self.context.config.model_root),
-            max_analysis_fps=int(self.analysis_mode.currentData()),
+            max_analysis_fps=float(self.analysis_mode.currentData()),
             redaction_method=str(self.redaction_method.currentData()),
             runtime_provider=str(self.context.config.provider),
-            preserve_aac_audio=self.preserve_audio.isChecked(),
+            preserve_aac_audio=(None if self.preserve_audio.isChecked() == (self._base_value("render.video_output.audio.redacted") != "none") else self.preserve_audio.isChecked()),
             output_mode=str(self.output_mode.currentData()),
             between_scan_frames=str(self.between_scan_frames.currentData()),
             box_scale=float(self.box_scale.currentData()),
-            video_preset=str(self.video_preset.currentData()),
-            video_crf=int(self.video_crf.currentData()),
+            video_preset=self.video_preset.currentData(),
+            video_crf=self.video_crf.currentData(),
             recognition_mode=recognition_mode,
-            recognition_gallery_dir=(
-                self.gallery_dir.text().strip() if recognition_mode != "all" else None
+            recognition_reference_dir=(
+                self.reference_dir.text().strip() if recognition_mode != "all" else None
             ),
-            recognition_target_persons=recognition_targets,
             recognition_profile=str(self.recognition_profile.currentData()),
+            recognition_similarity_threshold=self.recognition_threshold.value(),
+            base_defaults=self._base_defaults,
         )
         if not job.config_path.is_file():
             raise RuntimeError(
@@ -1511,12 +1785,16 @@ class PrivateFramePage(BasePage):
                     language,
                 )
             )
+            self.output_preview.setToolTip("")
+            self.output_dir.setToolTip(self.output_preview.text())
             return
         paths = default_output_paths(source, output)
-        lines = [f"{tr('Analysis JSON', language)}: {paths.result_json}"]
+        lines = [f"{tr('Analysis JSON', language)}: {paths.result_json.name}"]
         if self.output_mode.currentData() == "json_and_video":
-            lines.append(f"{tr('Redacted video', language)}: {paths.result_video}")
+            lines.append(f"{tr('Redacted video', language)}: {paths.result_video.name}")
         self.output_preview.setText("\n".join(lines))
+        self.output_preview.setToolTip(str(paths.result_json) + ("\n" + str(paths.result_video) if self.output_mode.currentData() == "json_and_video" else ""))
+        self.output_dir.setToolTip(self.output_preview.toolTip())
 
     def _set_summary_text(self, text: str) -> None:
         """Replace the summary and keep the newest lines in view."""
@@ -1616,6 +1894,14 @@ class PrivateFramePage(BasePage):
                         seconds=f"{total_seconds:.2f}"
                     )
                 )
+        if not render_video:
+            preference = gui_result.get("audio_preference", "aac")
+            lines.append(tr("Audio preference for later rendering: preserve AAC when available." if preference == "aac" else "Audio preference for later rendering: no audio.", language))
+        events = gui_result.get("reference_logs", self._reference_log_entries)
+        lines.extend(_reference_log_text(event, language) for event in events)
+        recognition = analysis.get("recognition", {})
+        if recognition.get("enabled") and not any(record.get("status") == "CONFIRMED" for record in recognition.get("tracks", {}).values()):
+            lines.append(tr("Video did not match any reference people.", language))
         self._set_summary_text("\n".join(lines))
 
     def retranslate_dynamic_content(self, language: str | None) -> None:
@@ -1632,20 +1918,29 @@ class PrivateFramePage(BasePage):
         self._update_output_preview(language=language)
         self._refresh_global_model_status(language)
         self._refresh_provider_display(language)
-        self._render_gallery_status(language)
+        self._render_reference_status(language)
+        self._update_policy_note(language)
+        self._update_audio_notice(language=language)
+        self._update_more_options_marker(language=language)
+        self._refresh_default_help(language)
+        self._fit_primary_options(self.width())
         self._render_stage(language)
         self._render_progress_format(language)
         if self._summary_state == "completed" and self._summary_result is not None:
             self._render_processing_summary(self._summary_result, language)
         elif self._summary_state == "cancelled":
-            self._set_summary_text(
+            lines = [_reference_log_text(event, language) for event in self._reference_log_entries]
+            lines.append(
                 tr(
                     "Processing cancelled. Partial work files may remain in the work directory.",
                     language,
                 )
             )
+            self._set_summary_text("\n".join(lines))
         elif self._summary_state == "error":
-            self._set_summary_text(tr(self._summary_error, language))
+            self._set_summary_text("\n".join([*(_reference_log_text(event, language) for event in self._reference_log_entries), (tr(self._summary_error, language).format(**self._summary_error_values) if self._summary_error_values else tr(self._summary_error, language))]))
+        elif self._reference_log_entries:
+            self._set_summary_text("\n".join(_reference_log_text(event, language) for event in self._reference_log_entries))
 
     def _output_mode_changed(self, *_args) -> None:
         self._update_output_option_controls()
@@ -1654,43 +1949,66 @@ class PrivateFramePage(BasePage):
     def _recognition_policy_changed(self, *_args) -> None:
         self._update_output_option_controls()
         self._refresh_global_model_status()
-        if (
-            self.recognition_policy.currentData() != "all"
-            and self.gallery_dir.text().strip()
-        ):
-            self._refresh_gallery_people()
+        if self.recognition_policy.currentData() != "all" and self.reference_dir.text().strip():
+            self._refresh_reference_photos()
+
+    def _update_policy_note(self, language: str | None = None) -> None:
+        source = {
+            "all": "All detected faces are blurred. Reference photos are not needed.",
+            "blur_only": "Only people matched to your photos are blurred. Unmatched faces stay clear; a missed match may leave a selected person visible.",
+            "exempt": "People confidently matched to your photos stay clear. Everyone else, including uncertain matches, is blurred.",
+        }[str(self.recognition_policy.currentData())]
+        self.selective_privacy_note.setProperty("_insightface_i18n_source", source)
+        language = language or self.context.config.ui_language
+        text = tr(source, language)
+        mode = str(self.recognition_policy.currentData())
+        unknown_action = self._base_value("recognition.unknown_action")
+        if mode != "all" and unknown_action != "auto":
+            fallback = resolve_unknown_action(mode, unknown_action)
+            # The main mode still describes confirmed matches; surface any
+            # configured exception to its usual unconfirmed-face behavior.
+            explanation = "Unconfirmed faces will be blurred, as set in the configuration." if fallback == "blur" else "Unconfirmed faces will stay clear, as set in the configuration."
+            if fallback != resolve_unknown_action(mode, "auto"):
+                text = tr(explanation, language)
+        self.selective_privacy_note.setText(text)
+        self.selective_privacy_note.setVisible(mode != "all")
+        self.recognition_policy.setToolTip(text)
+
+    def _update_audio_notice(self, *_args, language: str | None = None) -> None:
+        if not hasattr(self, "audio_notice"):
+            return
+        preview = self._video_preview_data
+        values = {}
+        if self.output_mode.currentData() == "json_only":
+            source = "Audio preference is saved for later video rendering."
+        elif not self.preserve_audio.isChecked():
+            source = "The output video will be silent."
+        elif preview is not None and preview.has_audio is False:
+            source = "This video has no audio track."
+        elif preview is not None and preview.audio_codec not in {None, "aac"}:
+            source = "Source audio is {codec}; this format cannot be preserved and the output video will be silent."
+            values["codec"] = preview.audio_codec
+        elif preview is not None and preview.audio_codec == "aac":
+            source = "AAC audio will be preserved."
+        else:
+            source = ""
+        self.audio_notice.setVisible(bool(source))
+        self.audio_notice.setText(tr(source, language or self.context.config.ui_language).format(**values))
 
     def _update_output_option_controls(self) -> None:
-        video_enabled = (
-            not self._running and self.output_mode.currentData() == "json_and_video"
-        )
-        self.preserve_audio.setEnabled(video_enabled)
-        options_enabled = not self._running
-        for widget in (
-            self.between_scan_frames,
-            self.box_scale,
-            self.video_preset,
-            self.video_crf,
-        ):
-            widget.setEnabled(options_enabled)
-        selective_enabled = (
-            options_enabled and self.recognition_policy.currentData() != "all"
-        )
-        for widget in (
-            self.gallery_dir,
-            self.browse_gallery_button,
-            self.target_persons,
-            self.recognition_profile,
-        ):
-            widget.setEnabled(selective_enabled)
-        for field in (
-            self.gallery_row,
-            self.target_persons,
-            self.gallery_status,
-            self.recognition_profile,
-        ):
-            self.more_options_form.setRowVisible(field, selective_enabled)
-        self.selective_privacy_note.setVisible(selective_enabled)
+        if not hasattr(self, "reference_panel") or not hasattr(self, "_group_defaults"):
+            return
+        enabled = not self._running
+        self.preserve_audio.setEnabled(enabled)
+        selective = self.recognition_policy.currentData() != "all"
+        self.reference_panel.setVisible(selective)
+        self.reference_panel.setEnabled(enabled)
+        for group, box in self.more_option_groups.items():
+            box.setEnabled(enabled)
+            box.setVisible(group != "matching" or selective)
+        self._update_policy_note()
+        self._update_audio_notice()
+        self._update_more_options_marker()
         if self.more_options_dialog.isVisible():
             self.more_options_dialog.adjustSize()
 
@@ -1747,12 +2065,14 @@ class PrivateFramePage(BasePage):
         self._summary_error = ""
         self._resolved_provider = ""
         self.summary.clear()
+        self._reference_log_entries = []
 
         def task(progress=None, is_cancelled=None):
             return run_privateframe_job(
                 job,
                 progress=progress,
                 is_cancelled=is_cancelled,
+                reference_log=self.reference_log_received.emit,
             )
 
         try:
@@ -1825,6 +2145,7 @@ class PrivateFramePage(BasePage):
         self.set_status("PrivateFrame processing completed.")
 
     def _processing_error(self, message: str) -> None:
+        message, error_values = _privateframe_error_parts(message)
         if self._cancel_requested or "cancel" in message.lower():
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
@@ -1833,12 +2154,14 @@ class PrivateFramePage(BasePage):
             self._summary_state = "cancelled"
             self._summary_result = None
             self._summary_error = ""
-            self._set_summary_text(
+            lines = [_reference_log_text(event, self.context.config.ui_language) for event in self._reference_log_entries]
+            lines.append(
                 tr(
                     "Processing cancelled. Partial work files may remain in the work directory.",
                     self.context.config.ui_language,
                 )
             )
+            self._set_summary_text("\n".join(lines))
             self.set_status("PrivateFrame processing was cancelled.")
             return
         self.progress_bar.setRange(0, 100)
@@ -1848,10 +2171,9 @@ class PrivateFramePage(BasePage):
         self._summary_state = "error"
         self._summary_result = None
         self._summary_error = message
-        self._set_summary_text(
-            tr(message, self.context.config.ui_language)
-        )
-        self.show_error(message)
+        self._summary_error_values = error_values
+        self._set_summary_text("\n".join([*(_reference_log_text(event, self.context.config.ui_language) for event in self._reference_log_entries), (tr(message, self.context.config.ui_language).format(**error_values) if error_values else tr(message, self.context.config.ui_language))]))
+        self.show_error(tr(message, self.context.config.ui_language).format(**error_values) if error_values else message)
 
     def _processing_finished(self) -> None:
         self._worker = None

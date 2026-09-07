@@ -85,7 +85,7 @@ def test_health_sends_auth_and_exposes_request_metadata() -> None:
         assert request.method == "GET"
         assert request.url == httpx.URL("http://server.test/v1/health")
         assert request.headers["authorization"] == "Bearer secret"
-        assert request.headers["user-agent"] == "insightface-server-python/0.2.0"
+        assert request.headers["user-agent"] == "insightface-server-python/0.3.0"
         return response(200, {"status": "ok"})
 
     with client_for(handler) as client:
@@ -676,3 +676,21 @@ def test_transport_and_invalid_success_response_are_safe() -> None:
             client.health()
     assert invalid_response.value.code == "invalid_response"
     assert invalid_response.value.request_id == "bad-json"
+
+
+@pytest.mark.parametrize("code,liveness", [
+    ("liveness_fake", {"status": "ok", "is_live": False, "live_score": 0.1}),
+    ("liveness_input_rejected", {"status": "input_rejected", "is_live": None, "live_score": None}),
+])
+def test_liveness_results_and_rejection_details_are_preserved(code, liveness) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/detect":
+            return response(200, {"faces": [{"liveness": liveness}], "processing_ms": 1.0})
+        return response(422, {"error": {"code": code, "message": "Liveness rejected", "details": {"side": "target", "liveness": liveness}}})
+
+    with client_for(handler) as client:
+        assert client.detect(b"image").faces[0]["liveness"] == liveness
+        with pytest.raises(ValidationError) as captured:
+            client.compare(b"source", b"target")
+    assert captured.value.code == code
+    assert captured.value.details == {"side": "target", "liveness": liveness}

@@ -8,7 +8,7 @@
 simple, SQLite et inférence locale CPU ou GPU NVIDIA dans un seul conteneur.**
 
 ```text
-téléverser une image -> détecter, comparer, inscrire ou rechercher
+téléverser une image -> détecter, effectuer un contrôle du vivant, comparer, inscrire ou rechercher
 ```
 
 > **Licence des modèles :** les modèles publics préentraînés InsightFace sont
@@ -21,16 +21,25 @@ images, embeddings, modèles et index peuvent rester dans votre réseau. Ce n’
 pas un remplacement compatible AWS et il n’implémente ni SigV4, IAM, Region, ni
 la sémantique des ressources AWS.
 
-Version actuelle : **0.2.0**, Linux x86_64.
+Version actuelle : **0.3.0**, Linux x86_64.
 
 | Environnement | Image |
 | --- | --- |
-| CPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cpu` |
-| GPU NVIDIA | `ghcr.io/deepinsight/insightface-server:0.2.0-cuda12` |
+| CPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cpu` |
+| GPU NVIDIA | `ghcr.io/deepinsight/insightface-server:0.3.0-cuda12` |
 
 Les tags mobiles `cpu` et `cuda12` désignent la dernière version stable de
 chaque famille. Aucun tag ambigu `latest` n’est fourni. Voir le
 [Maintainer Guide — English](docs/maintainer-guide.md) pour la politique.
+
+**Nouveautés et mise à niveau vers 0.3.0 :** Cette version ajoute `raccoon_s` et
+`raccoon_l` avec la prise en charge de leurs manifestes, la détection du vivant
+facultative avec installation du modèle depuis la Web UI, ainsi que les images
+BMP. Les déploiements existants peuvent conserver leurs montages de modèles,
+de configuration et de données ; la détection du vivant reste désactivée tant
+qu’elle n’est pas activée. Les résultats API et SDK ne contiennent plus
+`model_version`. Consultez les
+[étapes de mise à niveau](docs/user-guide.fr.md#mise-à-niveau-vers-030).
 
 ![Dashboard InsightFace Server en anglais](docs/images/customer/dashboard-en.jpg)
 
@@ -47,15 +56,17 @@ chaque famille. Aucun tag ambigu `latest` n’est fourni. Voir le
 - Recherche GPU exacte avec stockage vectoriel FP32, FP16, BF16 et INT8.
 - Web UI multilingue pour Dashboard, Collections, People, Detect, Compare,
   Search, surveillance RTSP, System et Help.
-- 29 opérations REST snake_case sous `/v1`, dont `/v1/embeddings` protégé, et
+- 31 opérations REST snake_case sous `/v1`, dont `/v1/embeddings` protégé, et
   un SDK Python léger et typé.
 - RTSP Monitors persistants côté serveur, événements bornés en mémoire,
   plusieurs clients et `preview.mjpeg` facultatif ; fermer le navigateur
   n’arrête pas la surveillance.
 - SQLite comme source durable, index exacts mémoire reconstruisibles,
-  `/models` en lecture seule, `/data` persistant, migrations, health checks et
+  modèles de base en lecture seule, répertoires addon et configuration accessibles en écriture, `/data` persistant, migrations, health checks et
   validation CUDA stricte sans fallback CPU silencieux.
-- Entrées JPEG, PNG et WebP ; les originaux ne sont pas conservés par défaut.
+- Entrées JPEG, PNG, WebP et BMP ; les originaux ne sont pas conservés par défaut.
+
+La détection du vivant est désactivée par défaut : `inference.addons = []` et `addons.auto_download = []` dans `server/config/server.toml`. **Système → Détection du vivant** télécharge et vérifie le modèle, puis enregistre l’activation pour le prochain redémarrage manuel ; un fichier vérifié est réutilisé. Aucun téléchargement au démarrage. Un modèle activé manquant arrête le démarrage avec des instructions d’installation. Chaque visage évalué renvoie uniquement `status`, `is_live` et `live_score`. Le mode par défaut est `normal` ; l’inscription ignore la détection par défaut (`liveness_on_registration = false`). Voir [configuration, permissions Web et mise à niveau](docs/user-guide.fr.md#addon-optionnel-de-détection-du-vivant).
 
 ### Performances de recherche GPU sur RTX 5090
 
@@ -256,7 +267,7 @@ conformité légale. L’exploitation et la sécurité sont dans le
 
 Sont exclus : compatibilité AWS/CompreFace, CUDA 11, Jetson, ARM64, Windows
 Container, TensorRT, Kubernetes, Workers distribués, événements Monitor
-persistants ou enregistrement/NVR, liveness, deepfake et attributs
+persistants ou enregistrement/NVR, deepfake et attributs
 démographiques.
 
 ## Documentation

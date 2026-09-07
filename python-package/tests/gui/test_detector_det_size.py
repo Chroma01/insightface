@@ -74,6 +74,7 @@ def test_face_analysis_prepare_defaults_to_auto_det_size():
     detector = FakeDetectionModel()
     app = FaceAnalysis.__new__(FaceAnalysis)
     app.models = {"detection": detector}
+    app.addons = {}
 
     app.prepare()
 

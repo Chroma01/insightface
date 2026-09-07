@@ -86,7 +86,7 @@ package_data = {
     "insightface.data.images": ["*.jpg", "*.jpeg", "*.png"],
     "insightface.data.objects": ["*.pkl"],
     "insightface.gui.assets": ["*.png", "*.ico", "*.icns"],
-    "insightface.app.privateframe": ["configs/*.yaml"],
+    "insightface.app.privateframe": ["configs/*.yaml", "docs/*.md"],
     "insightface.model_zoo": ["trusted_keys/*.pem"],
 }
 

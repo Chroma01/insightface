@@ -254,7 +254,7 @@ def test_openapi_has_typed_success_and_special_response_contracts(
             assert response_schema, f"{method} {route.path}"
             assert response_schema != {"type": "object"}, f"{method} {route.path}"
             json_operations += 1
-    assert json_operations == 23
+    assert json_operations == 25
 
     health_503 = schema["paths"]["/v1/health"]["get"]["responses"]["503"]
     assert health_503["content"]["application/json"]["schema"] == {

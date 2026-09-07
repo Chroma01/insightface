@@ -87,16 +87,21 @@ def write_jsonl(path: str | Path, values: Iterable[dict[str, Any]]) -> None:
 
 
 def git_version(root: str | Path) -> dict[str, Any]:
+    """Best-effort development metadata; installed runtimes need not have Git."""
     repository = Path(root)
 
     def run(*arguments: str) -> str | None:
-        result = subprocess.run(
-            ["git", *arguments],
-            cwd=repository,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["git", *arguments],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
         return result.stdout.strip() if result.returncode == 0 else None
 
     commit = run("rev-parse", "HEAD")

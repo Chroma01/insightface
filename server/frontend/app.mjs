@@ -1,6 +1,8 @@
-import { ApiClient, ApiError } from "./api.mjs?v=0.2.0-r14";
-import { initializeI18n, locale, t, translateTree } from "./i18n.mjs?v=0.2.0-r14";
-import { renderMarkdown } from "./markdown.mjs?v=0.2.0-r14";
+import { ApiClient, ApiError } from "./api.mjs?v=0.3.0-r1";
+import { initializeI18n, locale, setLocale, t, translateTree } from "./i18n.mjs?v=0.3.0-r1";
+import { documentationLink, renderMarkdown } from "./markdown.mjs?v=0.3.0-r1";
+import { renderRejectionList } from "./rejections.mjs?v=0.3.0-r1";
+import { createLivenessManager, livenessManagementView, livenessMessage, livenessRuntimeLabel } from "./liveness.mjs?v=0.3.0-r1";
 import {
   applySearchProfileAvailability,
   authenticationEnabledFromHealth,
@@ -14,7 +16,7 @@ import {
   parseExternalEmbeddings,
   parseMetadata,
   searchProfilesFromSystem,
-} from "./core.mjs?v=0.2.0-r14";
+} from "./core.mjs?v=0.3.0-r1";
 
 const client = new ApiClient(window.location.origin);
 const state = {
@@ -26,6 +28,7 @@ const state = {
   system: null,
   models: [],
   modelLicense: null,
+  livenessManagement: null,
   errors: [],
   serverErrors: [],
   monitors: [],
@@ -40,6 +43,7 @@ const state = {
   cropObjectUrls: new Set(),
   authEnabled: null,
   helpDocument: "user-guide",
+  helpPendingAnchor: null,
   helpLoadRevision: 0,
 };
 
@@ -63,6 +67,13 @@ const pageTitles = {
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const livenessManager = createLivenessManager({
+  client,
+  onChange(snapshot) {
+    state.livenessManagement = snapshot;
+    renderLivenessManagement();
+  },
+});
 
 function element(tag, { className = "", text = "", title = "" } = {}) {
   const node = document.createElement(tag);
@@ -161,7 +172,12 @@ function toast(title, message = "", kind = "success") {
 }
 
 function describeError(error) {
-  if (error instanceof ApiError) return `${error.code}: ${t(error.message)}`;
+  if (error instanceof ApiError && error.details?.liveness) {
+    const side = error.details.side === "source" ? t("Source face")
+      : error.details.side === "target" ? t("Target face") : "";
+    return [side, livenessText(error.details)].filter(Boolean).join(" · ");
+  }
+  if (error instanceof ApiError) return `${error.code}: ${livenessMessage(error.code, error.message, t)}`;
   return t(error?.message || "Unexpected error.");
 }
 
@@ -244,6 +260,7 @@ function applyAuthenticationMode(health) {
 function navigate(route) {
   if (!pageTitles[route]) return;
   if (state.route === "video" && route !== "video") stopMonitorView();
+  if (state.route === "system" && route !== "system") livenessManager.stop();
   state.route = route;
   $$("[data-page]").forEach((page) => { page.hidden = page.dataset.page !== route; });
   $$(".nav-item[data-route]").forEach((item) => {
@@ -274,14 +291,13 @@ async function refreshRoute(route = state.route) {
 }
 
 function documentationTarget(href) {
-  const value = String(href || "").trim();
-  if (/^(?:\.\/)?maintainer-guide\.md(?:#[A-Za-z0-9_.-]+)?$/.test(value)) {
-    return "maintainer";
-  }
-  const local = /^(?:\.\/)?(user-guide|api)(?:\.(?:zh-CN|ja|de|es|fr|ru|pt|ko))?\.md(?:#[A-Za-z0-9_.-]+)?$/.exec(value);
-  if (local) return local[1];
-  const bundled = /^\/guide-content\/(?:en|zh|ja|de|es|fr|ru|pt|ko)\/(user-guide|api|maintainer)\.md(?:#[A-Za-z0-9_.-]+)?$/.exec(value);
-  return bundled?.[1] ?? "";
+  return documentationLink(href, state.helpDocument, locale());
+}
+
+function scrollDocumentation(chapter, anchor) {
+  const heading = [...chapter.querySelectorAll("[data-anchor]")]
+    .find((node) => node.dataset.anchor === anchor);
+  (heading ?? chapter).scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function renderHelpDocumentSwitcher() {
@@ -310,10 +326,12 @@ function renderHelpDocumentSwitcher() {
   }
 }
 
-function embeddedDocumentationChapter(documentName, markdown) {
+function embeddedDocumentationChapter(documentName, markdown, documentLocale) {
   const chapter = document.createElement("section");
   chapter.className = "documentation-chapter";
   chapter.dataset.document = documentName;
+  chapter.setAttribute("translate", "no");
+  chapter.lang = documentLocale;
   chapter.innerHTML = renderMarkdown(markdown);
 
   const languageNavigation = chapter.querySelector("p");
@@ -326,21 +344,32 @@ function embeddedDocumentationChapter(documentName, markdown) {
   [...chapter.querySelectorAll("h1, h2, h3, h4, h5")].forEach((heading, index) => {
     const currentLevel = Number(heading.tagName.slice(1));
     const replacement = document.createElement(`h${Math.min(currentLevel + 1, 6)}`);
-    replacement.id = index === 0 ? `help-${documentName}` : `help-${documentName}-${index}`;
+    replacement.id = index === 0 ? `help-${documentName}` : `help-${documentName}-${heading.id}`;
+    replacement.dataset.anchor = heading.id;
     replacement.replaceChildren(...heading.childNodes);
     heading.replaceWith(replacement);
   });
   for (const link of chapter.querySelectorAll("a[href]")) {
-    const targetDocument = documentationTarget(link.getAttribute("href"));
-    if (!targetDocument) continue;
+    const target = documentationTarget(link.getAttribute("href"));
+    if (!target) continue;
     link.setAttribute("href", "#help");
     link.removeAttribute("target");
     link.removeAttribute("rel");
     link.addEventListener("click", (event) => {
       event.preventDefault();
-      state.helpDocument = targetDocument;
+      const currentDocumentLocale = state.helpDocument === "maintainer" ? "en" : locale();
+      if (state.helpDocument === target.document && currentDocumentLocale === target.locale) {
+        scrollDocumentation(chapter, target.anchor);
+        return;
+      }
+      state.helpDocument = target.document;
+      if (target.document !== "maintainer" && target.locale !== locale()) {
+        state.helpPendingAnchor = target.anchor;
+        setLocale(target.locale);
+        return;
+      }
       renderHelpDocumentSwitcher();
-      void loadDocumentation();
+      void loadDocumentation(target.anchor);
     });
   }
   return chapter;
@@ -361,6 +390,8 @@ function renderDocumentationToc(chapters) {
   navigation.replaceChildren();
   for (const chapter of chapters) {
     const group = element("div", { className: "documentation-toc-group" });
+    group.setAttribute("translate", "no");
+    group.lang = chapter.lang;
     for (const heading of chapter.querySelectorAll("h2, h3, h4")) {
       const button = document.createElement("button");
       button.type = "button";
@@ -376,7 +407,7 @@ function renderDocumentationToc(chapters) {
   filterDocumentationToc();
 }
 
-async function loadDocumentation() {
+async function loadDocumentation(anchor = null) {
   const revision = ++state.helpLoadRevision;
   const documentDefinition = helpDocuments.find(({ name }) => name === state.helpDocument)
     ?? helpDocuments[0];
@@ -393,14 +424,16 @@ async function loadDocumentation() {
     const documentLocale = documentDefinition.localized ? locale() : "en";
     const response = await fetch(`/guide-content/${documentLocale}/${documentDefinition.name}.md`, {
       headers: { Accept: "text/markdown" },
+      cache: "no-store",
     });
     if (!response.ok) throw new Error(`${documentDefinition.name}: HTTP ${response.status}`);
     const markdown = await response.text();
     if (revision !== state.helpLoadRevision) return;
-    const chapter = embeddedDocumentationChapter(documentDefinition.name, markdown);
+    const chapter = embeddedDocumentationChapter(documentDefinition.name, markdown, documentLocale);
     root.replaceChildren(chapter);
     root.setAttribute("aria-busy", "false");
     renderDocumentationToc([chapter]);
+    if (anchor !== null) scrollDocumentation(chapter, anchor);
   } catch (error) {
     if (revision !== state.helpLoadRevision) return;
     root.setAttribute("aria-busy", "false");
@@ -491,7 +524,10 @@ async function loadDashboard() {
   setText("#metric-people", String(personCount));
   setText("#metric-faces", String(faceCount));
   setText("#metric-model", firstValue(model.model_id, model.id, readAny(system, "model.model_id"), "Not loaded"));
-  setText("#metric-model-version", firstValue(model.model_version, model.version, readAny(system, "model.model_version"), "—"));
+  const livenessIndicator = $("#metric-model-liveness");
+  const livenessEnabled = systemResult.status === "fulfilled"
+    ? system.safe_config?.addons?.includes("liveness") === true : null;
+  livenessIndicator.textContent = t(livenessRuntimeLabel(livenessEnabled));
 
   const status = $("#dashboard-status");
   status.replaceChildren(
@@ -562,7 +598,7 @@ function renderCollections() {
     const crops = document.createElement("td");
     crops.append(element("span", { className: "badge", text: collection.save_face_crops ? "On" : "Off" }));
     const model = document.createElement("td");
-    model.append(element("span", { className: "table-title", text: firstValue(collection.model_id, "—") }), element("span", { className: "table-subtitle", text: `v${firstValue(collection.model_version, "—")}` }));
+    model.append(element("span", { className: "table-title", text: firstValue(collection.model_id, "—") }));
     const people = element("td", { text: String(collection.person_count ?? 0) });
     const faces = element("td", { text: String(collection.face_count ?? 0) });
     const actions = element("td", { className: "table-actions" });
@@ -680,20 +716,7 @@ async function selectPerson(person) {
 }
 
 function renderRejections(target, rejected, files = []) {
-  const items = rejected ?? [];
-  target.replaceChildren();
-  target.hidden = items.length === 0;
-  if (!items.length) return;
-  target.append(element("strong", { text: t(items.length === 1 ? "{count} image was rejected" : "{count} images were rejected", { count: items.length }) }));
-  items.forEach((item, index) => {
-    const row = element("div", { className: "rejection-item" });
-    const file = files[Number(item.index)];
-    row.append(
-      element("span", { text: item.filename || item.file_name || file?.name || t("Image {index}", { index: index + 1 }) }),
-      element("strong", { text: item.reason || item.code || "rejected" }),
-    );
-    target.append(row);
-  });
+  renderRejectionList(target, rejected, files, { element, t, livenessText });
 }
 
 async function renderPersonDetail() {
@@ -720,7 +743,7 @@ async function renderPersonDetail() {
       </form>
       <div class="person-summary"><p class="eyebrow">METADATA</p><pre class="person-metadata"></pre></div>
       <div><div class="panel-heading"><div><p class="eyebrow">FACE SAMPLES</p><h3 class="faces-heading">Registered faces</h3></div></div>
-        <form class="add-faces-form"><label class="drop-zone compact-drop"><input name="images" type="file" accept="image/jpeg,image/png,image/webp" multiple required><strong>Add registration photos</strong><span>JPEG, PNG, or WebP</span><span class="file-summary">No files selected</span></label><div class="form-grid two"><label><span class="field-caption">Enrollment review</span><select name="review_mode"><option value="off" selected>Off · collection selection</option><option value="standard">Standard quality</option><option value="strict">Strict identity</option></select></label><label><span class="field-caption">Embedding source</span><select name="embedding_mode"><option value="server" selected>Extract from image</option><option value="external_trusted">Trusted external feature</option></select></label></div><p class="hint">Off uses the Collection single-face selection strategy; standard and strict require exactly one.</p><p class="hint embedding-contract-summary">Collection embedding contract: <code class="embedding-contract"></code></p><div class="external-embedding-fields" hidden><p class="hint">The server trusts the image/vector pairing and does not re-extract the feature.</p><label>External embeddings (JSON, one vector per image)<textarea name="external_embeddings" rows="5" spellcheck="false" placeholder="[[0.0123, -0.0456, ...]]"></textarea></label></div><div class="form-actions"><button class="button secondary small" type="submit">Add face samples</button><span class="form-status" role="status"></span></div></form>
+        <form class="add-faces-form"><label class="drop-zone compact-drop"><input name="images" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,.bmp" multiple required><strong>Add registration photos</strong><span>JPEG, PNG, WebP, or BMP</span><span class="file-summary">No files selected</span></label><div class="form-grid two"><label><span class="field-caption">Enrollment review</span><select name="review_mode"><option value="off" selected>Off · collection selection</option><option value="standard">Standard quality</option><option value="strict">Strict identity</option></select></label><label><span class="field-caption">Embedding source</span><select name="embedding_mode"><option value="server" selected>Extract from image</option><option value="external_trusted">Trusted external feature</option></select></label></div><p class="hint">Off uses the Collection single-face selection strategy; standard and strict require exactly one.</p><p class="hint embedding-contract-summary">Collection embedding contract: <code class="embedding-contract"></code></p><div class="external-embedding-fields" hidden><p class="hint">The server trusts the image/vector pairing and does not re-extract the feature.</p><label>External embeddings (JSON, one vector per image)<textarea name="external_embeddings" rows="5" spellcheck="false" placeholder="[[0.0123, -0.0456, ...]]"></textarea></label></div><div class="form-actions"><button class="button secondary small" type="submit">Add face samples</button><span class="form-status" role="status"></span></div></form>
         <div class="rejection-list face-rejections" hidden></div><div class="face-sample-grid"></div>
       </div>
     </div>`;
@@ -772,6 +795,7 @@ function renderFaceSamples(faces) {
       statusRow("Stored crop", face.has_crop ? "Available" : "Not saved"),
       statusRow("Created", formatTimestamp(face.created_at)),
     );
+    if (face.liveness) details.append(statusRow("Liveness", livenessText(face)));
     const crop = document.createElement("img");
     crop.alt = t("Saved crop for face sample {id}", { id: face.id });
     crop.hidden = true;
@@ -975,6 +999,13 @@ function resultFaces(payload) {
   return listItems(payload, ["faces", "detections"]);
 }
 
+function livenessText(face) {
+  const result = face?.liveness;
+  if (!result) return "";
+  if (result.status === "input_rejected") return t("Liveness input rejected");
+  return `${t(result.is_live === true ? "Liveness passed" : "Liveness failed")} · ${formatScore(result.live_score)}`;
+}
+
 function renderFaceResults(target, faces) {
   target.replaceChildren();
   faces.forEach((face, index) => {
@@ -986,6 +1017,7 @@ function renderFaceResults(target, faces) {
       element("span", { text: t("Quality {score}", { score: formatScore(quality.score) }) }),
       element("span", { text: t("Sharpness {score}", { score: formatScore(quality.sharpness) }) }),
     );
+    if (face.liveness) details.append(element("span", { text: livenessText(face) }));
     row.append(element("span", { className: "face-index", text: String(index + 1) }), details, element("strong", { text: t("Brightness {score}", { score: formatScore(quality.brightness) }) }));
     target.append(row);
   });
@@ -996,6 +1028,9 @@ async function submitDetect(event) {
   const form = event.currentTarget;
   const button = $("button[type=submit]", form);
   const file = form.elements.image.files[0];
+  $("#detect-results").replaceChildren();
+  $("#detect-summary").textContent = "";
+  await renderImageFaces(file, $("#detect-canvas"));
   const payload = await guarded(button, () => client.detect(file, { maxFaces: form.elements.max_faces.value, collectionId: form.elements.collection.value }), "Detection failed", "Detecting…");
   if (payload === undefined) return;
   const faces = resultFaces(payload);
@@ -1014,8 +1049,16 @@ async function submitCompare(event) {
   const source = form.elements.source.files[0];
   const target = form.elements.target.files[0];
   const threshold = form.elements.threshold.value;
+  resetCompareVerdict();
+  await Promise.all([
+    renderImageFaces(source, $("#compare-source-canvas")),
+    renderImageFaces(target, $("#compare-target-canvas")),
+  ]);
   const payload = await guarded(button, () => client.compare(source, target, { threshold, collectionId: form.elements.collection.value }), "Comparison failed", "Comparing…");
-  if (payload === undefined) return;
+  if (payload === undefined) {
+    $("#compare-verdict strong").textContent = t("Comparison not performed");
+    return;
+  }
   await Promise.all([
     renderImageFaces(source, $("#compare-source-canvas"), [payload.source_face].filter(Boolean)),
     renderImageFaces(target, $("#compare-target-canvas"), [payload.target_face].filter(Boolean)),
@@ -1029,6 +1072,8 @@ async function submitCompare(event) {
     threshold: formatCosine(payload.threshold),
     duration: formatDuration(payload.processing_ms),
   });
+  const liveness = [livenessText(payload.source_face), livenessText(payload.target_face)].filter(Boolean);
+  if (liveness.length) $("small", verdict).textContent += ` · ${liveness.join(" / ")}`;
 }
 
 function renderMatches(target, matches) {
@@ -1058,22 +1103,30 @@ async function submitSearch(event) {
   const form = event.currentTarget;
   const button = $("button[type=submit]", form);
   const file = form.elements.image.files[0];
+  $("#search-results").replaceChildren();
+  $("#search-summary").textContent = "";
+  await renderImageFaces(file, $("#search-canvas"));
   const payload = await guarded(button, () => client.search(form.elements.collection.value, file, {
     limit: form.elements.limit.value,
     threshold: form.elements.threshold.value,
   }), "Search failed", "Searching…");
-  if (payload === undefined) return;
+  if (payload === undefined) {
+    $("#search-summary").textContent = t("Search not performed");
+    return;
+  }
   const searchedFace = payload.searched_face;
   await renderImageFaces(file, $("#search-canvas"), [searchedFace].filter(Boolean), { labels: [t("Search face")] });
   const matches = listItems(payload, ["matches"]);
   renderMatches($("#search-results"), matches);
-  $("#search-summary").textContent = t(
+  const summary = t(
     matches.length === 1 ? "{count} match · threshold {threshold} · {duration}" : "{count} matches · threshold {threshold} · {duration}",
     { count: matches.length, threshold: formatCosine(payload.threshold), duration: formatDuration(payload.processing_ms) },
   );
+  $("#search-summary").textContent = [summary, livenessText(searchedFace)].filter(Boolean).join(" · ");
 }
 
 async function loadSystem() {
+  const livenessRequest = livenessManager.start();
   const button = $("#system-refresh");
   const result = await guarded(button, async () => {
     const [systemPayload, modelsPayload] = await Promise.all([
@@ -1082,16 +1135,48 @@ async function loadSystem() {
     ]);
     return {
       system: unwrap(systemPayload, "system"),
-      models: listItems(modelsPayload, ["models"]),
+      models: [...listItems(modelsPayload, ["models"]), ...(modelsPayload?.addons ?? [])],
       license: modelsPayload?.license ?? readAny(systemPayload, "model.license") ?? null,
     };
   }, "Could not load system diagnostics", "Refreshing…");
+  await livenessRequest;
   if (!result) return;
   state.system = result.system;
   state.models = result.models;
   state.modelLicense = result.license;
   updateCreateCollectionProfiles();
   renderSystem();
+}
+
+function renderLivenessManagement() {
+  const snapshot = state.livenessManagement ?? {};
+  const view = livenessManagementView(snapshot);
+  setText("#system-liveness-runtime", t(view.runtimeLabel));
+  $("#system-liveness-details").replaceChildren(
+    statusRow("Model file", view.installedLabel),
+    statusRow("After restart", view.afterRestartLabel),
+    ...(view.error || view.unavailableReason ? [
+      statusRow("Model path", snapshot.status?.model_path ?? "—"),
+      statusRow("Startup config", snapshot.status?.config_file ?? "built-in defaults"),
+    ] : []),
+  );
+  const notice = $("#system-liveness-notice");
+  notice.textContent = t(view.notice);
+  notice.hidden = !view.notice;
+  const error = $("#system-liveness-error");
+  error.textContent = view.error ? `${view.error.code || "request_failed"}: ${livenessMessage(view.error.code, view.error.message, t)}` : "";
+  error.hidden = !view.error;
+  const refresh = $("#system-liveness-refresh");
+  refresh.hidden = !snapshot.error;
+  refresh.disabled = Boolean(snapshot.loading);
+  const action = $("#system-liveness-enable");
+  action.textContent = t(view.actionLabel);
+  action.hidden = !view.showAction;
+  action.disabled = view.actionDisabled;
+  const manual = $("#system-liveness-manual");
+  manual.hidden = !view.unavailableReason;
+  setText("#system-liveness-unavailable", view.unavailableReason
+    ? livenessMessage(view.unavailableCode, view.unavailableReason, t) : "");
 }
 
 function renderSystem() {
@@ -1129,6 +1214,15 @@ function renderSystem() {
     statusRow("Detection threshold", firstValue(system.safe_config?.detection?.threshold, "—")),
     statusRow("Detector NMS threshold", firstValue(system.safe_config?.detection?.nms_threshold, "—")),
     statusRow("Single-face selection", firstValue(system.safe_config?.detection?.single_face_selection, "—")),
+    statusRow("Liveness", system.safe_config?.addons?.includes("liveness") ? "enabled" : "disabled"),
+    ...(system.safe_config?.addons?.includes("liveness") ? [
+      statusRow("Liveness mode", ({ normal: "normal · require liveness", observe: "observe · continue recognition" })[system.safe_config.liveness_mode]
+        ?? system.safe_config.liveness_mode),
+      statusRow("Liveness threshold", system.safe_config.liveness_threshold),
+      statusRow("Compare liveness scope", ({ both: "Both faces", source: "Source face", target: "Target face" })[system.safe_config.liveness_compare_scope]
+        ?? system.safe_config.liveness_compare_scope),
+      statusRow("Liveness on registration", system.safe_config.liveness_on_registration ? "enabled" : "disabled"),
+    ] : []),
     statusRow("Startup config", firstValue(system.safe_config?.config_file, "built-in defaults")),
   );
   const databaseStatus = firstValue(readAny(system, "database.quick_check"), readAny(system, "database.status"), system.database_status, "unknown");
@@ -1164,7 +1258,6 @@ function renderSystem() {
     const details = document.createElement("dl");
     details.append(
       statusRow("Task", firstValue(model.task, "—")),
-      statusRow("Version", firstValue(model.model_version, model.version, "—")),
       statusRow("Digest", firstValue(model.sha256, model.model_digest, "—")),
       statusRow("Input", Array.isArray(model.input_size) ? model.input_size.join(" × ") : "—"),
       statusRow("Embedding", firstValue(model.embedding_dimension, "—")),
@@ -1355,11 +1448,12 @@ function renderVideoMatches(recognitions = []) {
     } else {
       const score = formatScore(result?.face?.detection_score);
       summary.append(
-        element("strong", { text: t("Detected, not enrolled") }),
+        element("strong", { text: result?.status === "liveness_blocked" ? t("Liveness blocked recognition") : t("Detected, not enrolled") }),
         element("small", { text: t("Detection score {score}", { score }) }),
       );
       row.append(number, summary, element("strong", { text: "—" }));
     }
+    if (result?.face?.liveness) summary.append(element("small", { text: livenessText(result.face) }));
     target.append(row);
   });
 }
@@ -1394,11 +1488,13 @@ function drawMonitorOverlay(stream) {
     const boxWidth = Number(box.width) * renderedWidth;
     const boxHeight = Number(box.height) * renderedHeight;
     const recognized = result.status === "matched";
-    const color = recognized ? "#57d368" : "#ff9e20";
+    const blocked = result.status === "liveness_blocked";
+    const color = blocked ? "#f87171" : recognized ? "#57d368" : "#ff9e20";
     const identity = videoIdentity(result);
-    const label = recognized
+    const baseLabel = recognized
       ? `${identity.name || identity.id} ${formatCosine(identity.similarity)}`
-      : t("Not enrolled");
+      : blocked ? t("Liveness blocked recognition") : t("Not enrolled");
+    const label = [baseLabel, livenessText(result.face)].filter(Boolean).join(" · ");
     context.strokeStyle = color;
     context.strokeRect(x, y, boxWidth, boxHeight);
     const labelWidth = context.measureText(label).width + 12;
@@ -1448,6 +1544,9 @@ function renderVideoStatus(stream) {
       unknown: Number(stream?.unknown_faces ?? 0),
       timing,
     });
+    if (stream?.liveness_blocked_faces) {
+      $("#video-status").textContent += ` · ${t("Liveness blocked {count}", { count: stream.liveness_blocked_faces })}`;
+    }
   }
   if (monitor?.preview_enabled && connected) startMonitorPreview(monitor.id);
   else stopMonitorPreview();
@@ -1861,12 +1960,15 @@ function bindEvents() {
   $("#compare-threshold").addEventListener("input", (event) => { $("#compare-threshold-output").value = Number(event.target.value).toFixed(2); });
 
   $("#system-refresh").addEventListener("click", () => void loadSystem());
+  $("#system-liveness-enable").addEventListener("click", () => void livenessManager.enable());
+  $("#system-liveness-refresh").addEventListener("click", () => void livenessManager.refresh());
   $("#documentation-filter").addEventListener("input", filterDocumentationToc);
   window.addEventListener("insightface:localechange", () => {
     updateAuthState();
     renderRecentErrors();
     if (state.route === "collections") renderCollections();
     if (state.route === "people") renderPeople();
+    if (state.route === "system") renderLivenessManagement();
     if (state.route === "video") {
       renderMonitorList();
       renderSelectedMonitor();
@@ -1876,7 +1978,11 @@ function bindEvents() {
     }
     setText("#page-title", t(pageTitles[state.route]));
     document.title = `${t(pageTitles[state.route])} · InsightFace Server`;
-    if (state.route === "help") void loadDocumentation();
+    if (state.route === "help") {
+      const anchor = state.helpPendingAnchor;
+      state.helpPendingAnchor = null;
+      void loadDocumentation(anchor);
+    }
   });
   $("#show-create-monitor").addEventListener("click", openCreateMonitorForm);
   $("#monitor-create-form .close-form").addEventListener("click", closeMonitorForm);

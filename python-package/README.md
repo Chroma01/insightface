@@ -23,6 +23,16 @@ The base package installs `onnxruntime`. The `privateframe` extra additionally
 installs PyAV and PyYAML; the `gui` extra includes those dependencies plus the
 Qt desktop application.
 
+InsightFace sets `ORT_DISABLE_TELEMETRY=1` before importing ONNX Runtime; no
+shell configuration is required. This also overrides an existing value of
+`0`. On runtimes that support this switch, it prevents the non-Windows
+telemetry uploader from starting. Older runtimes that do not recognize the
+variable ignore it, so it does not introduce a newer ONNX Runtime requirement.
+Import InsightFace before importing ONNX Runtime elsewhere in your process:
+the switch cannot undo telemetry initialization that has already happened.
+See [ONNX Runtime's telemetry documentation](https://github.com/microsoft/onnxruntime/blob/v1.29.0/docs/Privacy.md#disabling-telemetry)
+for platform-specific behavior.
+
 ### Automatic Provider selection
 
 When callers do not pass an explicit Provider list, InsightFace inspects the
@@ -102,7 +112,7 @@ video_privateframe.mp4
 The result JSON is a compact, portable rendering document. It stores the source
 file name and video geometry, final per-frame face boxes, optional identity
 decisions, and effective rendering defaults. It does not store absolute source
-paths, content hashes, model fingerprints, Git state, or internal tracking
+paths, source-video content hashes, model fingerprints, Git state, or internal tracking
 evidence. When rendering it again, PrivateFrame checks the input dimensions,
 frame rate, and decoded frame count rather than hashing the video contents.
 
@@ -141,17 +151,108 @@ only the changed fields:
 ```yaml
 schema_version: 1
 scan:
-  max_analysis_fps: 15
+  max_analysis_fps: 15  # Lower the default 30 for faster processing.
 ```
 
 An explicit `base_config` field remains available when the custom YAML must
 inherit a different complete parent configuration. CLI dotted options are
 applied last, after the Base and custom YAML layers.
 
-The GUI offers **Normal (up to 30 FPS)** by default and **Fast (up to 15 FPS)**
-for constrained devices. The equivalent CLI override is
-`--scan.max_analysis_fps 15`. PrivateFrame derives a uniform integer sampling
-stride for each video; sampled analysis trades some assurance for speed.
+### Choosing who to blur with reference photos
+
+The default `recognition.mode: all` blurs every detected face and needs no
+reference photos. To select particular people, put their photos together in
+one folder and supply `recognition.reference_dir`. No person names or per-person
+subfolders are needed; different people and multiple photos of the same person
+can share the folder. Reference-photo selection is available in the GUI, CLI,
+and Python API.
+
+| Mode | People matched to the reference photos | Unmatched or uncertain people with the default `unknown_action: auto` |
+|---|---|---|
+| `all` | Blurred; photos are not read | Blurred |
+| `blur_only` | Blurred | Kept visible |
+| `exempt` | Kept visible | Blurred |
+
+```bash
+# Blur only the people shown in reference photos.
+insightface-privateframe process \
+  --input /data/video.mp4 --output-dir /data/output \
+  --recognition.mode blur_only \
+  --recognition.reference_dir /data/reference_photos
+
+# Keep people shown in reference photos visible; blur everyone else.
+insightface-privateframe process \
+  --input /data/video.mp4 --output-dir /data/output \
+  --recognition.mode exempt \
+  --recognition.reference_dir /data/reference_photos
+```
+
+JPG, JPEG, PNG, and WebP files directly inside the reference folder are imported;
+hidden files and symlinks are skipped, and identical copies are deduplicated.
+Different photos of the same person remain valid references. Each photo
+contributes **only its largest detected face**, so clear single-person photos
+are recommended. For group photos, a log message states how many faces were
+found and that only the largest was selected. If that face is unsuitable for
+recognition, the photo is skipped with a reason; the importer does not switch to
+a smaller face. An import summary reports used and skipped photo counts, not
+the number of different people. These messages go to standard error; with
+`--progress jsonl`, application progress and reference-photo diagnostics are
+JSONL records. Third-party runtime diagnostics may still be plain text on
+standard error; standard output remains one final status JSON object.
+
+Both photo modes fail before video analysis if no reference photo supplies a
+usable face. Valid references with no matching person in the video are a normal
+completed result. Model loading and inference errors stop processing instead of
+being treated as unmatched people. `--dry-run` checks configuration and file
+readiness without running face detection; photo suitability is checked during
+execution.
+
+Keep `recognition.unknown_action: auto` to follow the table. Set it explicitly
+to `blur` or `keep` only when a different treatment of unmatched or uncertain
+people is intended; `all` always blurs every detected face. **With `keep`,
+including the default `blur_only` behavior, a target person who is not recognized
+can remain visible.** The effective policy and matching decisions are stored in
+the result JSON, so a later `render` uses the same treatment without rereading
+the reference photos or rerunning recognition.
+
+### Analysis sampling rate
+
+`scan.max_analysis_fps` defaults to **30** in the packaged configuration and
+the GUI. It sets an approximate ceiling on how many input frames receive
+regular full-frame face detection per second **of video time**. Actual
+processing speed depends on the hardware, scene, and rendering cost. The
+result video retains every source frame and its original frame rate.
+
+The runtime samples at a uniform integer interval with a 5% rate tolerance:
+
+| Source video FPS | Default 30: regular scans per video second | Lowered to 15: regular scans per video second |
+|---|---|---|
+| 25 | 25 (every frame) | 12.5 (every 2 frames) |
+| 30 | 30 (every frame) | 15 (every 2 frames) |
+| 60 | 30 (every 2 frames) | 15 (every 4 frames) |
+| 15 or below | Same as source FPS (every frame) | Same as source FPS (every frame) |
+
+This is a soft ceiling: scene changes, video endpoints, and newly discovered
+tracks can trigger additional scans. Frames between regular scans are still
+decoded and rendered. By default, existing face tracks use interpolated
+regions between detection frames; a face visible only in that gap may be
+missed.
+
+- **Lower to 15** when faster processing and less detector work take priority,
+  especially in scenes with limited motion. A lower value such as 10 can reduce
+  sampling further. Wider gaps increase the risk of missing briefly visible faces;
+  review representative output before using a lower rate broadly.
+- **Keep 30** for fast motion, brief face appearances, frequent occlusion, or
+  a need for greater detection coverage.
+- **Raise toward the source video's FPS** on higher-FPS input when more temporal
+  detail matters. Setting it to the source FPS scans every frame. More sampling
+  costs more compute and still cannot guarantee every face is found.
+
+Use `--scan.max_analysis_fps 15` to lower the default, or set the same field
+in custom YAML. Positive fractional values are also accepted. Nearby values
+may produce the same sampling interval, so performance does not change
+continuously with this number. The GUI initially selects **Normal (target 30
+analysis FPS)** and also offers **Fast (target 15 analysis FPS)**.
 
 ### CLI automation contract
 
@@ -163,6 +264,16 @@ run `insightface-privateframe describe` and read these high-level fields first:
   tool detects and tracks face regions and renders Gaussian blur or mosaic.
 - `discovery` maps common user intentions to the correct command and gives a
   safe dry-run/execution policy.
+- `config.groups` organizes 30 common and intermediate controls for models,
+  analysis, privacy policy, redaction, video, and audio. Their
+  `config.dotted_options` entries contain types, defaults, constraints,
+  `description`, `when_to_use`, and `tradeoff` guidance.
+- `config.full_reference.path` locates the complete Markdown configuration
+  reference installed with the package. Read it for advanced settings; options
+  omitted from self-description still work in YAML and CLI overrides.
+- `config.dotted_options["scan.max_analysis_fps"]` provides the sampling
+  default, units, behavior, and `tuning_guidance` for choosing a higher or lower
+  rate. Automation should read this before changing the analysis rate.
 - `primary_io` distinguishes file artifacts from the final status JSON on
   stdout.
 - `recommended_workflows` supplies executable argument templates for immediate
@@ -193,6 +304,10 @@ recognition, sampling, cache, model, and backend diagnostics are not written to
 standard output; development runs can retain them in the separate developer
 report.
 
+`timings.total_seconds` measures the reported analysis/render stages. It excludes
+process startup, argument handling, and shutdown; measure the subprocess wall
+time separately when comparing end-to-end processing speed.
+
 Failures use the same standard-output channel and include a structured `error`
 with `code`, `stage`, `type`, `message`, `retryable`, and `hints`. Standard error
 is reserved for diagnostics and progress, so redirecting it never corrupts the
@@ -208,16 +323,43 @@ insightface-privateframe describe
 insightface-privateframe doctor
 ```
 
-`describe` returns the public commands, configuration schema and defaults,
-artifact contract, status-output rules, exit codes, and examples. It omits
-internal debug controls. `doctor` reports readiness checks for the runtime,
-models, media support, output location, and safety settings.
+`describe` returns commands and workflows, common/intermediate configuration,
+artifact contracts, status-output rules, exit codes, and examples. Full
+configuration is documented in the bundled
+[configuration reference](insightface/app/privateframe/docs/configuration.md),
+including advanced tracking and detector tuning. `doctor` reports readiness
+checks for the runtime, models, media support, output location, and safety settings.
+
+Self-description uses **`contract_schema_version: 2`**.
+`config.dotted_options` contains the selected 30 fields, their defaults appear
+in each field specification, and `config.groups` organizes them by purpose.
+Full configuration is available at `config.full_reference.path`; read it when
+an unlisted option is needed. The execution status uses
+**`status_schema_version: 1`**. The default analysis FPS is **30**.
+Video output defaults to **libx264, CRF 23, and the medium preset**, balancing
+quality and file size for sharing. Use CRF 18 to retain more detail or CRF 28
+for smaller files. Encoding quality does not change face detection or matching.
+
+The reference is generated from the complete configuration catalog and checked
+for drift in tests. After changing configuration defaults or documentation,
+maintainers regenerate and verify it with:
+
+```bash
+python -m insightface.app.privateframe.config_reference
+python -m insightface.app.privateframe.config_reference --check
+```
 
 Every execution command accepts `--progress auto|text|jsonl|none`. `auto` uses
-human-readable progress only on an interactive terminal; `jsonl` writes one
-compact progress event per line to standard error; `none` is useful for quiet
-automation. In every mode, standard output remains the single final JSON
-object.
+human-readable progress on an interactive terminal and JSONL otherwise.
+`jsonl` writes each application progress event or reference-photo diagnostic as
+one compact JSONL record to standard error. Reference-photo diagnostics have
+`log_schema_version: 1`, `event: "log"`,
+`level`, `stage: "recognition"`, and `message`; callers should distinguish them
+from progress records. Third-party runtime diagnostics may still be plain text
+on standard error, so the entire stream is not guaranteed to be JSONL.
+`none` suppresses progress but retains reference-photo
+diagnostics as text on standard error. In every mode, standard output remains
+the single final JSON object.
 
 Use `--dry-run` to resolve and validate the configuration, input, work
 directory, output artifacts, and dotted overrides without model inference or
@@ -285,11 +427,33 @@ PrivateFrame model selector. Processing is enabled for `raccoon_s` and
 `raccoon_l`; a missing package may download into the configured root on first
 use, while an invalid installed V2 package is rejected before the job starts.
 Its output mode can stop after analysis or immediately render the paired
-`_privateframe.mp4`, without blocking the GUI. The main page displays the
-global model/root status and exposes performance, privacy policy, redaction,
-and output mode; **More Options** adds
-advanced processing, face coverage, Medium-default encoding, quality,
-audio, and selective-recognition Gallery controls. Face Recognition
+`_privateframe.mp4`, without blocking the GUI. The main page exposes
+analysis frequency, which people to blur,
+the redaction style, and whether to preserve supported audio. Video preview
+and metadata share the input card, followed by a full-width output directory.
+Start/cancel actions and progress remain below the settings area. **Processing
+details** opens the live run log and output filenames in a separate, non-modal
+window, so an empty log does not take space from the settings. Output paths
+are also available in the output directory's tooltip. The two photo
+modes show a reference-photo folder directly below the policy: no person names
+or per-person folders are needed, and only the largest face in each photo is
+used. The folder's tooltip explains supported photos. Reference selection and
+skipped-photo reasons appear in the run log. **More Options** shows the global
+model/provider information and groups controls into redaction appearance (coverage and
+between-scan tracking), video output (quality, encoding speed, and whether to
+render a video), and person matching (sampling profile and base similarity
+threshold). Model problems that prevent processing still appear on the main
+page. Person matching is shown only for photo modes, with a default
+threshold of 0.40. Unconfirmed faces follow the configured `unknown_action`;
+its default `auto` follows the selected photo policy. There is no separate GUI
+override for it. Initial processing values and each group's
+reset values are read from the packaged `configs/base.yaml` when the page is
+created, without loading models. GUI presets are shortcuts; a configured value
+outside those shortcuts is shown as the configured value instead of being
+replaced. Non-CRF rate
+control is inherited unless the user explicitly chooses a CRF quality setting.
+Global model/root/provider selections remain the GUI's explicit overrides.
+The More Options button indicates modified settings. Face Recognition
 is a single **Query & Gallery** workspace: upload
 one query image and one gallery image for 1:1 compare, or upload multiple
 gallery images / a folder for 1:N gallery search. Album Management uses a
@@ -449,12 +613,94 @@ On CoreML, SCRFD uses a fixed 640x640 main Session by default and lazily
 creates one reusable fixed Session for each additional detection resolution.
 Compiled CoreML artifacts are isolated by model and input signature under
 ``~/.insightface/cache/coreml/v1``. A new signature is warmed up once after
-compilation; later cache hits skip that warmup. The public ``FaceAnalysis`` and
-``model_zoo.get_model()`` call signatures are unchanged.
+compilation; later cache hits skip that warmup. These cache controls are internal
+and do not require additional arguments to ``FaceAnalysis`` or
+``model_zoo.get_model()``.
 
 This quick example will detect faces from the ``t1.jpg`` image and draw detection results on it.
 
 
+
+## Optional liveness addon
+
+FaceAnalysis can run RGB liveness detection before recognition. Enable it
+explicitly; installing an addon file alone does not change existing behavior:
+
+```python
+from insightface.app import FaceAnalysis
+
+app = FaceAnalysis(
+    name="buffalo_l",
+    addons=["liveness"],
+    liveness_mode="normal",
+    liveness_threshold=0.8,
+)
+app.prepare(ctx_id=0)
+faces = app.get(image_bgr)
+
+for face in faces:
+    result = face.liveness
+    if result is None:
+        print("Liveness was not run")
+    elif result.status == "input_rejected":
+        print("Input unsuitable for liveness; adjust face position and retry")
+    elif result.is_live:
+        print("Live:", result.live_score)
+    else:
+        print("Fake:", result.live_score)
+
+    # None when recognition was not selected or was blocked by normal mode.
+    embedding = face.embedding
+```
+
+The three keyword-only options are:
+
+| Option | Behavior |
+| --- | --- |
+| `addons=["liveness"]` | Select the liveness addon independently of `allowed_modules`. Omit it or use `addons=[]` to disable liveness: no addon download, loading or inference, and existing recognition behavior is unchanged. |
+| `liveness_mode` | `normal` (default): recognize only faces whose liveness result is `True`. `observe`: run liveness and continue recognition regardless of its classification or input rejection. This option only takes effect when the liveness addon is selected. |
+| `liveness_threshold` | Live-score threshold in `[0, 1]`, default `0.8`; equality passes. |
+
+The addon is downloaded from the
+[InsightFace model addons Release](https://github.com/deepinsight/insightface-model-addons/releases/download/addons/liveness.onnx)
+to **`<root>/addons/liveness.onnx`**, default `~/.insightface/addons/liveness.onnx`.
+All addon files use this flat directory. Downloads are verified against the
+SHA256 in the packaged addon catalog before installation; cached files are also
+verified before loading. For offline use, place the published file at this path
+before constructing FaceAnalysis. An existing file with an unexpected digest
+raises an error and is not overwritten.
+
+`get()` still returns a list of `Face` objects. Each evaluated face has exactly
+three liveness fields, accessible as attributes or dictionary keys:
+
+| Result | `status` | `is_live` | `live_score` |
+| --- | --- | --- | --- |
+| Live | `"ok"` | `True` | Model probability |
+| Fake | `"ok"` | `False` | Model probability |
+| Input rejected | `"input_rejected"` | `None` | `None` |
+
+When the liveness addon is not selected, the `liveness` key is absent and `face.liveness` returns
+`None`, following the existing `Face` attribute convention. No detected faces
+still returns `[]`. Fake and rejected faces remain in the list, with their
+bounding boxes and landmarks; normal mode skips only the recognition task.
+Other selected tasks retain their existing behavior. Model-loading errors,
+inference failures and invalid model outputs raise exceptions in every mode;
+they are never reported as fake or silently ignored. Recognition and other
+models still require their own valid inputs in observe mode.
+
+The adapter accepts the original BGR image and detector five-point landmarks.
+It uses a dedicated fixed 80x80 alignment template, rejects aligned crops with
+more than 30% missing source area, and fills accepted crop borders by replication.
+The model receives RGB float32 NCHW pixels divided by 255 and directly outputs a
+live probability. The model's alignment is separate from ArcFace alignment.
+Scores can differ across execution providers; validate the operating threshold
+with the provider used in deployment.
+Detailed input rejection reasons are available through DEBUG logging on
+`insightface.addons.liveness`, without adding fields to the public result.
+
+The model addon is distributed separately from the base models; refer to its
+release repository for provenance and applicable notices. The initial threshold
+and crop gate are integration defaults, not a production accuracy guarantee.
 
 ## Model Zoo
 

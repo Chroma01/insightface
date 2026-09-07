@@ -165,6 +165,8 @@ export class ApiClient {
   health() { return this.request("/v1/health"); }
   system() { return this.request("/v1/system"); }
   models() { return this.request("/v1/models"); }
+  liveness() { return this.request("/v1/addons/liveness"); }
+  enableLiveness() { return this.request("/v1/addons/liveness/enable", { method: "POST", body: {} }); }
 
   detect(image, { maxFaces, collectionId } = {}) {
     const form = new FormData();

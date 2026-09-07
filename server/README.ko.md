@@ -8,7 +8,7 @@
 하나의 컨테이너로 제공하는 셀프 호스팅 얼굴 인식 서버입니다.**
 
 ```text
-이미지 업로드 -> 검출, 비교, 등록 또는 검색
+이미지 업로드 -> 검출, 라이브니스 검사, 비교, 등록 또는 검색
 ```
 
 > **모델 라이선스:** 공개 InsightFace 사전 학습 모델은 일반적으로 비상업적 연구
@@ -21,17 +21,23 @@ InsightFace Server는 직접 관리하는 인프라에서 일반적인 얼굴 �
 AWS 호환 대체품은 아니며 SigV4, IAM, Region 또는 AWS 리소스 의미 체계를
 구현하지 않습니다.
 
-현재 릴리스: **0.2.0**, Linux x86_64.
+현재 릴리스: **0.3.0**, Linux x86_64.
 
 | Runtime | Image |
 | --- | --- |
-| CPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cpu` |
-| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.2.0-cuda12` |
+| CPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cpu` |
+| NVIDIA GPU | `ghcr.io/deepinsight/insightface-server:0.3.0-cuda12` |
 
 이동 태그 `cpu`와 `cuda12`는 각 Runtime 계열의 최신 안정 버전을 가리킵니다.
 모호한 `latest` 태그는 사용하지 않습니다.
 [Maintainer Guide — English](docs/maintainer-guide.md)의 릴리스 정책을
 참고하세요.
+
+**0.3.0 변경 사항과 업그레이드:** `raccoon_s`, `raccoon_l` 및 해당 모델 설명 파일 지원,
+선택적 라이브니스 검사와 Web 모델 설치, BMP 입력이 추가되었습니다. 기존 배포의 모델,
+설정, 데이터 마운트를 유지할 수 있으며 라이브니스는 직접 활성화하지 않으면 꺼진 상태로
+유지됩니다. API와 SDK 결과에서 `model_version`이 제거되었습니다.
+[업그레이드 절차](docs/user-guide.ko.md#030으로-업그레이드)를 확인하세요.
 
 ![영문 InsightFace Server Dashboard](docs/images/customer/dashboard-en.jpg)
 
@@ -48,14 +54,16 @@ AWS 호환 대체품은 아니며 SigV4, IAM, Region 또는 AWS 리소스 의미
 - FP32, FP16, BF16, INT8 벡터 저장을 사용하는 정확한 GPU 검색.
 - Dashboard, Collections, People, Detect, Compare, Search, RTSP 모니터링,
   System, Help를 제공하는 다국어 Web UI.
-- `/v1` 아래 29개 snake_case REST operation, 보호되는
+- `/v1` 아래 31개 snake_case REST operation, 보호되는
   `/v1/embeddings`, 가볍고 타입이 지정된 Python SDK.
 - 제한된 메모리 이벤트, 여러 클라이언트, 선택적 `preview.mjpeg`를 지원하는
   서버 측 RTSP Monitor. 브라우저를 닫아도 모니터링은 중지되지 않습니다.
 - SQLite를 영구 원본으로 사용하고, 재구축 가능한 메모리 정확 인덱스,
-  읽기 전용 `/models`, 영구 `/data`, migration, health check, 조용한 CPU
+  읽기 전용 기본 모델, 쓰기 가능한 addon 및 설정 디렉터리, 영구 `/data`, migration, health check, 조용한 CPU
   fallback을 금지하는 엄격한 CUDA 시작 검증 제공.
-- JPEG, PNG, WebP 입력을 지원하며 원본 업로드는 기본적으로 보관하지 않음.
+- JPEG, PNG, WebP, BMP 입력을 지원하며 원본 업로드는 기본적으로 보관하지 않음.
+
+라이브니스는 기본적으로 꺼져 있습니다. `server/config/server.toml`에서 `inference.addons = []`, `addons.auto_download = []`가 기본값입니다. **시스템 → 라이브니스 검사**에서 모델을 다운로드하고 검증한 뒤 다음 시작 설정을 저장합니다. 수동으로 다시 시작해야 활성화되며 검증된 파일은 재사용합니다. 시작 시 다운로드하지 않으며, 활성 모델이 없으면 설치 방법을 안내하고 시작을 중단합니다. 평가한 얼굴은 `status`, `is_live`, `live_score`만 반환합니다. 기본 모드는 `normal`이며 등록 시 검사를 기본적으로 생략합니다(`liveness_on_registration = false`). [설정, Web 권한 및 업데이트 안내](docs/user-guide.ko.md#선택적-라이브니스-addon)를 참고하세요.
 
 ### RTX 5090 GPU 검색 성능
 
@@ -245,7 +253,7 @@ Server는 TLS, 사용자 계정, RBAC, cloud IAM 또는 법적 준수 계층을 
 ## 1단계 범위
 
 AWS/CompreFace 호환, CUDA 11, Jetson, ARM64, Windows Container, TensorRT,
-Kubernetes, 분산 Worker, 영구 Monitor 이벤트 또는 녹화/NVR, liveness,
+Kubernetes, 분산 Worker, 영구 Monitor 이벤트 또는 녹화/NVR,
 deepfake, 인구통계 속성은 구현하지 않습니다.
 
 ## 문서

@@ -95,7 +95,7 @@ class Client:
             raise ValueError("base_url must not be empty")
         headers = {
             "Accept": "application/json",
-            "User-Agent": "insightface-server-python/0.2.0",
+            "User-Agent": "insightface-server-python/0.3.0",
         }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"

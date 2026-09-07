@@ -514,25 +514,24 @@ def test_high_level_python_apis_only_expose_uniform_config_overrides():
     assert not hasattr(base_config, "load_config")
 
 
-def test_generic_gallery_path_uses_explicit_override_root(monkeypatch, tmp_path):
+def test_generic_reference_path_uses_explicit_override_root(monkeypatch, tmp_path):
     _without_model_materialization(monkeypatch)
-    gallery = tmp_path / "gallery"
-    gallery.mkdir()
+    reference = tmp_path / "reference"
+    reference.mkdir()
 
     config = load_config(
         CONFIG_PATH,
         config_overrides={
             "recognition.mode": "exempt",
-            "recognition.gallery_dir": "gallery",
-            "recognition.target_persons": ["alice"],
+            "recognition.reference_dir": "reference",
         },
         config_override_root=tmp_path,
     )
 
-    assert config["recognition"]["gallery_dir"] == str(gallery.resolve())
+    assert config["recognition"]["reference_dir"] == str(reference.resolve())
 
 
-def test_implicit_custom_yaml_gallery_root_is_unchanged_by_other_cli_override(
+def test_implicit_custom_yaml_reference_root_is_unchanged_by_other_cli_override(
     monkeypatch,
     tmp_path,
 ):
@@ -541,8 +540,8 @@ def test_implicit_custom_yaml_gallery_root_is_unchanged_by_other_cli_override(
     cli_root = tmp_path / "cli"
     derived_root.mkdir()
     cli_root.mkdir()
-    gallery = derived_root / "gallery"
-    gallery.mkdir()
+    reference = derived_root / "reference"
+    reference.mkdir()
     derived = derived_root / "config.yaml"
     derived.write_text(
         yaml.safe_dump(
@@ -550,8 +549,7 @@ def test_implicit_custom_yaml_gallery_root_is_unchanged_by_other_cli_override(
                 "schema_version": 1,
                 "recognition": {
                     "mode": "exempt",
-                    "gallery_dir": "gallery",
-                    "target_persons": ["alice"],
+                    "reference_dir": "reference",
                 },
             }
         ),
@@ -564,10 +562,10 @@ def test_implicit_custom_yaml_gallery_root_is_unchanged_by_other_cli_override(
         config_override_root=cli_root,
     )
 
-    assert config["recognition"]["gallery_dir"] == str(gallery.resolve())
+    assert config["recognition"]["reference_dir"] == str(reference.resolve())
 
 
-def test_cli_gallery_override_takes_its_own_root_over_derived_yaml(
+def test_cli_reference_override_takes_its_own_root_over_derived_yaml(
     monkeypatch,
     tmp_path,
 ):
@@ -576,9 +574,9 @@ def test_cli_gallery_override_takes_its_own_root_over_derived_yaml(
     cli_root = tmp_path / "cli"
     derived_root.mkdir()
     cli_root.mkdir()
-    (derived_root / "yaml-gallery").mkdir()
-    cli_gallery = cli_root / "cli-gallery"
-    cli_gallery.mkdir()
+    (derived_root / "yaml-reference").mkdir()
+    cli_reference = cli_root / "cli-reference"
+    cli_reference.mkdir()
     derived = derived_root / "config.yaml"
     derived.write_text(
         yaml.safe_dump(
@@ -587,8 +585,7 @@ def test_cli_gallery_override_takes_its_own_root_over_derived_yaml(
                 "base_config": str(CONFIG_PATH),
                 "recognition": {
                     "mode": "exempt",
-                    "gallery_dir": "yaml-gallery",
-                    "target_persons": ["alice"],
+                    "reference_dir": "yaml-reference",
                 },
             }
         ),
@@ -597,8 +594,8 @@ def test_cli_gallery_override_takes_its_own_root_over_derived_yaml(
 
     config = load_config(
         derived,
-        config_overrides={"recognition.gallery_dir": "cli-gallery"},
+        config_overrides={"recognition.reference_dir": "cli-reference"},
         config_override_root=cli_root,
     )
 
-    assert config["recognition"]["gallery_dir"] == str(cli_gallery.resolve())
+    assert config["recognition"]["reference_dir"] == str(cli_reference.resolve())
