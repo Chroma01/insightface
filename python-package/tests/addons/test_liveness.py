@@ -2,7 +2,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from insightface.addons.liveness import DESTINATION_LANDMARKS, Liveness
+from insightface.addons.liveness import (
+    DESTINATION_LANDMARKS,
+    OUT_OF_BOUNDS_REASON,
+    Liveness,
+)
 
 
 class Session:
@@ -69,7 +73,13 @@ def test_gate_measures_missing_aligned_area_before_inference(shift, accepted):
             "status": "input_rejected",
             "is_live": None,
             "live_score": None,
+            "reason": OUT_OF_BOUNDS_REASON,
         }
+        assert result["reason"] == (
+            "Insufficient image area around the face for liveness detection. "
+            "Move the face toward the center, step back from the camera, "
+            "or use a less tightly cropped image."
+        )
 
 
 @pytest.mark.parametrize(
@@ -77,19 +87,24 @@ def test_gate_measures_missing_aligned_area_before_inference(shift, accepted):
     [
         None,
         [],
-        np.zeros((5, 2)),
+        "not landmarks",
         np.zeros((4, 2)),
         np.full((5, 2), np.nan),
         np.full((5, 2), np.inf),
     ],
 )
-def test_unusable_landmarks_reject_without_running_model(landmarks, caplog):
+def test_invalid_landmarks_raise_without_running_model(landmarks):
     session = Session()
-    with caplog.at_level("DEBUG", logger="insightface.addons.liveness"):
-        result = Liveness("unused.onnx", session=session).predict(image(), landmarks)
-    assert result == {"status": "input_rejected", "is_live": None, "live_score": None}
+    with pytest.raises(ValueError, match="landmarks"):
+        Liveness("unused.onnx", session=session).predict(image(), landmarks)
     assert session.feeds == []
-    assert "Liveness input rejected" in caplog.text
+
+
+def test_degenerate_landmarks_raise_without_running_model():
+    session = Session()
+    with pytest.raises(RuntimeError, match="alignment failed"):
+        Liveness("unused.onnx", session=session).predict(image(), np.zeros((5, 2)))
+    assert session.feeds == []
 
 
 @pytest.mark.parametrize(

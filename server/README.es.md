@@ -66,7 +66,7 @@ resultados de la API y del SDK ya no incluyen `model_version`. Consulte los
   validación CUDA estricta sin fallback silencioso a CPU.
 - Entrada JPEG, PNG, WebP y BMP; los originales no se conservan por defecto.
 
-La prueba de vida está desactivada por defecto: `inference.addons = []` y `addons.auto_download = []` en `server/config/server.toml`. **Sistema → Detección de vida** descarga y verifica el modelo y guarda la activación para el próximo reinicio manual; reutiliza una copia verificada. El inicio no descarga modelos. Si falta un modelo activado, el inicio se detiene e indica cómo instalarlo. Cada rostro evaluado devuelve solo `status`, `is_live` y `live_score`. El modo predeterminado es `normal`; el registro omite la prueba por defecto (`liveness_on_registration = false`). Consulte [configuración, permisos Web y actualización](docs/user-guide.es.md#addon-opcional-de-prueba-de-vida).
+La prueba de vida está desactivada por defecto: `inference.addons = []` y `addons.auto_download = []` en `server/config/server.toml`. **Sistema → Detección de vida** descarga y verifica el modelo y guarda la activación para el próximo reinicio manual; reutiliza una copia verificada. El inicio no descarga modelos. Si falta un modelo activado, el inicio se detiene e indica cómo instalarlo. Cada rostro evaluado devuelve los campos principales `status`, `is_live` y `live_score`; solo `input_rejected` añade una explicación para el usuario en `reason`. El modo predeterminado es `normal`; el registro omite la prueba por defecto (`liveness_on_registration = false`). Consulte [configuración, permisos Web y actualización](docs/user-guide.es.md#addon-opcional-de-prueba-de-vida).
 
 ### Rendimiento de búsqueda GPU en RTX 5090
 
@@ -180,9 +180,13 @@ completo.
 
 ## Compilar desde el código fuente
 
+Puede compilar directamente desde un directorio local con el código fuente
+completo, incluso con cambios sin confirmar o sin un directorio `.git`. No es
+necesario hacer commits ni subirlos con Git antes de compilar.
+
 Los Dockerfiles copian `server/` y módulos de inferencia seleccionados de
-`python-package/insightface/`, por lo que el repositorio completo es el contexto
-de compilación.
+`python-package/insightface/`, por lo que el directorio completo del código fuente es el
+contexto de compilación.
 
 CPU:
 

@@ -82,9 +82,20 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 | 비생체 | `ok` | `false` | `[0, 1]` |
 | 입력 거부 | `input_rejected` | `null` | `null` |
 
-`normal`은 라이브니스를 통과한 얼굴만 인식합니다. `observe`는 결과를 기록하고 인식을 계속합니다. 평가하지 않은 얼굴에는 `liveness`가 없습니다. 객체는 `status`, `is_live`, `live_score` 세 필드만 포함합니다. 통과/fake는 `status: ok`, 불리언, 점수를 반환하고, 입력 거부는 `status: input_rejected`와 두 개의 `null`을 반환합니다.
+정렬된 얼굴 주변에서 원본 이미지의 유효 영역이 부족한 경우에만 `input_rejected`를 반환합니다. 이 결과에는 사용자용 설명인 `liveness.reason`이 추가되며, 실제 얼굴과 위조 결과에는 `reason`이 없습니다. FaceAnalysis와 API는 항상 영어 설명을 반환하고 Web UI만 표시 언어에 맞게 번역합니다. 프로그램에서는 `reason` 문구를 해석하지 말고 `status`와 `is_live`로 판단하세요. 이전에 저장된 결과에는 `reason`이 없을 수 있으므로 클라이언트는 일반적인 입력 거부 안내로 대체할 수 있습니다.
 
-Detect는 음성 결과도 HTTP 200으로 반환합니다. `normal`에서 임베딩·비교·검색은 HTTP 422 `liveness_fake` 또는 `liveness_input_rejected`와 `error.details.liveness`를 반환하며 비교에는 `details.side`가 추가됩니다. 추론 장애는 HTTP 503 `liveness_unavailable`입니다.
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal`은 라이브니스를 통과한 얼굴만 인식합니다. `observe`는 결과를 기록하고 인식을 계속합니다. 평가하지 않은 얼굴에는 `liveness`가 없습니다. 핵심 필드는 `status`, `is_live`, `live_score` 세 개입니다. 통과/fake는 `status: ok`, 불리언, 점수를 반환하고, 입력 거부는 `status: input_rejected`와 두 개의 `null`을 반환합니다.
+
+Detect는 음성 결과도 HTTP 200으로 반환합니다. `normal`에서 임베딩·비교·검색은 HTTP 422 `liveness_fake` 또는 `liveness_input_rejected`와 `error.details.liveness`를 반환하며 비교에는 `details.side`가 추가됩니다. 추론 장애는 HTTP 503 `liveness_unavailable`입니다. 실행 오류는 `normal`과 `observe` 모두에서 작업을 중단하며 `input_rejected`로 변환하지 않습니다.
 
 새 Person 등록과 FaceSample 추가는 기본적으로 라이브니스를 건너뜁니다. `[inference].liveness_on_registration=false`이면 모델을 실행하지 않고 새 샘플에 `liveness`를 포함하지 않습니다. `true`이고 addon이 활성화되어 있으면 `normal`/`observe` 정책을 적용하며 거부 항목에는 `reason`과 `liveness`가 포함됩니다. `review_mode` 품질 심사와 외부 임베딩 검증은 계속 수행합니다. 등록 검사가 활성화된 경우 `review_mode=off`와 `external_trusted`도 우회할 수 없습니다. 요청에서 이 시작 설정을 덮어쓸 수 없습니다. 이전에 저장한 결과는 계속 조회할 수 있습니다.
 
@@ -133,7 +144,7 @@ Person 생성과 FaceSample 추가는 기본적으로 라이브니스를 건너�
 
 **검색**에서 Collection과 이미지를 선택합니다. 한 사람의 점수는 모든 FaceSample 중 최고 similarity입니다. 결과는 내림차순이며 일치 없음은 빈 목록입니다. 새 샘플은 SQLite에 commit된 다음 성공 응답 전에 메모리 인덱스에 추가됩니다. 재시작 시 SQLite에서 재구축합니다.
 
-평가한 얼굴에는 `liveness.status`, `liveness.is_live`, `liveness.live_score`가 포함됩니다. Fake와 `input_rejected`도 HTTP 200이며 인식 특징은 추출하지 않습니다. `input_rejected`는 얼굴이 가장자리에 너무 가까운 경우처럼 평가에 부적합한 입력입니다. `liveness`가 없으면 평가하지 않은 것입니다.
+평가한 얼굴에는 `liveness.status`, `liveness.is_live`, `liveness.live_score`가 포함됩니다. Fake와 `input_rejected`도 HTTP 200이며 인식 특징은 추출하지 않습니다. `input_rejected`는 얼굴 주변의 이미지 영역이 부족함을 뜻하며 `liveness.reason`에 이미지 조정 방법이 제공됩니다. `liveness`가 없으면 평가하지 않은 것입니다.
 
 `liveness_compare_scope`(`both`, `source`, `target`)가 인식 전에 검사할 쪽을 정합니다. `normal`에서 거부되면 HTTP 422 `liveness_fake` / `liveness_input_rejected`, `error.details.liveness`, `error.details.side`를 반환하고 유사도는 반환하지 않습니다. `observe`는 비교를 계속하고 검사한 얼굴에 결과를 포함합니다.
 
@@ -218,12 +229,19 @@ Python SDK는 경로, bytes, file-like object를 지원하고 Detect, Compare,
 Collections, 등록, Search, Monitors의 타입 지정 메서드를 제공합니다. 전체 HTTP
 계약은 [API 사용 가이드](api.ko.md)를 확인하세요.
 
-전체 저장소에서 사용자가 직접 이미지를 빌드할 수 있습니다.
+완전한 로컬 소스 디렉터리에서 직접 빌드할 수 있습니다. 커밋하지 않은 변경 사항이
+있거나 `.git` 디렉터리가 없어도 됩니다. Git 커밋이나 푸시는 빌드의 전제 조건이
+아닙니다.
 
 ```bash
 make -C server build-cpu
 make -C server build-cuda12
 ```
+
+테스트를 통과한 뒤에는 테스트한 것과 동일한 이미지를 배포하세요. 이후 같은 소스를
+커밋하거나 커밋만 정리하는 경우에는 다시 빌드할 필요가 없습니다. 코드, 프런트엔드
+리소스, 내장 사용자 도움말 등 이미지에 포함되는 파일을 변경하면 다시 빌드하고
+검증해야 합니다.
 
 로컬 이미지를 쓸 때 Compose에 `--pull never`를 추가합니다. 고정 Tag는
 `0.3.0-cpu`, `0.3.0-cuda12`이고 이동 Tag `cpu`, `cuda12`는 최신 안정 버전을
@@ -293,7 +311,7 @@ Web UI에서는 기본 모델 패키지를 전환할 수 없습니다.
 모델은 `model_id`로 식별하며 Collection 호환성은 `embedding_contract_id`로 확인합니다.
 제거된 필드를 필수로 사용하는 클라이언트를 수정하고, 제공되는 Python 클라이언트를 업데이트할
 때는 SDK `0.3.0`을 사용하세요. 라이브니스를 평가한 경우 `liveness`에는 `status`, `is_live`,
-`live_score` 세 필드만 포함되며, 평가하지 않았다면 `liveness` 자체를 생략합니다.
+`live_score` 세 핵심 필드가 포함되고 `input_rejected`에만 `reason`이 추가됩니다. 평가하지 않았다면 `liveness` 자체를 생략합니다.
 인식 요청에 활성화하기 전에 [라이브니스 결과와 오류 처리](#라이브니스-결과)를 확인하세요.
 
 ## 10. GPU, 네트워크와 문제 해결

@@ -2,12 +2,16 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from insightface.addons.liveness import OUT_OF_BOUNDS_REASON
 from insightface.app import face_analysis
 from insightface.app.face_analysis import FaceAnalysis
 
 RESULTS = [
     {"status": "ok", "is_live": False, "live_score": 0.1},
-    {"status": "input_rejected", "is_live": None, "live_score": None},
+    {
+        "status": "input_rejected", "is_live": None, "live_score": None,
+        "reason": OUT_OF_BOUNDS_REASON,
+    },
     {"status": "ok", "is_live": True, "live_score": 0.95},
 ]
 
@@ -116,7 +120,9 @@ def test_pipeline_retains_faces_and_gates_only_recognition(
     assert analysis.liveness_mode == (mode or "normal")
     assert [dict(face.liveness) for face in faces] == RESULTS
     assert faces[0]["liveness"]["is_live"] is False
-    assert set(faces[1].liveness) == {"status", "is_live", "live_score"}
+    assert set(faces[1].liveness) == {"status", "is_live", "live_score", "reason"}
+    assert faces[1].liveness.reason == OUT_OF_BOUNDS_REASON
+    assert all("reason" not in faces[index].liveness for index in (0, 2))
     for index in range(3):
         if ("recognition", index) in events:
             assert events.index(("liveness", index)) < events.index(
@@ -185,15 +191,16 @@ def test_invalid_config_fails_before_loading_or_downloading(monkeypatch, kwargs,
 
 
 @pytest.mark.parametrize("mode", ["normal", "observe"])
+@pytest.mark.parametrize("error_type", [ValueError, RuntimeError])
 def test_liveness_runtime_error_never_falls_through_to_recognition(
-    setup_pipeline, mode
+    setup_pipeline, mode, error_type
 ):
     analysis, events, _ = setup_pipeline(mode)
 
     def fail(*args):
-        raise RuntimeError("liveness unavailable")
+        raise error_type("liveness unavailable")
 
     analysis.addons["liveness"].get = fail
-    with pytest.raises(RuntimeError, match="liveness unavailable"):
+    with pytest.raises(error_type, match="liveness unavailable"):
         analysis.get(np.zeros((80, 80, 3), np.uint8))
     assert not any(event[0] == "recognition" for event in events)

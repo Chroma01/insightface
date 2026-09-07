@@ -64,7 +64,7 @@ desativada até ser ativada. Os resultados da API e do SDK deixam de incluir
   validação CUDA estrita sem fallback CPU silencioso.
 - Entrada JPEG, PNG, WebP e BMP; originais não são guardados por predefinição.
 
-A prova de vida está desativada por predefinição: `inference.addons = []` e `addons.auto_download = []` em `server/config/server.toml`. **Sistema → Detecção de vivacidade** descarrega e verifica o modelo, guardando a ativação para o próximo reinício manual; reutiliza uma cópia verificada. Não há descarga no arranque. Um modelo ativado ausente impede o arranque e apresenta instruções de instalação. Cada rosto avaliado devolve apenas `status`, `is_live` e `live_score`. O modo predefinido é `normal`; o registo ignora a prova por predefinição (`liveness_on_registration = false`). Consulte [configuração, permissões Web e atualização](docs/user-guide.pt.md#addon-opcional-de-prova-de-vida).
+A prova de vida está desativada por predefinição: `inference.addons = []` e `addons.auto_download = []` em `server/config/server.toml`. **Sistema → Detecção de vivacidade** descarrega e verifica o modelo, guardando a ativação para o próximo reinício manual; reutiliza uma cópia verificada. Não há descarga no arranque. Um modelo ativado ausente impede o arranque e apresenta instruções de instalação. Cada rosto avaliado devolve os campos principais `status`, `is_live` e `live_score`; só `input_rejected` acrescenta uma explicação para o utilizador em `reason`. O modo predefinido é `normal`; o registo ignora a prova por predefinição (`liveness_on_registration = false`). Consulte [configuração, permissões Web e atualização](docs/user-guide.pt.md#addon-opcional-de-prova-de-vida).
 
 ### Desempenho de pesquisa GPU na RTX 5090
 
@@ -174,9 +174,13 @@ Consulte o [guia para iniciantes](docs/user-guide.pt.md) para o fluxo completo.
 
 ## Compilar a partir do código
 
+Pode compilar diretamente a partir de um diretório local com o código fonte
+completo, incluindo alterações sem commit ou um diretório sem `.git`. Fazer
+commits ou enviá-los com Git não é um requisito para compilar.
+
 Os Dockerfiles copiam `server/` e módulos de inferência selecionados de
-`python-package/insightface/`; por isso o repositório completo é o contexto de
-build.
+`python-package/insightface/`; por isso o diretório completo do código fonte é o contexto
+de build.
 
 CPU:
 

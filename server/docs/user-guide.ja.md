@@ -82,9 +82,20 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 | 非生体 | `ok` | `false` | `[0, 1]` |
 | 入力拒否 | `input_rejected` | `null` | `null` |
 
-`normal` は生体検知に合格した顔だけを認識します。`observe` は結果を記録して認識を続けます。無効な場合、`liveness` 自体を省略します。結果は `status`、`is_live`、`live_score` の3項目だけです。合格と fake は `status: ok`、真偽値とスコアを返します。入力拒否は `status: input_rejected`、残り2項目は `null` です。
+位置合わせ後の顔の周囲に元画像の有効な領域が不足する場合にのみ `input_rejected` を返します。この結果には、ユーザー向けの説明 `liveness.reason` が追加されます。生体と なりすまし の結果には `reason` はありません。FaceAnalysis と API は常に英語の説明を返し、Web UI だけが表示言語に合わせて翻訳します。プログラムの判定には `status` と `is_live` を使い、`reason` の文面を解析しないでください。以前に保存された結果には `reason` がない場合があるため、クライアントは一般的な入力拒否メッセージにフォールバックできます。
 
-検出は負の結果も HTTP 200 で返します。`normal` の特徴抽出・比較・検索は HTTP 422 `liveness_fake` または `liveness_input_rejected` と `error.details.liveness` を返します。比較には `details.side` もあります。推論障害は HTTP 503 `liveness_unavailable` です。
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal` は生体検知に合格した顔だけを認識します。`observe` は結果を記録して認識を続けます。無効な場合、`liveness` 自体を省略します。基本の3項目は `status`、`is_live`、`live_score` です。合格と fake は `status: ok`、真偽値とスコアを返します。入力拒否は `status: input_rejected`、残り2項目は `null` です。
+
+検出は負の結果も HTTP 200 で返します。`normal` の特徴抽出・比較・検索は HTTP 422 `liveness_fake` または `liveness_input_rejected` と `error.details.liveness` を返します。比較には `details.side` もあります。推論障害は HTTP 503 `liveness_unavailable` です。 実行時の障害は `normal` と `observe` のどちらでも処理を中止し、`input_rejected` には変換しません。
 
 新規 Person の登録と FaceSample の追加では、生体検知は初期状態で省略されます。`[inference].liveness_on_registration=false` の場合、モデルを実行せず、新しいサンプルの `liveness` を省略します。`true` にすると addon が有効な場合に `normal`/`observe` に従い、拒否項目には `reason` と `liveness` が付きます。`review_mode` の品質審査と外部特徴量の検証は引き続き実行されます。登録時の生体検知を有効にした場合、`review_mode=off` と `external_trusted` でも回避できません。リクエストからこの設定を上書きすることはできません。過去に保存された生体検知結果は引き続き参照できます。
 
@@ -133,7 +144,7 @@ Person の新規登録と FaceSample の追加では既定で生体検知を省�
 
 **検索** で Collection と画像を選択します。Collection の戦略で顔を選び、人物の全 FaceSample 中の最高 similarity を人物スコアとして降順に返します。一致なしは空リストです。新規 FaceSample は SQLite へ commit 後、応答前にメモリ索引へ追加されます。再起動時は SQLite から再構築します。
 
-有効時は評価した顔に `liveness.status`、`liveness.is_live`、`liveness.live_score` を返します。fake と `input_rejected` も HTTP 200 で、認識特徴は抽出しません。`input_rejected` は端に近すぎる顔など評価に不適切な入力を示します。`liveness` がなければ未評価です。
+有効時は評価した顔に `liveness.status`、`liveness.is_live`、`liveness.live_score` を返します。fake と `input_rejected` も HTTP 200 で、認識特徴は抽出しません。`input_rejected` は顔の周囲の画像領域が不足していることを示し、`liveness.reason` が画像の調整方法を説明します。`liveness` がなければ未評価です。
 
 `liveness_compare_scope`（`both`・`source`・`target`）で指定した側を認識前に検査します。`normal` では HTTP 422 `liveness_fake` または `liveness_input_rejected` と `error.details.liveness`、`error.details.side` を返し、類似度は返しません。`observe` は比較を続行し、各評価済みの顔に結果を返します。
 
@@ -219,12 +230,19 @@ SDK は path、bytes、file-like object に対応し、`detect`、`compare`、
 `create_collection`、`add_person`、`search`、Monitor 操作を型付きで提供します。
 詳細な HTTP 契約は [API 利用ガイド](api.ja.md)を参照してください。
 
-完全なリポジトリからユーザー自身でビルドできます。
+完全なローカルソースディレクトリから直接ビルドできます。未コミットの変更が
+あっても、`.git` ディレクトリがなくても構いません。Git のコミットやプッシュは
+ビルドの前提条件ではありません。
 
 ```bash
 make -C server build-cpu
 make -C server build-cuda12
 ```
+
+テストに合格したら、テストしたものと同じイメージを公開します。その後、同じ
+ソースをコミットしたりコミットを整理したりするだけなら、再ビルドは不要です。
+コード、フロントエンドのリソース、同梱のユーザーヘルプなど、イメージに含まれる
+ファイルを変更した場合は、再ビルドと検証が必要です。
 
 ローカルイメージを使う Compose 操作には `--pull never` を付けます。公開固定 Tag は
 `0.3.0-cpu` と `0.3.0-cuda12`、移動 Tag は `cpu` と `cuda12` で、`latest` は
@@ -295,8 +313,8 @@ Server は起動時にモデルをダウンロードしません。有効にす�
 **API と SDK の互換性:** モデル、Collection、FaceSample の結果には `model_version` が
 含まれなくなります。モデルは `model_id`、Collection の互換性は `embedding_contract_id` で
 識別します。削除されたフィールドを必須とするクライアントを修正し、同梱の Python クライアントを
-更新する場合は SDK `0.3.0` を使ってください。生体検知を実行した場合、`liveness` に含まれるのは
-`status`、`is_live`、`live_score` の3項目だけです。実行しなかった場合は `liveness` 自体を省略します。
+更新する場合は SDK `0.3.0` を使ってください。生体検知を実行した場合、`liveness` には
+`status`、`is_live`、`live_score` の基本3項目が含まれ、`input_rejected` の場合だけ `reason` が追加されます。実行しなかった場合は `liveness` 自体を省略します。
 認識リクエストに生体検知を有効にする前に、[結果とエラーの扱い](#生体検知の結果)を確認してください。
 
 ## 10. GPU、ネットワーク、トラブルシュート

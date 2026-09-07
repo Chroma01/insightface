@@ -63,7 +63,7 @@ AWS 호환 대체품은 아니며 SigV4, IAM, Region 또는 AWS 리소스 의미
   fallback을 금지하는 엄격한 CUDA 시작 검증 제공.
 - JPEG, PNG, WebP, BMP 입력을 지원하며 원본 업로드는 기본적으로 보관하지 않음.
 
-라이브니스는 기본적으로 꺼져 있습니다. `server/config/server.toml`에서 `inference.addons = []`, `addons.auto_download = []`가 기본값입니다. **시스템 → 라이브니스 검사**에서 모델을 다운로드하고 검증한 뒤 다음 시작 설정을 저장합니다. 수동으로 다시 시작해야 활성화되며 검증된 파일은 재사용합니다. 시작 시 다운로드하지 않으며, 활성 모델이 없으면 설치 방법을 안내하고 시작을 중단합니다. 평가한 얼굴은 `status`, `is_live`, `live_score`만 반환합니다. 기본 모드는 `normal`이며 등록 시 검사를 기본적으로 생략합니다(`liveness_on_registration = false`). [설정, Web 권한 및 업데이트 안내](docs/user-guide.ko.md#선택적-라이브니스-addon)를 참고하세요.
+라이브니스는 기본적으로 꺼져 있습니다. `server/config/server.toml`에서 `inference.addons = []`, `addons.auto_download = []`가 기본값입니다. **시스템 → 라이브니스 검사**에서 모델을 다운로드하고 검증한 뒤 다음 시작 설정을 저장합니다. 수동으로 다시 시작해야 활성화되며 검증된 파일은 재사용합니다. 시작 시 다운로드하지 않으며, 활성 모델이 없으면 설치 방법을 안내하고 시작을 중단합니다. 평가한 얼굴은 핵심 필드 `status`, `is_live`, `live_score`를 반환하며 `input_rejected`에만 사용자용 설명인 `reason`이 추가됩니다. 기본 모드는 `normal`이며 등록 시 검사를 기본적으로 생략합니다(`liveness_on_registration = false`). [설정, Web 권한 및 업데이트 안내](docs/user-guide.ko.md#선택적-라이브니스-addon)를 참고하세요.
 
 ### RTX 5090 GPU 검색 성능
 
@@ -171,8 +171,12 @@ docker compose -f server/deploy/compose.cpu.yml up -d
 
 ## 소스에서 빌드
 
+완전한 로컬 소스 디렉터리에서 직접 빌드할 수 있습니다. 커밋하지 않은 변경 사항이
+있거나 `.git` 디렉터리가 없어도 됩니다. Git 커밋이나 푸시는 빌드의 전제 조건이
+아닙니다.
+
 Dockerfile은 `server/`와 `python-package/insightface/`의 선택된 추론 모듈을
-복사하므로 전체 저장소가 build context입니다.
+복사하므로 완전한 소스 디렉터리가 build context입니다.
 
 CPU:
 

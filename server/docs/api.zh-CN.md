@@ -118,13 +118,24 @@ embedding，也不改变识别模型摘要或 `embedding_contract_id`。
 
 ### 读取活体结果
 
-每张已执行活体的人脸增加 `liveness`，其中只保留三个字段：
+每张已执行活体的人脸增加 `liveness`，其中包含三个核心字段：
 
 | 结果 | `status` | `is_live` | `live_score` |
 | --- | --- | --- | --- |
 | 活体通过 | `ok` | `true` | `[0, 1]` 分数 |
 | 非活体 | `ok` | `false` | `[0, 1]` 分数 |
-| 输入不合格，例如太靠近图像边缘 | `input_rejected` | `null` | `null` |
+| 人脸周围的有效图像区域不足 | `input_rejected` | `null` | `null` |
+
+只有对齐后人脸周围的原图有效区域不足时，才返回 `input_rejected`。此时额外提供 `liveness.reason`，用于向用户解释；活体通过和 fake 结果不包含 `reason`。FaceAnalysis 和 API 始终返回英文提示，只有 Web UI 按界面语言翻译显示。程序应根据 `status` 和 `is_live` 判断，不要解析 `reason` 文本。旧的已保存结果可能没有 `reason`，客户端可回退到通用的输入被拒绝提示。
+
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
 
 `live_score >= liveness_threshold` 判为通过。未启用、注册跳过活体或比对范围未选中的一侧不返回
 `liveness`；这与 `is_live: null` 表示输入被拒绝有明确区别。
@@ -140,9 +151,9 @@ embedding，也不改变识别模型摘要或 `embedding_contract_id`。
 `/v1/detect` 始终不提取 embedding，fake 和输入不合格都以 HTTP 200 返回逐脸结果。
 `normal` 下，embedding、比对和 Collection 搜索在活体不通过时返回 HTTP 422：
 错误码分别为 `liveness_fake` 和 `liveness_input_rejected`，
-`error.details.liveness` 包含上述三个字段；比对还提供 `error.details.side`
+`error.details.liveness` 包含活体结果，输入被拒绝时还包含 `reason`；比对还提供 `error.details.side`
 （`source` 或 `target`）。被拦截的操作不返回相似度或匹配结果。
-推理故障返回 HTTP 503 `liveness_unavailable`，不归类为 fake。
+推理故障返回 HTTP 503 `liveness_unavailable`，不归类为 fake。 运行故障在 `normal` 和 `observe` 下都会中止操作，不会转换为 `input_rejected`。
 
 ### 注册默认跳过活体
 
@@ -272,7 +283,7 @@ curl -sS "${BASE_URL}/v1/addons/liveness/enable" -H "${AUTH_HEADER}" \
 
 ### `POST /v1/detect`
 
-启用活体后，每张执行过活体的人脸会包含 `liveness.status`、`liveness.is_live`、`liveness.live_score`。检测对 fake 和 `input_rejected` 都返回 HTTP 200，且不提取识别特征。`input_rejected` 表示图片不满足评估条件，例如人脸太靠近边缘；应换用人脸周围留有空间的图片。缺少 `liveness` 表示这张脸未执行活体。
+启用活体后，每张执行过活体的人脸会包含 `liveness.status`、`liveness.is_live`、`liveness.live_score`。检测对 fake 和 `input_rejected` 都返回 HTTP 200，且不提取识别特征。`input_rejected` 表示人脸周围的有效图像区域不足，`liveness.reason` 提供调整图片的提示。缺少 `liveness` 表示这张脸未执行活体。
 
 **用途：** 检测一张图片中的所有可用人脸，不写数据库。
 

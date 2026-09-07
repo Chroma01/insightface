@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from insightface.addons.liveness import DESTINATION_LANDMARKS
+from insightface.addons.liveness import DESTINATION_LANDMARKS, OUT_OF_BOUNDS_REASON
+from insightface_server.addons import LivenessUnavailable
 from insightface_server.config import DetectionProfile
 from insightface_server.inference.concurrency import InferenceConcurrencyLimiter
 from insightface_server.inference.onnx_engine import OnnxInsightFaceEngine
@@ -35,7 +36,10 @@ def engine():
             calls.append(f"liveness-{index}")
             return [
                 {"status": "ok", "is_live": False, "live_score": 0.1},
-                {"status": "input_rejected", "is_live": None, "live_score": None},
+                {
+                    "status": "input_rejected", "is_live": None, "live_score": None,
+                    "reason": OUT_OF_BOUNDS_REASON,
+                },
                 {"status": "ok", "is_live": True, "live_score": 0.99},
             ][index]
 
@@ -58,7 +62,11 @@ def test_liveness_runs_before_recognition_and_rejected_faces_are_retained(engine
     assert len(faces) == 3
     assert calls.count("recognition") == count
     assert sum(face.embedding is not None for face in faces) == count
-    assert all(set(face.liveness) == {"status", "is_live", "live_score"} for face in faces)
+    assert all(set(faces[index].liveness) == {"status", "is_live", "live_score"} for index in (0, 2))
+    assert faces[1].liveness == {
+        "status": "input_rejected", "is_live": None, "live_score": None,
+        "reason": OUT_OF_BOUNDS_REASON,
+    }
     assert calls[0] == "liveness-0"
 
 
@@ -80,3 +88,20 @@ def test_reference_side_can_skip_liveness_and_detection_never_extracts_features(
     faces = value.analyze(np.zeros((100, 300, 3), np.uint8), require_embeddings=False)
     assert calls == ["liveness-0", "liveness-1", "liveness-2"]
     assert all(face.embedding is None for face in faces)
+
+
+@pytest.mark.parametrize("mode", ["normal", "observe"])
+@pytest.mark.parametrize("failure", [ValueError("Invalid landmarks"), RuntimeError("Alignment failed")])
+def test_internal_liveness_fault_aborts_before_recognition(engine, monkeypatch, mode, failure):
+    value, calls = engine
+    value._liveness_mode = mode
+
+    def fail(*args, **kwargs):
+        calls.append("liveness-failed")
+        raise failure
+
+    monkeypatch.setattr(value._liveness, "predict", fail)
+    with pytest.raises(LivenessUnavailable, match="Liveness inference failed") as caught:
+        value.analyze(np.zeros((100, 300, 3), np.uint8))
+    assert caught.value.__cause__ is failure
+    assert calls == ["liveness-failed"]

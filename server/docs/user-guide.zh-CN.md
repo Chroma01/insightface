@@ -116,13 +116,24 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 
 ### 读取活体结果
 
-每张已执行活体的人脸增加 `liveness`，其中只保留三个字段：
+每张已执行活体的人脸增加 `liveness`，其中包含三个核心字段：
 
 | 结果 | `status` | `is_live` | `live_score` |
 | --- | --- | --- | --- |
 | 活体通过 | `ok` | `true` | `[0, 1]` 分数 |
 | fake | `ok` | `false` | `[0, 1]` 分数 |
-| 输入不合格，例如太靠近图像边缘 | `input_rejected` | `null` | `null` |
+| 人脸周围的有效图像区域不足 | `input_rejected` | `null` | `null` |
+
+只有对齐后人脸周围的原图有效区域不足时，才返回 `input_rejected`。此时额外提供 `liveness.reason`，用于向用户解释；活体通过和 fake 结果不包含 `reason`。FaceAnalysis 和 API 始终返回英文提示，只有 Web UI 按界面语言翻译显示。程序应根据 `status` 和 `is_live` 判断，不要解析 `reason` 文本。旧的已保存结果可能没有 `reason`，客户端可回退到通用的输入被拒绝提示。
+
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
 
 `live_score >= liveness_threshold` 判为通过。未启用、注册跳过活体或比对范围未选中的一侧不返回
 `liveness`；这与 `is_live: null` 表示输入被拒绝有明确区别。
@@ -138,9 +149,9 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 `/v1/detect` 始终不提取 embedding，fake 和输入不合格都以 HTTP 200 返回逐脸结果。
 `normal` 下，embedding、比对和 Collection 搜索在活体不通过时返回 HTTP 422：
 错误码分别为 `liveness_fake` 和 `liveness_input_rejected`，
-`error.details.liveness` 包含上述三个字段；比对还提供 `error.details.side`
+`error.details.liveness` 包含活体结果，输入被拒绝时还包含 `reason`；比对还提供 `error.details.side`
 （`source` 或 `target`）。被拦截的操作不返回相似度或匹配结果。
-推理故障返回 HTTP 503 `liveness_unavailable`，不归类为 fake。
+推理故障返回 HTTP 503 `liveness_unavailable`，不归类为 fake。 运行故障在 `normal` 和 `observe` 下都会中止操作，不会转换为 `input_rejected`。
 
 ### 注册默认跳过活体
 
@@ -214,7 +225,7 @@ Collection 会固定绑定模型 ID、digest、特征维度和预处理版本。
 
 在 **比对** 中分别上传 source 和 target，并可选择系统或 Collection 检测配置。配置中的策略从两张图各挑选一张可用脸，返回原始 cosine `similarity`、`threshold` 和 `matched`。Similarity 不是概率；任一图片没有可用脸时返回 `422 face_not_found`。
 
-启用活体后，每张执行过活体的人脸会包含 `liveness.status`、`liveness.is_live`、`liveness.live_score`。检测对 fake 和 `input_rejected` 都返回 HTTP 200，且不提取识别特征。`input_rejected` 表示图片不满足评估条件，例如人脸太靠近边缘；应换用人脸周围留有空间的图片。缺少 `liveness` 表示这张脸未执行活体。
+启用活体后，每张执行过活体的人脸会包含 `liveness.status`、`liveness.is_live`、`liveness.live_score`。检测对 fake 和 `input_rejected` 都返回 HTTP 200，且不提取识别特征。`input_rejected` 表示人脸周围的有效图像区域不足，`liveness.reason` 提供调整图片的提示。缺少 `liveness` 表示这张脸未执行活体。
 
 活体在识别前执行，`liveness_compare_scope` 决定检查 `both`、`source` 或 `target`。`normal` 下任一被检查侧未通过时，返回 HTTP 422 `liveness_fake` 或 `liveness_input_rejected`，并提供 `error.details.liveness` 和 `error.details.side`，不返回相似度。`observe` 继续比对，并在执行过检查的人脸上返回活体结果。
 
@@ -381,12 +392,17 @@ Compute Capability、Driver、实际CUDA/cuDNN/ORT版本、`CUDAExecutionProvide
 
 ## 15. 构建、升级、备份与恢复
 
-用户可从完整仓库自行构建：
+可以直接使用完整的本地源码目录构建，包括尚未提交的修改，也允许目录中没有
+`.git`。Git 提交或推送都不是构建的前提。
 
 ```bash
 make -C server build-cpu
 make -C server build-cuda12
 ```
+
+测试通过后，发布经过测试的同一个镜像。之后仅将相同源码提交或整理 Git 提交，
+无需重新构建。如果修改了会进入镜像的文件，例如代码、前端资源或内置用户帮助
+文档，则需要重新构建并验证。
 
 随后在Compose的模型安装与`up`命令中加入`--pull never`，即可使用本地镜像。构建
 使用固定基础镜像和锁定依赖，但仍需联网获取这些输入。公开版本Tag为
@@ -453,8 +469,8 @@ Web UI 不提供基础模型包切换。
 **API 与 SDK 兼容性：**模型、Collection 和 FaceSample 结果不再包含
 `model_version`；模型身份使用 `model_id`，人员库兼容性使用
 `embedding_contract_id`。自有客户端应取消对旧字段的依赖，使用随项目提供的
-Python SDK 时同步升级到 `0.3.0`。执行活体时，`liveness` 只包含 `status`、
-`is_live`、`live_score` 三个字段；未执行时省略该结果。对识别请求启用活体前，
+Python SDK 时同步升级到 `0.3.0`。执行活体时，`liveness` 包含 `status`、
+`is_live`、`live_score` 三个核心字段，仅 `input_rejected` 额外包含 `reason`；未执行时省略该结果。对识别请求启用活体前，
 请了解[活体响应与错误规则](#检测识别和错误返回)。
 
 跨网络使用时，应在可信反向代理终止HTTPS，只开放必要的CORS origin，并在边缘限制

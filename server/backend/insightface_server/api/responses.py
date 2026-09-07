@@ -58,11 +58,13 @@ class FaceQuality(PublicResponseModel):
 
 
 class LivenessResult(BaseModel):
-    """Exactly three fields describe the evaluation.
+    """Three core fields describe the evaluation; rejected input may also include reason.
 
     Live: {"status":"ok","is_live":true,"live_score":0.98}.
     Fake: {"status":"ok","is_live":false,"live_score":0.12}.
     Unsuitable input: {"status":"input_rejected","is_live":null,"live_score":null}.
+    For input_rejected, optional reason is an English explanation with guidance for retrying.
+    Older results may omit reason. Successful and fake evaluations have only the three core fields.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -81,6 +83,14 @@ class LivenessResult(BaseModel):
     )
     live_score: float | None = Field(
         description="Live probability from 0 to 1 for status=ok; null for input_rejected.",
+    )
+    reason: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional English explanation and retry guidance, present only for input_rejected. "
+            "Older results may omit it. Omitted for status=ok."
+        ),
     )
 
 

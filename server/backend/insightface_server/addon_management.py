@@ -8,12 +8,14 @@ import os
 import stat
 import tempfile
 import threading
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import tomlkit
 from fastapi import Request
+from tomlkit.items import Array
 
 from .addons import install_addon
 from .config import Settings, load_server_config
@@ -182,10 +184,14 @@ class LivenessManager:
             if section not in document:
                 document[section] = tomlkit.table()
             table = document[section]
+            # Normal, inline, and dotted TOML tables share this mapping interface.
+            assert isinstance(table, MutableMapping)
             if key not in table:
                 table[key] = tomlkit.array()
-            if "liveness" not in table[key]:
-                table[key].append("liveness")
+            addons = table[key]
+            assert isinstance(addons, Array)
+            if "liveness" not in addons:
+                addons.append("liveness")
         updated = tomlkit.dumps(document)
         if original == updated:
             return

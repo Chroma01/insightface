@@ -6,7 +6,19 @@ import pytest
 from fastapi.testclient import TestClient
 from insightface_server import app as app_module
 from insightface_server.addons import LivenessUnavailable
+from insightface_server.api.responses import LivenessResult
+from insightface_server.errors import ApiError
 from insightface_server.inference.mock import MockInferenceEngine
+
+INPUT_REJECTED = {
+    "status": "input_rejected",
+    "is_live": None,
+    "live_score": None,
+    "reason": (
+        "Insufficient image area around the face for liveness detection. Move the face "
+        "toward the center, step back from the camera, or use a less tightly cropped image."
+    ),
+}
 
 
 @pytest.fixture
@@ -17,6 +29,7 @@ def liveness_client(make_settings, monkeypatch):
         state = {
             "result": result or {"status": "ok", "is_live": True, "live_score": 0.99},
             "fail": False,
+            "missing_embedding": False,
             "calls": [],
         }
 
@@ -30,6 +43,8 @@ def liveness_client(make_settings, monkeypatch):
                     for face in faces:
                         face.liveness = dict(state["result"])
                         if mode == "normal" and face.liveness["is_live"] is not True:
+                            face.embedding = None
+                        if state["missing_embedding"]:
                             face.embedding = None
                 return faces
 
@@ -58,9 +73,10 @@ def liveness_client(make_settings, monkeypatch):
             {"status": "input_rejected", "is_live": None, "live_score": None},
             "liveness_input_rejected",
         ),
+        (INPUT_REJECTED, "liveness_input_rejected"),
     ],
 )
-def test_detect_returns_three_fields_and_normal_operations_report_distinct_errors(
+def test_detect_preserves_liveness_and_normal_operations_report_distinct_errors(
     liveness_client, image_bytes, create_collection, result, code
 ):
     client, state = liveness_client(result=result, on_registration=True)
@@ -74,9 +90,16 @@ def test_detect_returns_three_fields_and_normal_operations_report_distinct_error
         assert response.status_code == 422, response.text
         assert response.json()["error"]["code"] == code
         assert response.json()["error"]["details"]["liveness"] == result
+        if code == "liveness_input_rejected":
+            assert response.json()["error"]["message"] == result.get(
+                "reason", "Input does not meet liveness requirements. Adjust face position and retry."
+            )
     response = client.post("/v1/compare", files={"source": image, "target": image})
     assert response.status_code == 422
     assert response.json()["error"]["details"]["side"] == "source"
+    assert response.json()["error"]["details"]["liveness"] == result
+    if "reason" in result:
+        assert response.json()["error"]["message"] == result["reason"]
     response = client.post(
         f"/v1/collections/{collection['id']}/persons",
         data={"id": "alice", "review_mode": "off", "liveness_on_registration": "false"},
@@ -101,12 +124,17 @@ def test_detect_returns_three_fields_and_normal_operations_report_distinct_error
     )
     assert added.status_code == 201 and added.json()["faces"] == [], added.text
     assert added.json()["rejected_images"][0]["reason"] == code
+    assert added.json()["rejected_images"][0]["liveness"] == result
 
 
+@pytest.mark.parametrize("result", [
+    {"status": "ok", "is_live": False, "live_score": 0.1},
+    {"status": "input_rejected", "is_live": None, "live_score": None},
+    INPUT_REJECTED,
+])
 def test_observe_keeps_matching_and_persists_registration_snapshot(
-    liveness_client, image_bytes, create_collection
+    liveness_client, image_bytes, create_collection, result
 ):
-    result = {"status": "ok", "is_live": False, "live_score": 0.1}
     client, state = liveness_client(mode="observe", result=result, on_registration=True)
     collection = create_collection(client)
     image = ("face.png", image_bytes(), "image/png")
@@ -127,6 +155,14 @@ def test_observe_keeps_matching_and_persists_registration_snapshot(
         files={"images": image},
     )
     assert added.status_code == 201 and added.json()["faces"][0]["liveness"] == result
+    searched = client.post(
+        f"/v1/collections/{collection['id']}/search", files={"image": image},
+    )
+    assert searched.status_code == 200, searched.text
+    assert searched.json()["searched_face"]["liveness"] == result
+    embedded = client.post("/v1/embeddings", files={"image": image})
+    assert embedded.status_code == 200, embedded.text
+    assert embedded.json()["faces"][0]["liveness"] == result
     state["result"] = {"status": "ok", "is_live": True, "live_score": 0.99}
     fetched = client.get(f"/v1/collections/{collection['id']}/persons/alice/faces")
     assert fetched.status_code == 200, fetched.text
@@ -180,6 +216,7 @@ def test_external_trusted_enrollment_does_not_bypass_liveness(
     [
         {"status": "ok", "is_live": False, "live_score": 0.1},
         {"status": "input_rejected", "is_live": None, "live_score": None},
+        INPUT_REJECTED,
     ],
 )
 def test_registration_defaults_to_skipping_liveness_for_new_and_added_faces(
@@ -241,12 +278,15 @@ def test_skipped_registration_does_not_call_a_failing_liveness_model(
     assert detected.json()["error"]["code"] == "liveness_unavailable"
 
 
+@pytest.mark.parametrize("result", [
+    {"status": "ok", "is_live": False, "live_score": 0.1}, INPUT_REJECTED,
+])
 def test_video_search_never_queries_index_for_blocked_faces(
-    liveness_client, image_bytes, create_collection, monkeypatch
+    liveness_client, image_bytes, create_collection, monkeypatch, result
 ):
     from insightface_server.services.images import ImageLoader
 
-    client, state = liveness_client(result={"status": "ok", "is_live": False, "live_score": 0.1})
+    client, state = liveness_client(result=result)
     collection = create_collection(client)
     service = client.app.state.service
 
@@ -258,3 +298,98 @@ def test_video_search_never_queries_index_for_blocked_faces(
     faces, _ = service.search_all_faces(collection["id"], image, max_faces=10, threshold=None)
     assert len(faces) == 1 and faces[0]["status"] == "liveness_blocked"
     assert faces[0]["match"] is None
+    assert faces[0]["face"]["liveness"] == result
+
+
+@pytest.mark.parametrize("result", [
+    {"status": "ok", "is_live": True, "live_score": 0.99},
+    {"status": "ok", "is_live": False, "live_score": 0.1},
+    {"status": "input_rejected", "is_live": None, "live_score": None},
+    INPUT_REJECTED,
+])
+def test_liveness_schema_omits_only_missing_reason_and_keeps_rejection_nulls(result):
+    model = LivenessResult.model_validate(result)
+    assert model.model_dump() == result
+    assert json.loads(model.model_dump_json()) == result
+    if "reason" not in result:
+        assert LivenessResult.model_validate({**result, "reason": None}).model_dump() == result
+
+
+def test_strict_registration_identity_rejection_preserves_liveness(
+    liveness_client, image_bytes, create_collection, monkeypatch,
+):
+    client, _ = liveness_client(mode="observe", result=INPUT_REJECTED, on_registration=True)
+    collection = create_collection(client)
+    monkeypatch.setattr(
+        client.app.state.search_indexes,
+        "best_other_person",
+        lambda *args, **kwargs: {"person_id": "bob", "face_id": "bob-face", "similarity": 1.0},
+    )
+    sample = image_bytes(102)
+    response = client.post(
+        f"/v1/collections/{collection['id']}/persons",
+        data={"id": "alice", "review_mode": "strict"},
+        files=[
+            ("images", ("bootstrap.png", sample, "image/png")),
+            ("images", ("tie.png", sample, "image/png")),
+        ],
+    )
+    assert response.status_code == 201, response.text
+    assert len(response.json()["faces"]) == 1
+    assert response.json()["faces"][0]["liveness"] == INPUT_REJECTED
+    rejected = response.json()["rejected_images"][0]
+    assert rejected["reason"] == "identity_similarity_conflict"
+    assert rejected["liveness"] == INPUT_REJECTED
+
+
+def test_embedding_unavailable_preserves_completed_liveness(liveness_client, image_bytes):
+    client, state = liveness_client(mode="observe", result=INPUT_REJECTED)
+    state["missing_embedding"] = True
+    response = client.post(
+        "/v1/embeddings", files={"image": ("face.png", image_bytes(), "image/png")},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "embedding_unavailable"
+    assert response.json()["error"]["details"]["liveness"] == INPUT_REJECTED
+
+
+@pytest.mark.parametrize("mode", ["normal", "observe"])
+def test_liveness_faults_abort_image_registration_and_video_operations(
+    liveness_client, image_bytes, create_collection, monkeypatch, mode,
+):
+    from insightface_server.services.images import ImageLoader
+
+    client, state = liveness_client(mode=mode, on_registration=True)
+    collection = create_collection(client)
+    base = f"/v1/collections/{collection['id']}"
+    image = ("face.png", image_bytes(), "image/png")
+    registered = client.post(
+        f"{base}/persons", data={"id": "alice"}, files={"images": image},
+    )
+    assert registered.status_code == 201, registered.text
+    state["fail"] = True
+    service = client.app.state.service
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("A liveness failure must abort identity search")
+
+    monkeypatch.setattr(service.search_indexes, "search", unexpected)
+    requests = [
+        ("/v1/detect", {"files": {"image": image}}),
+        ("/v1/embeddings", {"files": {"image": image}}),
+        ("/v1/compare", {"files": {"source": image, "target": image}}),
+        (f"{base}/search", {"files": {"image": image}}),
+        (f"{base}/persons", {"data": {"id": "bob"}, "files": {"images": image}}),
+        (f"{base}/persons/alice/faces", {"files": {"images": image}}),
+    ]
+    for path, options in requests:
+        response = client.post(path, **options)
+        assert response.status_code == 503, response.text
+        assert response.json()["error"]["code"] == "liveness_unavailable"
+        assert "liveness" not in response.json()["error"]["details"]
+    assert client.get(f"{base}/persons/bob").status_code == 404
+    assert len(client.get(f"{base}/persons/alice/faces").json()["faces"]) == 1
+    loaded = ImageLoader(service.settings).from_bytes(image_bytes(), filename="frame.png")
+    with pytest.raises(ApiError) as caught:
+        service.search_all_faces(collection["id"], loaded, max_faces=10, threshold=None)
+    assert caught.value.status_code == 503 and caught.value.code == "liveness_unavailable"

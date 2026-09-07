@@ -48,8 +48,16 @@ configured on the Server, not per SDK request. The Web UI can download the addon
 and save its activation in `server.toml`; an operator must restart Server before
 it affects SDK calls. See the [Server user guide](../../docs/user-guide.md#optional-liveness-addon). Access
 `client.detect(image).faces[0].get("liveness")`; when evaluated, the mapping has
-exactly `status`, `is_live` and `live_score`. Absence means not evaluated;
-`status == "input_rejected"` has `is_live` and `live_score` set to `None`.
+the three core fields `status`, `is_live` and `live_score`. Absence means not
+evaluated. Only insufficient image area around the aligned face produces
+`status == "input_rejected"`, with `is_live` and `live_score` set to `None` and
+an additional human-readable `reason`. Live and fake results omit `reason`.
+The API always returns this explanation in English:
+
+> Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image.
+
+Use `status` and `is_live` for program logic; `reason` is not an enumeration code.
+Older saved results may lack `reason`, so keep a generic display fallback.
 
 In `normal`, compare, embeddings and search raise `ValidationError` (HTTP 422)
 with `code == "liveness_fake"` or `"liveness_input_rejected"`. Read
@@ -59,8 +67,10 @@ for both new Persons and added FaceSamples; new samples then omit `liveness`.
 With that server setting enabled, enrollment follows `normal`/`observe`, and its
 liveness rejection entries expose the same mapping. An all-rejected new Person
 uses `registration_failed` with `details["rejected_images"]`. Runtime inference
-failures raise `ServiceUnavailableError` with `code == "liveness_unavailable"`.
-In `observe`, recognition continues and successful face results retain liveness.
+failures raise `ServiceUnavailableError` with `code == "liveness_unavailable"`
+and stop the operation in both `normal` and `observe`; they are not input rejections.
+In `observe`, recognition continues after live, fake or input-rejected results,
+and successful face results retain liveness.
 
 ```python
 from insightface_server import ValidationError
@@ -69,7 +79,10 @@ try:
     result = client.compare(source, target)
 except ValidationError as error:
     if error.code in {"liveness_fake", "liveness_input_rejected"}:
-        print(error.details["side"], error.details["liveness"])
+        liveness = error.details["liveness"]
+        print(error.details["side"], liveness)
+        if liveness["status"] == "input_rejected":
+            print(liveness.get("reason") or "Input rejected by liveness detection.")
     else:
         raise
 ```

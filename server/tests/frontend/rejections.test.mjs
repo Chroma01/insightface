@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { t } from "../../frontend/i18n.mjs";
 import { renderRejectionList } from "../../frontend/rejections.mjs";
+import { livenessResultText } from "../../frontend/liveness.mjs";
+import { formatScore } from "../../frontend/core.mjs";
 
 // Only the DOM operations used by this renderer; no browser globals required.
 function element(tag, { className = "", text = "" } = {}) {
@@ -12,13 +14,31 @@ function element(tag, { className = "", text = "" } = {}) {
   };
 }
 
-function render(target, items, files = []) {
+function render(target, items, files = [], livenessText = (item) => `liveness: ${JSON.stringify(item.liveness)}`) {
   renderRejectionList(target, items, files, {
     element,
     t: (message, values) => t(message, values, "zh"),
-    livenessText: (item) => `liveness: ${JSON.stringify(item.liveness)}`,
+    livenessText,
   });
 }
+
+test("enrollment renders localized input advice as text beside the independent business reason", () => {
+  const inputReason = "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image.";
+  const unknownReason = '<img src=x onerror="alert(1)">';
+  for (const businessReason of ["liveness_input_rejected", "low_quality"]) {
+    for (const reason of [inputReason, unknownReason, undefined]) {
+      const target = element("div");
+      const item = Object.freeze({ reason: businessReason, liveness: Object.freeze({ status: "input_rejected", is_live: null, live_score: null, reason }) });
+      render(target, [item], [], (entry) => livenessResultText(entry.liveness, { translate: (message) => t(message, {}, "zh"), formatScore }));
+      const [primary, supplemental] = target.children[1].children[1].children;
+      assert.equal(primary.textContent, businessReason);
+      assert.equal(supplemental.textContent, t(reason ?? "Liveness input rejected", {}, "zh"));
+      assert.deepEqual(supplemental.children, []);
+      assert.equal(item.liveness.reason, reason);
+      assert.equal(item.reason, businessReason);
+    }
+  }
+});
 
 test("an enrollment rejection keeps its actual reason alongside any liveness result", () => {
   for (const [reason, liveness] of [

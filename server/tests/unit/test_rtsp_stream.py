@@ -233,11 +233,22 @@ def test_requested_rate_maps_to_start_interval(fps: float, expected: float) -> N
     ) == pytest.approx(4.0 + expected)
 
 
-def test_blocked_face_is_not_unknown_and_restarts_identity_confirmation() -> None:
+@pytest.mark.parametrize("liveness", [
+    {"status": "ok", "is_live": False, "live_score": 0.1},
+    {"status": "input_rejected", "is_live": None, "live_score": None},
+    {
+        "status": "input_rejected", "is_live": None, "live_score": None,
+        "reason": (
+            "Insufficient image area around the face for liveness detection. Move the face "
+            "toward the center, step back from the camera, or use a less tightly cropped image."
+        ),
+    },
+])
+def test_blocked_face_is_not_unknown_and_restarts_identity_confirmation(liveness) -> None:
     session, service = _session(_options(confirm_frames=2))
     items, _ = service.search_all_faces()
     matched = _monitor_result(items[0])
-    face = {**items[0]["face"], "liveness": {"status": "ok", "is_live": False, "live_score": 0.1}}
+    face = {**items[0]["face"], "liveness": liveness}
     blocked = _monitor_result({"status": "liveness_blocked", "face": face, "match": None})
     session._update_tracks([matched], 0.0)
     session._results = session._update_tracks([blocked], 0.01)

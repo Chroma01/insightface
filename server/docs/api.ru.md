@@ -64,9 +64,20 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 | Подделка | `ok` | `false` | `[0, 1]` |
 | Неподходящий вход | `input_rejected` | `null` | `null` |
 
-`normal` распознаёт только лица, прошедшие проверку; `observe` сохраняет результат и продолжает распознавание. Без проверки поле `liveness` отсутствует. Объект содержит только `status`, `is_live` и `live_score`: живое лицо и подделка получают `status: ok`, логическое значение и оценку; отклонённый вход — `status: input_rejected` и два значения `null`.
+Только недостаточная область исходного изображения вокруг выровненного лица приводит к `input_rejected`. Такой результат дополнительно содержит `liveness.reason` — пояснение для пользователя; у живого лица и подделки поля `reason` нет. FaceAnalysis и API всегда возвращают этот текст на английском; перевод отображается только в Web-интерфейсе. В логике программы используйте `status` и `is_live`, а не текст `reason`. В ранее сохранённых результатах `reason` может отсутствовать; в этом случае клиент может показать общее сообщение об отклонении входного изображения.
 
-`/v1/detect` возвращает HTTP 200 и для отрицательных результатов. В режиме `normal` embeddings, сравнение и поиск возвращают HTTP 422 `liveness_fake` или `liveness_input_rejected` с `error.details.liveness`; сравнение добавляет `details.side`. Сбой инференса возвращает HTTP 503 `liveness_unavailable`.
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal` распознаёт только лица, прошедшие проверку; `observe` сохраняет результат и продолжает распознавание. Без проверки поле `liveness` отсутствует. Три основных поля — `status`, `is_live` и `live_score`: живое лицо и подделка получают `status: ok`, логическое значение и оценку; отклонённый вход — `status: input_rejected` и два значения `null`.
+
+`/v1/detect` возвращает HTTP 200 и для отрицательных результатов. В режиме `normal` embeddings, сравнение и поиск возвращают HTTP 422 `liveness_fake` или `liveness_input_rejected` с `error.details.liveness`; сравнение добавляет `details.side`. Сбой инференса возвращает HTTP 503 `liveness_unavailable`. Сбои выполнения прерывают операцию и в `normal`, и в `observe`; они не преобразуются в `input_rejected`.
 
 При создании Person и добавлении FaceSample проверка по умолчанию пропускается: `[inference].liveness_on_registration=false` не запускает модель и не добавляет `liveness` к новым образцам. При `true` и включённом addon применяется режим `normal`/`observe`; отклонённые изображения содержат `reason` и `liveness`. Проверка качества по `review_mode` и валидация внешних эмбеддингов сохраняются. `review_mode=off` и `external_trusted` не обходят включённую проверку при регистрации. Запрос не может переопределить эту настройку запуска. Ранее сохранённые результаты остаются доступны.
 
@@ -147,7 +158,7 @@ curl -sS "${BASE_URL}/v1/addons/liveness/enable" -H "${AUTH_HEADER}" \
 
 ### `POST /v1/detect`
 
-Каждое проверенное лицо содержит `liveness.status`, `liveness.is_live` и `liveness.live_score`. Результаты подделки и `input_rejected` также возвращают HTTP 200 без извлечения признаков распознавания. `input_rejected` означает неподходящий ввод, например лицо слишком близко к краю. Если `liveness` отсутствует, проверки не было.
+Каждое проверенное лицо содержит `liveness.status`, `liveness.is_live` и `liveness.live_score`. Результаты подделки и `input_rejected` также возвращают HTTP 200 без извлечения признаков распознавания. `input_rejected` означает недостаточную область изображения вокруг лица; `liveness.reason` объясняет, как скорректировать изображение. Если `liveness` отсутствует, проверки не было.
 
 **Ввод:** multipart `image` обязателен, `max_faces` 1–100, необязательный `collection_id`. **Работа/результат:** объединяет разрешения, делает общую NMS и сортирует по площади; 200 `faces` с рамками/5 точками/score/quality и `processing_ms`. Нет лица — корректный пустой список. **Ошибки:** 400 старый min_score, 404 Collection, 413, 422 invalid_image, 503.
 

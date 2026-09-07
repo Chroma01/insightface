@@ -643,7 +643,7 @@ for face in faces:
     if result is None:
         print("Liveness was not run")
     elif result.status == "input_rejected":
-        print("Input unsuitable for liveness; adjust face position and retry")
+        print(result.reason)
     elif result.is_live:
         print("Live:", result.live_score)
     else:
@@ -670,8 +670,8 @@ verified before loading. For offline use, place the published file at this path
 before constructing FaceAnalysis. An existing file with an unexpected digest
 raises an error and is not overwritten.
 
-`get()` still returns a list of `Face` objects. Each evaluated face has exactly
-three liveness fields, accessible as attributes or dictionary keys:
+`get()` still returns a list of `Face` objects. Each evaluated face has
+three core liveness fields, accessible as attributes or dictionary keys:
 
 | Result | `status` | `is_live` | `live_score` |
 | --- | --- | --- | --- |
@@ -679,12 +679,24 @@ three liveness fields, accessible as attributes or dictionary keys:
 | Fake | `"ok"` | `False` | Model probability |
 | Input rejected | `"input_rejected"` | `None` | `None` |
 
+Only insufficient source-image area around the aligned face produces
+`input_rejected`. It adds a human-readable `reason`; live and fake results omit
+this field. FaceAnalysis always returns this English text:
+
+> Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image.
+
+Use `status` and `is_live` for program logic, not the wording of `reason`. For
+older results without it, a client can use
+`result.get("reason") or "Input rejected by liveness detection."`.
+
 When the liveness addon is not selected, the `liveness` key is absent and `face.liveness` returns
 `None`, following the existing `Face` attribute convention. No detected faces
 still returns `[]`. Fake and rejected faces remain in the list, with their
 bounding boxes and landmarks; normal mode skips only the recognition task.
-Other selected tasks retain their existing behavior. Model-loading errors,
-inference failures and invalid model outputs raise exceptions in every mode;
+Other selected tasks retain their existing behavior. Invalid landmarks raise
+`ValueError`; an alignment failure raises `RuntimeError`. These errors, model-loading
+errors, inference failures and invalid model outputs raise exceptions in both
+`normal` and `observe`, ending the call;
 they are never reported as fake or silently ignored. Recognition and other
 models still require their own valid inputs in observe mode.
 
@@ -695,8 +707,6 @@ The model receives RGB float32 NCHW pixels divided by 255 and directly outputs a
 live probability. The model's alignment is separate from ArcFace alignment.
 Scores can differ across execution providers; validate the operating threshold
 with the provider used in deployment.
-Detailed input rejection reasons are available through DEBUG logging on
-`insightface.addons.liveness`, without adding fields to the public result.
 
 The model addon is distributed separately from the base models; refer to its
 release repository for provenance and applicable notices. The initial threshold

@@ -87,9 +87,20 @@ Se precisar de proxy, defina `HTTP_PROXY`, `HTTPS_PROXY` e `NO_PROXY` antes de c
 | Não vivo | `ok` | `false` | `[0, 1]` |
 | Entrada rejeitada | `input_rejected` | `null` | `null` |
 
-`normal` reconhece apenas rostos aprovados; `observe` registra o resultado e continua o reconhecimento. Sem avaliação, `liveness` é omitido. O objeto contém apenas `status`, `is_live` e `live_score`: aprovado/fake usa `status: ok`, booleano e pontuação; entrada rejeitada usa `status: input_rejected` e dois valores `null`.
+Apenas uma área insuficiente da imagem original em redor do rosto alinhado produz `input_rejected`. Este resultado acrescenta `liveness.reason`, uma explicação para o utilizador; os resultados de rosto vivo ou falsificação omitem `reason`. FaceAnalysis e a API devolvem sempre este texto em inglês; só a interface Web traduz a apresentação. Use `status` e `is_live` na lógica do programa, sem interpretar o texto de `reason`. Resultados antigos guardados podem não incluir `reason`; o cliente pode então apresentar uma mensagem genérica de entrada rejeitada.
 
-Detect retorna HTTP 200 mesmo para resultados negativos. Em `normal`, embeddings, comparação e busca retornam HTTP 422 `liveness_fake` ou `liveness_input_rejected` com `error.details.liveness`; comparação acrescenta `details.side`. Falhas retornam HTTP 503 `liveness_unavailable`.
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal` reconhece apenas rostos aprovados; `observe` registra o resultado e continua o reconhecimento. Sem avaliação, `liveness` é omitido. Os três campos principais são `status`, `is_live` e `live_score`: aprovado/fake usa `status: ok`, booleano e pontuação; entrada rejeitada usa `status: input_rejected` e dois valores `null`.
+
+Detect retorna HTTP 200 mesmo para resultados negativos. Em `normal`, embeddings, comparação e busca retornam HTTP 422 `liveness_fake` ou `liveness_input_rejected` com `error.details.liveness`; comparação acrescenta `details.side`. Falhas retornam HTTP 503 `liveness_unavailable`. As falhas de execução interrompem a operação tanto em `normal` como em `observe`; não são convertidas em `input_rejected`.
 
 O cadastro de pessoas e a adição de FaceSamples ignoram a prova de vida por padrão: `[inference].liveness_on_registration=false` não executa o modelo e omite `liveness` nas novas amostras. Com `true` e o addon habilitado, aplica-se `normal`/`observe`; rejeições incluem `reason` e `liveness`. A revisão de qualidade por `review_mode` e a validação dos embeddings externos continuam ativas. `review_mode=off` e `external_trusted` não ignoram uma prova de cadastro habilitada. As requisições não podem alterar esta configuração de inicialização. Os resultados já salvos continuam disponíveis.
 
@@ -138,7 +149,7 @@ Criar Person e adicionar FaceSamples ignora a prova de vida por predefinição (
 
 Em **Pesquisar**, escolha Collection e imagem. A pontuação da pessoa é a maior similaridade dos seus FaceSamples. Os resultados são decrescentes; sem correspondência é uma lista vazia. Cada amostra é confirmada no SQLite e adicionada ao índice antes da resposta. No reinício, o índice é reconstruído a partir do SQLite.
 
-Cada rosto avaliado inclui `liveness.status`, `liveness.is_live` e `liveness.live_score`. Fake e `input_rejected` também devolvem HTTP 200, sem extrair características de reconhecimento. `input_rejected` significa entrada inadequada, por exemplo um rosto demasiado perto da borda. Sem `liveness`, não houve avaliação.
+Cada rosto avaliado inclui `liveness.status`, `liveness.is_live` e `liveness.live_score`. Fake e `input_rejected` também devolvem HTTP 200, sem extrair características de reconhecimento. `input_rejected` indica uma área de imagem insuficiente em redor do rosto; `liveness.reason` explica como ajustar a imagem. Sem `liveness`, não houve avaliação.
 
 `liveness_compare_scope` (`both`, `source`, `target`) escolhe os lados avaliados antes do reconhecimento. Em `normal`, a rejeição devolve HTTP 422 `liveness_fake` / `liveness_input_rejected`, `error.details.liveness` e `error.details.side`, sem similaridade. `observe` continua e inclui os resultados nos rostos avaliados.
 
@@ -221,12 +232,20 @@ O SDK Python aceita caminho, bytes e file-like object e fornece métodos tipados
 para Detect, Compare, Collections, registo, Search e Monitors. Consulte o
 contrato HTTP no [guia da API](api.pt.md).
 
-Qualquer utilizador pode compilar a partir do repositório completo:
+Pode compilar diretamente a partir de um diretório local com o código fonte
+completo, incluindo alterações sem commit ou um diretório sem `.git`. Fazer
+commits ou enviá-los com Git não é um requisito para compilar.
 
 ```bash
 make -C server build-cpu
 make -C server build-cuda12
 ```
+
+Depois de os testes passarem, publique a mesma imagem que foi testada. Fazer
+mais tarde commit do mesmo código ou organizar os commits não exige nova
+compilação. Alterações aos ficheiros incluídos na imagem, como código, recursos
+do frontend ou ajuda do utilizador integrada, exigem nova compilação e
+validação.
 
 Use `--pull never` no Compose para a imagem local. Os tags imutáveis são
 `0.3.0-cpu` e `0.3.0-cuda12`; `cpu` e `cuda12` apontam à última versão estável,
@@ -307,7 +326,8 @@ FaceSamples deixam de incluir `model_version`; a identidade do modelo usa
 `model_id` e a compatibilidade da Collection usa `embedding_contract_id`.
 Atualize os clientes que exigem o campo removido e use o SDK `0.3.0` ao
 atualizar o cliente Python fornecido. Quando a prova de vida é avaliada,
-`liveness` contém apenas `status`, `is_live` e `live_score`; quando não é
+`liveness` contém os campos principais `status`, `is_live` e `live_score`,
+com `reason` apenas para `input_rejected`; quando não é
 avaliada, o campo é omitido. Consulte as
 [regras de resultados e erros](#resultados-da-prova-de-vida) antes de a ativar
 nos pedidos de reconhecimento.

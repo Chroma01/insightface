@@ -25,8 +25,9 @@ Primary code lives under `server/`. It may import selected existing modules from
 training, or package behavior unless a separate upstream change explicitly
 requires it.
 
-The supported Server runtime is built from the complete repository: its Docker
-image places both `server/backend` and `python-package` on `PYTHONPATH`. The
+The supported Server runtime is built from the complete source tree; a `.git`
+directory is not required. Its Docker image places both `server/backend` and
+`python-package` on `PYTHONPATH`. The
 backend-only wheel produced during release checks is not a standalone inference
 distribution; the independently installable client is the SDK wheel under
 `server/sdk/python`.
@@ -135,7 +136,8 @@ a broad operator class to silence an audit failure.
 
 Architecture compatibility, actual validation, and Community Tested reports
 are distinct labels. A hardware claim requires a dated record containing the
-source revision, image digest, GPU/Driver, actual CUDA/cuDNN/ORT, model
+build origin, local image ID and any published registry digest, GPU/Driver,
+actual CUDA/cuDNN/ORT, model
 identities/digests, provider lists, strict audit, functional flow, and
 consistency result.
 
@@ -224,13 +226,24 @@ read-only model root, and mount the whole configuration directory writable so
 atomic replacement is possible. Host permissions and proxy setup are in the
 [user guide](user-guide.md#web-download-permissions).
 
-Every evaluated face has exactly `status`, `is_live`, and `live_score`. Fake is
-`status=ok` with `is_live=false`; unsuitable input is `status=input_rejected`
-with both values null. An omitted result means no evaluation. In `normal`,
+Every evaluated face has the core fields `status`, `is_live`, and `live_score`.
+Fake is `status=ok` with `is_live=false`. Only insufficient source-image area
+around the aligned face produces `status=input_rejected`, with both values null
+and an additional human-readable `reason`. Live and fake results omit `reason`.
+FaceAnalysis and the API always return this English explanation:
+
+> Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image.
+
+Use `status` and `is_live` for program logic; `reason` is not an enumeration code.
+Only the Web UI translates the display, with a generic fallback for older saved
+results without `reason`. An omitted result means no evaluation. In `normal`,
 failed/rejected liveness stops recognition; `observe` continues. Detection
 still returns all detected faces and their liveness results with HTTP 200.
 Recognition operations return the documented 422 error; inference failures
-return 503, not a fake verdict. Registration skips liveness by default;
+return 503 `liveness_unavailable` and stop the operation in both modes. Invalid
+landmarks raise `ValueError` and alignment failures raise `RuntimeError` in
+FaceAnalysis; Server maps these to 503, not `input_rejected` or fake.
+Registration skips liveness by default;
 `liveness_on_registration=true` applies the configured mode, and enrollment
 review or external embeddings do not bypass it. RTSP keeps blocked faces
 separate from unknown identities.
@@ -485,8 +498,9 @@ images. Record at least:
 - actual Session providers and CUDA strict audit;
 - model/runtime/hardware identity.
 
-Docker validation records build result/digest, build-time verifier, startup
-output, actual `/v1/system`, CRUD/enrollment/search, restart persistence,
+Docker validation records the build origin and result, local image ID, any
+published registry digest, build-time verifier, startup output, actual
+`/v1/system`, CRUD/enrollment/search, restart persistence,
 strict CUDA audit, and CPU/GPU consistency. Never derive a validation claim
 only from Dockerfile text or a base-image tag.
 
@@ -532,7 +546,7 @@ All public variants share:
 ghcr.io/deepinsight/insightface-server
 ```
 
-Each stable version has two immutable tags built from one source revision:
+Each stable version has two immutable tags built from the same source inputs:
 
 ```text
 <major>.<minor>.<patch>-cpu
@@ -543,20 +557,37 @@ Each stable version has two immutable tags built from one source revision:
 overwrite an immutable version tag, and never move either stable channel until
 both versioned variants have passed validation.
 
+This workflow publishes Server images to GHCR. It does not require Git commits,
+Server Git tags, or a Server GitHub Release. Model release assets are maintained
+separately by the repository owner.
+
 ### 15.1 Prepare and validate the source
 
-Use the relaxed precheck while the tree contains local edits:
-
-```bash
-make -C server release-precheck
-```
-
-Before publication, commit all release source and use a clean worktree. The
-strict check verifies synchronized backend, SDK, documentation, Compose, Docker,
-license metadata, Git revision, and release-tag state:
+Run the version and structural consistency checks against the local source tree:
 
 ```bash
 make -C server release-preflight
+# Backward-compatible precheck entry point, with the same checks:
+make -C server release-precheck
+```
+
+Both entry points run the same 39 checks for synchronized backend, SDK,
+documentation, Compose, Docker, and license metadata. Uncommitted changes, a
+missing `.git` directory, or unavailable Git commands produce no warning or
+failure in these checks.
+The script's `--relaxed` flag remains accepted for compatibility; it uses the
+same rules and labels its report `mode: precheck`.
+
+Reports use `schema_version: 2`. Optional `git` metadata contains
+`head_revision` (a string or `null`) and `dirty` (a boolean or `null`).
+`source_revision` is populated only when a valid HEAD and a clean tree are
+known; otherwise it is `null`. This describes the source at precheck time and
+does not identify an image built earlier. A HEAD value from a dirty tree must
+not be presented as the exact source of that build.
+
+Run the quality checks before qualifying the images:
+
+```bash
 make -C server lint
 make -C server test
 make -C server test-api
@@ -576,12 +607,15 @@ python3.11 -m twine check /tmp/ifs-server-dist/* /tmp/ifs-sdk-dist/*
 
 ### 15.2 Build and qualify both images
 
-Build both immutable version tags from the exact committed revision:
+Build both variants from the same source inputs, including any intended local
+edits. Keep files used by the build unchanged between the CPU and CUDA builds.
+The source tree can be a working checkout or a complete copy without Git
+metadata. A retained source copy, archive, or content digest can help later
+traceability, but no particular snapshot mechanism is required.
 
 ```bash
 export RELEASE_VERSION=0.3.0
 export RELEASE_IMAGE=ghcr.io/deepinsight/insightface-server
-export RELEASE_SHA="$(git rev-parse HEAD)"
 
 make -C server build-cpu \
   SERVER_VERSION="$RELEASE_VERSION" \
@@ -589,6 +623,18 @@ make -C server build-cpu \
 make -C server build-cuda12 \
   SERVER_VERSION="$RELEASE_VERSION" \
   CUDA_IMAGE="$RELEASE_IMAGE:$RELEASE_VERSION-cuda12"
+```
+
+Record the resulting local image IDs and associate the validation results with
+those images. The following commands assume both images are on the current
+Docker host; if separate build hosts are used, retain each host's image ID and
+the corresponding validation record.
+
+```bash
+CPU_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$RELEASE_IMAGE:$RELEASE_VERSION-cpu")" || exit 1
+CUDA_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$RELEASE_IMAGE:$RELEASE_VERSION-cuda12")" || exit 1
+export CPU_IMAGE_ID CUDA_IMAGE_ID
+printf 'CPU image ID: %s\nCUDA image ID: %s\n' "$CPU_IMAGE_ID" "$CUDA_IMAGE_ID"
 ```
 
 Run the CPU image on a Linux x86-64 host and the CUDA image on a compatible
@@ -608,29 +654,27 @@ startup checks. Compare CPU and CUDA results for the same image and retain only
 redacted validation notes; never commit the image, embedding, credentials, RTSP
 URLs, or raw biometric output.
 
-### 15.3 Lock the source identity
+### 15.3 Retain the validated images and build record
 
-Fetch tags before any registry write and stop on a tag conflict. Reuse an
-existing release tag only when it is an annotated, validly signed tag for the
-exact release commit; otherwise create and verify it. Pushing the same
-source-bound tag is safe to retry, while a conflicting remote tag is rejected:
+Keep the validated local images for publication and record their image IDs,
+build command, version, and test results. A source snapshot or digest captured
+at build time is optional supporting evidence. Git HEAD may also be recorded
+when available, together with whether the tree had local changes. Neither a
+dirty HEAD nor a preflight report created later proves the exact build inputs.
 
-```bash
-git fetch origin --tags || exit 1
-if git show-ref --verify --quiet "refs/tags/server-v$RELEASE_VERSION"; then
-  if test "$(git rev-list -n 1 "server-v$RELEASE_VERSION")" != "$RELEASE_SHA"; then
-    echo "release tag points to another revision" >&2
-    exit 1
-  fi
-else
-  git tag -s "server-v$RELEASE_VERSION" "$RELEASE_SHA" \
-    -m "InsightFace Server $RELEASE_VERSION" || exit 1
-fi
-git tag -v "server-v$RELEASE_VERSION" || exit 1
-git push origin \
-  "refs/tags/server-v$RELEASE_VERSION:refs/tags/server-v$RELEASE_VERSION" ||
-  exit 1
-```
+Publish these same validated images. Committing or organizing Git history
+afterward does not require a rebuild when the build inputs have not changed.
+README files are not copied into Server images, so README-only edits also do
+not require a container rebuild. User/API Guides, this maintainer guide, guide
+images, and frontend assets are included in the images. Changes to those files
+or to any other image inputs require rebuilding the affected images and
+validating them again before publication. Do not rebuild an already validated
+image just to attach a later Git commit to the release.
+
+When transferring an image between Docker hosts, preserve it with
+`docker save`/`docker load` or an existing registry digest and verify that the
+image ID is unchanged. A local image ID and a registry manifest digest identify
+different objects; record both instead of comparing them directly.
 
 ### 15.4 Publish manually to GHCR
 
@@ -662,12 +706,16 @@ for VARIANT in cpu cuda12; do
 done
 ```
 
-Only after confirming both immutable tags are absent, push both validated
-images:
+After confirming both immutable tags are absent, check that the local tags
+still point to the images that passed validation, then push them. Restore
+`CPU_IMAGE_ID` and `CUDA_IMAGE_ID` from the build record if this is a new shell
+or publication host; do not replace them with IDs from unverified images.
 
 ```bash
-docker push "$RELEASE_IMAGE:$RELEASE_VERSION-cpu"
-docker push "$RELEASE_IMAGE:$RELEASE_VERSION-cuda12"
+test "$(docker image inspect --format '{{.Id}}' "$RELEASE_IMAGE:$RELEASE_VERSION-cpu")" = "$CPU_IMAGE_ID" || exit 1
+test "$(docker image inspect --format '{{.Id}}' "$RELEASE_IMAGE:$RELEASE_VERSION-cuda12")" = "$CUDA_IMAGE_ID" || exit 1
+docker push "$RELEASE_IMAGE:$RELEASE_VERSION-cpu" || exit 1
+docker push "$RELEASE_IMAGE:$RELEASE_VERSION-cuda12" || exit 1
 ```
 
 Resolve and validate the two remote digests. These digest references, not the
@@ -692,6 +740,16 @@ case "$CPU_DIGEST:$CUDA_DIGEST" in
 esac
 ```
 
+Read the published images back by those exact digests and verify that their
+local image IDs match the validated images:
+
+```bash
+docker pull "$RELEASE_IMAGE@$CPU_DIGEST" || exit 1
+test "$(docker image inspect --format '{{.Id}}' "$RELEASE_IMAGE@$CPU_DIGEST")" = "$CPU_IMAGE_ID" || exit 1
+docker pull "$RELEASE_IMAGE@$CUDA_DIGEST" || exit 1
+test "$(docker image inspect --format '{{.Id}}' "$RELEASE_IMAGE@$CUDA_DIGEST")" = "$CUDA_IMAGE_ID" || exit 1
+```
+
 Record any existing `cpu` and `cuda12` stable-channel digests before changing
 them. Only after both versioned digests are readable and verified, move the two
 stable channels to those exact digest references:
@@ -699,10 +757,10 @@ stable channels to those exact digest references:
 ```bash
 docker buildx imagetools create \
   --prefer-index=false \
-  --tag "$RELEASE_IMAGE:cpu" "$RELEASE_IMAGE@$CPU_DIGEST"
+  --tag "$RELEASE_IMAGE:cpu" "$RELEASE_IMAGE@$CPU_DIGEST" || exit 1
 docker buildx imagetools create \
   --prefer-index=false \
-  --tag "$RELEASE_IMAGE:cuda12" "$RELEASE_IMAGE@$CUDA_DIGEST"
+  --tag "$RELEASE_IMAGE:cuda12" "$RELEASE_IMAGE@$CUDA_DIGEST" || exit 1
 ```
 
 Read both stable tags back and require their digests to match the recorded
@@ -713,12 +771,12 @@ test "$(
   docker buildx imagetools inspect "$RELEASE_IMAGE:cpu" \
     --format '{{json .Manifest}}' |
   python3.11 -c 'import json,sys; print(json.load(sys.stdin)["digest"])'
-)" = "$CPU_DIGEST"
+)" = "$CPU_DIGEST" || exit 1
 test "$(
   docker buildx imagetools inspect "$RELEASE_IMAGE:cuda12" \
     --format '{{json .Manifest}}' |
   python3.11 -c 'import json,sys; print(json.load(sys.stdin)["digest"])'
-)" = "$CUDA_DIGEST"
+)" = "$CUDA_DIGEST" || exit 1
 docker logout ghcr.io
 ```
 

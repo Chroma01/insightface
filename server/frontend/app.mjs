@@ -2,7 +2,7 @@ import { ApiClient, ApiError } from "./api.mjs?v=0.3.0-r1";
 import { initializeI18n, locale, setLocale, t, translateTree } from "./i18n.mjs?v=0.3.0-r1";
 import { documentationLink, renderMarkdown } from "./markdown.mjs?v=0.3.0-r1";
 import { renderRejectionList } from "./rejections.mjs?v=0.3.0-r1";
-import { createLivenessManager, livenessManagementView, livenessMessage, livenessRuntimeLabel } from "./liveness.mjs?v=0.3.0-r1";
+import { createLivenessManager, livenessErrorText, livenessManagementView, livenessMessage, livenessResultText, livenessRuntimeLabel } from "./liveness.mjs?v=0.3.0-r1";
 import {
   applySearchProfileAvailability,
   authenticationEnabledFromHealth,
@@ -172,12 +172,7 @@ function toast(title, message = "", kind = "success") {
 }
 
 function describeError(error) {
-  if (error instanceof ApiError && error.details?.liveness) {
-    const side = error.details.side === "source" ? t("Source face")
-      : error.details.side === "target" ? t("Target face") : "";
-    return [side, livenessText(error.details)].filter(Boolean).join(" · ");
-  }
-  if (error instanceof ApiError) return `${error.code}: ${livenessMessage(error.code, error.message, t)}`;
+  if (error instanceof ApiError) return livenessErrorText(error, { translate: t, formatScore });
   return t(error?.message || "Unexpected error.");
 }
 
@@ -999,11 +994,8 @@ function resultFaces(payload) {
   return listItems(payload, ["faces", "detections"]);
 }
 
-function livenessText(face) {
-  const result = face?.liveness;
-  if (!result) return "";
-  if (result.status === "input_rejected") return t("Liveness input rejected");
-  return `${t(result.is_live === true ? "Liveness passed" : "Liveness failed")} · ${formatScore(result.live_score)}`;
+function livenessText(face, options = {}) {
+  return livenessResultText(face?.liveness, { translate: t, formatScore, ...options });
 }
 
 function renderFaceResults(target, faces) {
@@ -1072,7 +1064,10 @@ async function submitCompare(event) {
     threshold: formatCosine(payload.threshold),
     duration: formatDuration(payload.processing_ms),
   });
-  const liveness = [livenessText(payload.source_face), livenessText(payload.target_face)].filter(Boolean);
+  const liveness = [
+    livenessText(payload.source_face, { side: "source" }),
+    livenessText(payload.target_face, { side: "target" }),
+  ].filter(Boolean);
   if (liveness.length) $("small", verdict).textContent += ` · ${liveness.join(" / ")}`;
 }
 
@@ -1494,7 +1489,7 @@ function drawMonitorOverlay(stream) {
     const baseLabel = recognized
       ? `${identity.name || identity.id} ${formatCosine(identity.similarity)}`
       : blocked ? t("Liveness blocked recognition") : t("Not enrolled");
-    const label = [baseLabel, livenessText(result.face)].filter(Boolean).join(" · ");
+    const label = [baseLabel, livenessText(result.face, { compact: true })].filter(Boolean).join(" · ");
     context.strokeStyle = color;
     context.strokeRect(x, y, boxWidth, boxHeight);
     const labelWidth = context.measureText(label).width + 12;

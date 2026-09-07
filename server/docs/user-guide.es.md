@@ -82,9 +82,20 @@ Si necesita proxy, configure `HTTP_PROXY`, `HTTPS_PROXY` y `NO_PROXY` antes de c
 | No vivo | `ok` | `false` | `[0, 1]` |
 | Entrada rechazada | `input_rejected` | `null` | `null` |
 
-`normal` reconoce solo rostros que superan la prueba; `observe` registra el resultado y continúa el reconocimiento. Si no se evalúa, se omite `liveness`. El objeto solo contiene `status`, `is_live` y `live_score`: aprobado/fake usa `status: ok`, booleano y puntuación; una entrada rechazada usa `status: input_rejected` y dos valores `null`.
+Solo una superficie insuficiente de la imagen original alrededor del rostro alineado produce `input_rejected`. Este resultado añade `liveness.reason`, una explicación para el usuario; los resultados de rostro vivo o falsificación omiten `reason`. FaceAnalysis y la API devuelven siempre este texto en inglés; solo la interfaz Web traduce su presentación. Use `status` e `is_live` en la lógica del programa, sin interpretar el texto de `reason`. Los resultados antiguos guardados pueden carecer de `reason`; el cliente puede mostrar entonces un aviso genérico de entrada rechazada.
 
-Detect devuelve HTTP 200 incluso con resultados negativos. En `normal`, embeddings, comparación y búsqueda devuelven HTTP 422 `liveness_fake` o `liveness_input_rejected` con `error.details.liveness`; comparación añade `details.side`. Un fallo de inferencia devuelve HTTP 503 `liveness_unavailable`.
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal` reconoce solo rostros que superan la prueba; `observe` registra el resultado y continúa el reconocimiento. Si no se evalúa, se omite `liveness`. Los tres campos principales son `status`, `is_live` y `live_score`: aprobado/fake usa `status: ok`, booleano y puntuación; una entrada rechazada usa `status: input_rejected` y dos valores `null`.
+
+Detect devuelve HTTP 200 incluso con resultados negativos. En `normal`, embeddings, comparación y búsqueda devuelven HTTP 422 `liveness_fake` o `liveness_input_rejected` con `error.details.liveness`; comparación añade `details.side`. Un fallo de inferencia devuelve HTTP 503 `liveness_unavailable`. Los fallos de ejecución interrumpen la operación tanto en `normal` como en `observe`; no se convierten en `input_rejected`.
 
 El registro de personas y la adición de FaceSamples omiten la prueba de vida por defecto: `[inference].liveness_on_registration=false` no ejecuta el modelo y omite `liveness` en las muestras nuevas. Con `true` y el addon habilitado se aplica `normal`/`observe`; los rechazos incluyen `reason` y `liveness`. La revisión de calidad según `review_mode` y la validación de embeddings externos siguen activas. `review_mode=off` y `external_trusted` no evitan una prueba de registro habilitada. Las peticiones no pueden modificar esta configuración de inicio. Los resultados previamente guardados permanecen disponibles.
 
@@ -134,7 +145,7 @@ La creación de Person y la adición de FaceSamples omiten la prueba de vida por
 
 En **Buscar**, seleccione Collection e imagen. La puntuación de una persona es la mayor similitud entre sus FaceSamples. Los resultados se ordenan de mayor a menor; sin coincidencia es una lista vacía. Cada muestra se confirma primero en SQLite y se añade al índice antes de responder. Al reiniciar, el índice se reconstruye desde SQLite.
 
-Cada rostro evaluado incluye `liveness.status`, `liveness.is_live` y `liveness.live_score`. Fake e `input_rejected` también devuelven HTTP 200, sin extraer características de reconocimiento. `input_rejected` significa entrada no apta, por ejemplo un rostro demasiado cerca del borde. Si falta `liveness`, no se evaluó.
+Cada rostro evaluado incluye `liveness.status`, `liveness.is_live` y `liveness.live_score`. Fake e `input_rejected` también devuelven HTTP 200, sin extraer características de reconocimiento. `input_rejected` indica una superficie de imagen insuficiente alrededor del rostro; `liveness.reason` explica cómo ajustar la imagen. Si falta `liveness`, no se evaluó.
 
 `liveness_compare_scope` (`both`, `source`, `target`) elige los lados evaluados antes del reconocimiento. En `normal`, un rechazo devuelve HTTP 422 `liveness_fake` / `liveness_input_rejected`, `error.details.liveness` y `error.details.side`, sin similitud. `observe` continúa y adjunta el resultado a los rostros evaluados.
 
@@ -219,12 +230,20 @@ El SDK Python admite ruta, bytes y objeto tipo archivo, con métodos tipados par
 Detect, Compare, Collections, registro, Search y Monitors. Consulte el contrato
 HTTP en la [guía de API](api.es.md).
 
-El usuario puede compilar desde un checkout completo:
+Puede compilar directamente desde un directorio local con el código fuente
+completo, incluso con cambios sin confirmar o sin un directorio `.git`. No es
+necesario hacer commits ni subirlos con Git antes de compilar.
 
 ```bash
 make -C server build-cpu
 make -C server build-cuda12
 ```
+
+Cuando las pruebas pasen, publique la misma imagen que se probó. Confirmar
+después el mismo código u organizar sus commits no requiere volver a compilar.
+Los cambios en archivos incluidos en la imagen, como código, recursos del
+frontend o ayuda de usuario incorporada, requieren una nueva compilación y
+validación.
 
 Use `--pull never` con Compose para usar la imagen local. Los tags inmutables
 son `0.3.0-cpu` y `0.3.0-cuda12`; `cpu` y `cuda12` apuntan a la última estable
@@ -306,7 +325,8 @@ FaceSamples ya no incluyen `model_version`. La identidad del modelo usa
 `model_id` y la compatibilidad de Collections usa `embedding_contract_id`.
 Adapte los clientes que requieran el campo eliminado y utilice el SDK `0.3.0`
 al actualizar el cliente Python distribuido. Si se evalúa la detección de vida,
-`liveness` contiene solo `status`, `is_live` y `live_score`; si no se evalúa,
+`liveness` contiene los campos principales `status`, `is_live` y `live_score`,
+con `reason` solo para `input_rejected`; si no se evalúa,
 se omite. Consulte las [reglas de resultados y errores de vida](#resultados-de-la-prueba-de-vida)
 antes de activarla para las solicitudes de reconocimiento.
 

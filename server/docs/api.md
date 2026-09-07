@@ -167,13 +167,24 @@ does not change the recognition model digest or `embedding_contract_id`.
 
 ### Read liveness results
 
-Each evaluated face exposes exactly these three fields inside `liveness`:
+Each evaluated face exposes these three core fields inside `liveness`:
 
 | Result | `status` | `is_live` | `live_score` |
 | --- | --- | --- | --- |
 | Live | `ok` | `true` | Number in `[0, 1]` |
 | Fake | `ok` | `false` | Number in `[0, 1]` |
-| Input unsuitable, e.g. insufficient image coverage near an edge | `input_rejected` | `null` | `null` |
+| Insufficient image area around the face | `input_rejected` | `null` | `null` |
+
+Only insufficient source-image area around the aligned face produces `input_rejected`. This result adds `liveness.reason`, a human-readable explanation; live and fake results omit `reason`. FaceAnalysis and the API always return this text in English; only the Web UI translates its display. Use `status` and `is_live` for program logic, not the wording of `reason`. Older saved results may lack `reason`; clients can show a generic input-rejected message as a fallback.
+
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
 
 `is_live` uses `live_score >= liveness_threshold`. The field `liveness` is
 omitted when disabled, skipped for enrollment, or excluded by compare scope. A missing field therefore
@@ -193,10 +204,10 @@ means the face was not evaluated; `is_live: null` means its input was rejected.
 `/v1/detect` returns HTTP 200 with per-face liveness, including negative results,
 and never extracts embeddings. In `normal`, `/v1/embeddings`, `/v1/compare` and
 Collection search return HTTP 422 with `liveness_fake` or
-`liveness_input_rejected`; `error.details.liveness` contains the three fields.
+`liveness_input_rejected`; `error.details.liveness` contains the result, including `reason` for input rejection.
 Compare adds `error.details.side` (`source` or `target`). No similarity or match
 is returned for a blocked operation. A runtime failure returns HTTP 503
-`liveness_unavailable`, rather than a fake classification.
+`liveness_unavailable`, rather than a fake classification. Runtime failures stop the operation in both `normal` and `observe`; they are not `input_rejected` results.
 
 ### Enrollment defaults
 
@@ -347,7 +358,7 @@ An accepted job can fail later: GET still returns HTTP 200, with `state=error` a
 
 ### `POST /v1/detect`
 
-With liveness enabled, each evaluated face includes `liveness.status`, `liveness.is_live` and `liveness.live_score`. Detect returns HTTP 200 for fake and `input_rejected` results as well; it does not extract recognition features. `input_rejected` means the image cannot be evaluated, for example because the face is too close to an edge; provide an image with more space around the face. An omitted `liveness` means it was not evaluated.
+With liveness enabled, each evaluated face includes `liveness.status`, `liveness.is_live` and `liveness.live_score`. Detect returns HTTP 200 for fake and `input_rejected` results as well; it does not extract recognition features. `input_rejected` means there is insufficient image area around the face; `liveness.reason` explains how to adjust the image. An omitted `liveness` means it was not evaluated.
 
 **Use:** Detect all usable faces without writing data. Send
 `multipart/form-data` with:

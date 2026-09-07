@@ -64,9 +64,20 @@ Um modelo ativado ausente impede o arranque com `addon_model_missing`; um invál
 | Falsificação | `ok` | `false` | `[0, 1]` |
 | Entrada rejeitada | `input_rejected` | `null` | `null` |
 
-`normal` reconhece apenas rostos aprovados; `observe` devolve o resultado e continua o reconhecimento. Sem avaliação, `liveness` é omitido. O objeto contém apenas `status`, `is_live` e `live_score`: os resultados de rosto vivo ou falsificação usam `status: ok`, booleano e pontuação; entrada rejeitada usa `status: input_rejected` e dois valores `null`.
+Apenas uma área insuficiente da imagem original em redor do rosto alinhado produz `input_rejected`. Este resultado acrescenta `liveness.reason`, uma explicação para o utilizador; os resultados de rosto vivo ou falsificação omitem `reason`. FaceAnalysis e a API devolvem sempre este texto em inglês; só a interface Web traduz a apresentação. Use `status` e `is_live` na lógica do programa, sem interpretar o texto de `reason`. Resultados antigos guardados podem não incluir `reason`; o cliente pode então apresentar uma mensagem genérica de entrada rejeitada.
 
-`/v1/detect` retorna HTTP 200 mesmo para resultados negativos. Em `normal`, embeddings, comparação e busca retornam HTTP 422 `liveness_fake` ou `liveness_input_rejected` com `error.details.liveness`; comparação acrescenta `details.side`. Falhas retornam HTTP 503 `liveness_unavailable`.
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal` reconhece apenas rostos aprovados; `observe` devolve o resultado e continua o reconhecimento. Sem avaliação, `liveness` é omitido. Os três campos principais são `status`, `is_live` e `live_score`: os resultados de rosto vivo ou falsificação usam `status: ok`, booleano e pontuação; entrada rejeitada usa `status: input_rejected` e dois valores `null`.
+
+`/v1/detect` retorna HTTP 200 mesmo para resultados negativos. Em `normal`, embeddings, comparação e busca retornam HTTP 422 `liveness_fake` ou `liveness_input_rejected` com `error.details.liveness`; comparação acrescenta `details.side`. Falhas retornam HTTP 503 `liveness_unavailable`. As falhas de execução interrompem a operação tanto em `normal` como em `observe`; não são convertidas em `input_rejected`.
 
 O cadastro de pessoas e a adição de FaceSamples ignoram a prova de vida por padrão: `[inference].liveness_on_registration=false` não executa o modelo e omite `liveness` nas novas amostras. Com `true` e o addon habilitado, aplica-se `normal`/`observe`; rejeições incluem `reason` e `liveness`. A revisão de qualidade por `review_mode` e a validação dos embeddings externos continuam ativas. `review_mode=off` e `external_trusted` não ignoram uma prova de cadastro habilitada. As requisições não podem alterar esta configuração de inicialização. Os resultados já salvos continuam disponíveis.
 
@@ -147,7 +158,7 @@ Um trabalho aceite pode falhar mais tarde: GET continua a devolver HTTP 200 com 
 
 ### `POST /v1/detect`
 
-Cada rosto avaliado inclui `liveness.status`, `liveness.is_live` e `liveness.live_score`. Os resultados de falsificação e `input_rejected` também devolvem HTTP 200, sem extrair características de reconhecimento. `input_rejected` significa entrada inadequada, por exemplo um rosto demasiado perto da borda. Sem `liveness`, não houve avaliação.
+Cada rosto avaliado inclui `liveness.status`, `liveness.is_live` e `liveness.live_score`. Os resultados de falsificação e `input_rejected` também devolvem HTTP 200, sem extrair características de reconhecimento. `input_rejected` indica uma área de imagem insuficiente em redor do rosto; `liveness.reason` explica como ajustar a imagem. Sem `liveness`, não houve avaliação.
 
 **Entrada:** multipart `image` obrigatório, `max_faces` 1–100, `collection_id` opcional. **Processo/resultado:** combina resoluções, NMS global, ordena por área; 200 `faces` com caixas/5 pontos/score/qualidade e `processing_ms`. Sem rosto é lista vazia válida. **Erros:** 400 min_score antigo, 404 Collection, 413, 422 invalid_image, 503.
 

@@ -32,10 +32,16 @@ class Quality(TypedDict, total=False):
     brightness: float
 
 
-class LivenessResult(TypedDict):
+class _RequiredLivenessResult(TypedDict):
     status: Literal["ok", "input_rejected"]
     is_live: Optional[bool]
     live_score: Optional[float]
+
+
+class LivenessResult(_RequiredLivenessResult, total=False):
+    """Rejected input may include English retry guidance; older results omit it."""
+
+    reason: str
 
 
 class FaceObservation(TypedDict, total=False):

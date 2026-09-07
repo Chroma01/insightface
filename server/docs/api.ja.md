@@ -64,9 +64,20 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 | なりすまし | `ok` | `false` | `[0, 1]` |
 | 入力拒否 | `input_rejected` | `null` | `null` |
 
-`normal` は生体検知に合格した顔だけを認識します。`observe` は結果を記録して認識を続けます。無効な場合、`liveness` 自体を省略します。結果は `status`、`is_live`、`live_score` の3項目だけです。合格と なりすまし は `status: ok`、真偽値とスコアを返します。入力拒否は `status: input_rejected`、残り2項目は `null` です。
+位置合わせ後の顔の周囲に元画像の有効な領域が不足する場合にのみ `input_rejected` を返します。この結果には、ユーザー向けの説明 `liveness.reason` が追加されます。生体と なりすまし の結果には `reason` はありません。FaceAnalysis と API は常に英語の説明を返し、Web UI だけが表示言語に合わせて翻訳します。プログラムの判定には `status` と `is_live` を使い、`reason` の文面を解析しないでください。以前に保存された結果には `reason` がない場合があるため、クライアントは一般的な入力拒否メッセージにフォールバックできます。
 
-検出は負の結果も HTTP 200 で返します。`normal` の特徴抽出・比較・検索は HTTP 422 `liveness_fake` または `liveness_input_rejected` と `error.details.liveness` を返します。比較には `details.side` もあります。推論障害は HTTP 503 `liveness_unavailable` です。
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal` は生体検知に合格した顔だけを認識します。`observe` は結果を記録して認識を続けます。無効な場合、`liveness` 自体を省略します。基本の3項目は `status`、`is_live`、`live_score` です。合格と なりすまし は `status: ok`、真偽値とスコアを返します。入力拒否は `status: input_rejected`、残り2項目は `null` です。
+
+検出は負の結果も HTTP 200 で返します。`normal` の特徴抽出・比較・検索は HTTP 422 `liveness_fake` または `liveness_input_rejected` と `error.details.liveness` を返します。比較には `details.side` もあります。推論障害は HTTP 503 `liveness_unavailable` です。 実行時の障害は `normal` と `observe` のどちらでも処理を中止し、`input_rejected` には変換しません。
 
 新規 Person の登録と FaceSample の追加では、生体検知は初期状態で省略されます。`[inference].liveness_on_registration=false` の場合、モデルを実行せず、新しいサンプルの `liveness` を省略します。`true` にすると addon が有効な場合に `normal`/`observe` に従い、拒否項目には `reason` と `liveness` が付きます。`review_mode` の品質審査と外部特徴量の検証は引き続き実行されます。登録時の生体検知を有効にした場合、`review_mode=off` と `external_trusted` でも回避できません。リクエストからこの設定を上書きすることはできません。過去に保存された生体検知結果は引き続き参照できます。
 
@@ -147,7 +158,7 @@ curl -sS "${BASE_URL}/v1/addons/liveness/enable" -H "${AUTH_HEADER}" \
 
 ### `POST /v1/detect`
 
-有効時は評価した顔に `liveness.status`、`liveness.is_live`、`liveness.live_score` を返します。なりすまし と `input_rejected` も HTTP 200 で、認識特徴は抽出しません。`input_rejected` は端に近すぎる顔など評価に不適切な入力を示します。`liveness` がなければ未評価です。
+有効時は評価した顔に `liveness.status`、`liveness.is_live`、`liveness.live_score` を返します。なりすまし と `input_rejected` も HTTP 200 で、認識特徴は抽出しません。`input_rejected` は顔の周囲の画像領域が不足していることを示し、`liveness.reason` が画像の調整方法を説明します。`liveness` がなければ未評価です。
 
 **入力:** multipart `image` 必須、`max_faces` 1～100、任意 `collection_id`。**処理/結果:** 複数解像度候補を統合して一度 NMS、面積順の `faces`、box/5点/score/quality、`processing_ms`。顔なしは 200 の空配列。**エラー:** 400 旧 min_score、404 Collection、413、422 invalid_image、503。
 

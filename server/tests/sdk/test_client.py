@@ -681,6 +681,13 @@ def test_transport_and_invalid_success_response_are_safe() -> None:
 @pytest.mark.parametrize("code,liveness", [
     ("liveness_fake", {"status": "ok", "is_live": False, "live_score": 0.1}),
     ("liveness_input_rejected", {"status": "input_rejected", "is_live": None, "live_score": None}),
+    ("liveness_input_rejected", {
+        "status": "input_rejected", "is_live": None, "live_score": None,
+        "reason": (
+            "Insufficient image area around the face for liveness detection. Move the face "
+            "toward the center, step back from the camera, or use a less tightly cropped image."
+        ),
+    }),
 ])
 def test_liveness_results_and_rejection_details_are_preserved(code, liveness) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -694,3 +701,8 @@ def test_liveness_results_and_rejection_details_are_preserved(code, liveness) ->
             client.compare(b"source", b"target")
     assert captured.value.code == code
     assert captured.value.details == {"side": "target", "liveness": liveness}
+
+
+def test_liveness_type_keeps_core_fields_required_and_reason_optional() -> None:
+    assert sdk_results.LivenessResult.__required_keys__ == {"status", "is_live", "live_score"}
+    assert sdk_results.LivenessResult.__optional_keys__ == {"reason"}

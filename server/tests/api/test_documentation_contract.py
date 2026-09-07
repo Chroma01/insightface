@@ -142,9 +142,11 @@ def test_live_openapi_explains_image_formats_and_liveness_policy(client: TestCli
         assert "liveness_on_registration=false" in schema["paths"][path]["post"]["description"]
 
     result = schema["components"]["schemas"]["LivenessResult"]
-    assert set(result["properties"]) == {"status", "is_live", "live_score"}
+    assert set(result["properties"]) == {"status", "is_live", "live_score", "reason"}
     assert set(result["required"]) == {"status", "is_live", "live_score"}
     assert '"status":"input_rejected","is_live":null,"live_score":null' in result["description"]
+    assert "English" in result["properties"]["reason"]["description"]
+    assert "Older results may omit" in result["properties"]["reason"]["description"]
     for field in result["properties"].values():
         assert field["description"]
     observation = schema["components"]["schemas"]["FaceObservation"]

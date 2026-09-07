@@ -188,9 +188,16 @@ class FaceService:
                 "Input does not meet liveness requirements. Adjust face position and retry."
                 if reason == "liveness_input_rejected" else "The face did not pass liveness detection."
             )
+            if reason == "liveness_input_rejected" and face.liveness is not None:
+                explanation = face.liveness.get("reason")
+                if isinstance(explanation, str) and explanation.strip():
+                    message = explanation
             raise unprocessable(message, code=reason, liveness=face.liveness)
         if face.embedding is None:
-            raise unprocessable("Recognition embedding is unavailable.", code="embedding_unavailable")
+            details = {"liveness": face.liveness} if face.liveness is not None else {}
+            raise unprocessable(
+                "Recognition embedding is unavailable.", code="embedding_unavailable", **details,
+            )
 
     def detect(
         self,
@@ -568,6 +575,7 @@ class FaceService:
                         "other_person_similarity": float(other["similarity"]),
                         "other_person_id": str(other["person_id"]),
                         "matched_face_id": str(other["face_id"]),
+                        **({"liveness": face["liveness"]} if face.get("liveness") is not None else {}),
                     }
                 )
                 continue
@@ -826,6 +834,7 @@ class FaceService:
                     })
                     continue
                 self.require_recognition(face)
+                assert face.embedding is not None
                 matches = self.search_indexes.search(
                     collection_id,
                     face.embedding,

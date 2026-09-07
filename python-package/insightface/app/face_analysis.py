@@ -230,11 +230,14 @@ class FaceAnalysis:
     def get(self, img, max_num=0, det_metric="default"):
         """Detect faces and run enabled addons before recognition.
 
-        Liveness returns only status, is_live and live_score on each Face.
+        Liveness returns status, is_live and live_score on each Face, with an
+        English reason when the aligned crop exceeds the image bounds.
         In normal mode, rejected inputs and fake faces retain their detection
         result but do not receive an embedding. Other selected tasks still run.
         Without the addon, the liveness field is absent and recognition runs
         as before, regardless of the selected liveness mode.
+        Invalid landmarks, alignment and inference failures raise exceptions
+        in both modes instead of returning a liveness classification.
         """
         liveness = self.addons.get("liveness")
         bboxes, kpss = self.det_model.detect(img, max_num=max_num, metric=det_metric)

@@ -56,7 +56,7 @@ InsightFace Server 面向常见的人脸识别流程，是比 AWS Rekognition �
   持久化，并提供 migration、健康检查和禁止静默 CPU 回退的严格 CUDA 启动验证。
 - 支持 JPEG、PNG、WebP 和 BMP；默认不保留原始上传图片。
 
-活体默认关闭：`server/config/server.toml` 中 `inference.addons = []`、`addons.auto_download = []`。在 **系统 → 活体检测** 下载并校验模型后，Server 自动保存启用配置，手动重启才生效；已校验的缓存直接复用。启动时不下载模型，手动启用但缺少模型时会报错并给出安装方法。执行活体后，每张脸只返回 `status`、`is_live`、`live_score` 三个字段；默认模式为 `normal`，注册默认跳过活体（`liveness_on_registration = false`）。详见[配置、网页权限和升级步骤](docs/user-guide.zh-CN.md#可选活体检测-addon)。
+活体默认关闭：`server/config/server.toml` 中 `inference.addons = []`、`addons.auto_download = []`。在 **系统 → 活体检测** 下载并校验模型后，Server 自动保存启用配置，手动重启才生效；已校验的缓存直接复用。启动时不下载模型，手动启用但缺少模型时会报错并给出安装方法。执行活体后，每张脸返回 `status`、`is_live`、`live_score` 三个核心字段，仅 `input_rejected` 额外提供面向用户的 `reason`；默认模式为 `normal`，注册默认跳过活体（`liveness_on_registration = false`）。详见[配置、网页权限和升级步骤](docs/user-guide.zh-CN.md#可选活体检测-addon)。
 
 ### RTX 5090 GPU 检索性能
 
@@ -160,8 +160,11 @@ docker compose -f server/deploy/compose.cpu.yml up -d
 
 ## 从源码构建
 
+可以直接使用完整的本地源码目录构建，包括尚未提交的修改，也允许目录中没有
+`.git`。Git 提交或推送都不是构建的前提。
+
 Dockerfile 会复制 `server/` 和 `python-package/insightface/` 中选定的推理模块，
-所以必须使用完整仓库作为构建上下文。
+所以必须使用完整源码目录作为构建上下文。
 
 CPU：
 

@@ -322,8 +322,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "models install <package>, even when the base package is cached. Mode, threshold, "
             "compare scope, and registration policy are server configuration, not request "
             "parameters. When evaluated, liveness has "
-            "exactly status, is_live, and live_score. An input_rejected status means the "
-            "input could not be evaluated, with both values null; a missing liveness "
+            "status, is_live, and live_score. An input_rejected status means the "
+            "input could not be evaluated, with both values null and an optional reason "
+            "containing English retry guidance. Older results may omit reason; successful "
+            "and fake evaluations have only the three core fields. A missing liveness "
             "field means no evaluation was performed. In normal mode, failed or rejected "
             "liveness blocks recognition; observe mode continues recognition. "
             "Registration skips liveness by default. Install the selected addon before "
@@ -649,7 +651,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         is_live, and live_score. HTTP 200 also includes fake faces (status=ok,
         is_live=false) and unsuitable input (status=input_rejected, is_live=null,
         live_score=null); neither is a detection error. An omitted liveness field
-        means no evaluation. Model execution failure returns HTTP 503
+        means no evaluation. Rejected input may include liveness.reason with English
+        retry guidance; older results may omit it. Successful and fake evaluations
+        have only the three core fields. Model execution failure returns HTTP 503
         liveness_unavailable. There is no separate liveness endpoint.
         """
         await authorize(request)
@@ -687,6 +691,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         recognition and returns HTTP 422 liveness_fake or liveness_input_rejected;
         error.details includes liveness and side (source or target). In observe
         mode, comparison continues and each evaluated face includes liveness.
+        For input_rejected, optional liveness.reason provides English retry guidance;
+        when present, it is also used as error.message.
         Unevaluated sides omit liveness. Runtime faults return HTTP 503
         liveness_unavailable. These policies cannot be overridden per request.
         """
@@ -742,8 +748,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         With liveness enabled in normal mode, fake faces and unsuitable input
         stop before recognition: HTTP 422 liveness_fake or liveness_input_rejected,
-        with the three-field result in error.details.liveness. Observe mode
-        continues recognition and returns faces[].liveness beside the embedding.
+        with the result in error.details.liveness. For input_rejected, optional
+        liveness.reason provides English retry guidance and is used as error.message.
+        Observe mode continues recognition and returns faces[].liveness beside the embedding.
         Without evaluation, liveness is omitted. Runtime faults return HTTP 503
         liveness_unavailable in either mode.
         """
@@ -976,6 +983,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         samples omit liveness. When enabled in server.toml, normal mode rejects
         fake or unsuitable images with reason liveness_fake or
         liveness_input_rejected and a separate liveness result in rejected_images.
+        Rejected input may include liveness.reason with English retry guidance;
+        older results may omit it. This is separate from the rejection category reason.
         Observe mode continues normal registration checks and stores the result
         with accepted samples. review_mode=off and external_trusted embeddings do
         not bypass enabled liveness. HTTP 201 may contain accepted faces and
@@ -1149,6 +1158,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         enabled, normal mode rejects fake or unsuitable images with reason
         liveness_fake or liveness_input_rejected and a separate liveness result
         in rejected_images. Observe mode continues other registration checks.
+        For input_rejected, optional liveness.reason contains English retry guidance,
+        separate from the rejection category reason; older results may omit it.
         review_mode=off and external_trusted embeddings do not bypass enabled
         liveness. HTTP 201 can contain an empty faces list and only rejected_images.
         Accepted samples retain their evaluated liveness result; unevaluated
@@ -1312,8 +1323,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         With liveness enabled in normal mode, HTTP 422 liveness_fake or
         liveness_input_rejected stops recognition and index search; the result is
         in error.details.liveness. This is distinct from a valid query with no
-        identity matches. Observe mode continues search and includes liveness in
-        searched_face. Without evaluation, liveness is omitted. Model faults
+        identity matches. For input_rejected, optional liveness.reason provides
+        English retry guidance and is used as error.message. Observe mode continues
+        search and includes liveness in searched_face. Without evaluation, liveness is omitted. Model faults
         return HTTP 503 liveness_unavailable in either mode.
         """
         await authorize(request)
@@ -1477,8 +1489,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def monitor_state(request: Request, monitor_id: str):
         """Read the current RTSP detection and recognition state.
 
-        Evaluated faces include the same three-field liveness result as image
-        endpoints. In normal mode, blocked faces have status=liveness_blocked and
+        Evaluated faces include the same liveness result as image endpoints:
+        status, is_live, and live_score, plus optional English reason for input_rejected.
+        Older results may omit reason. In normal mode, blocked faces have status=liveness_blocked and
         contribute to liveness_blocked_faces, not unknown_faces. They do not run
         identity search or emit person_enter events. Observe mode continues
         recognition and identity events. Runtime liveness failures are inference

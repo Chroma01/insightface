@@ -60,7 +60,7 @@ API と SDK の結果には `model_version` が含まれなくなります。
   CUDA 起動検証を提供。
 - JPEG、PNG、WebP、BMP をサポートし、元のアップロード画像は既定で保持しません。
 
-生体検知は既定で無効です。`server/config/server.toml` の `inference.addons = []` と `addons.auto_download = []` が初期値です。**システム → 生体検知** でモデルをダウンロード・検証すると次回起動の設定が保存され、手動再起動で有効になります。検証済みキャッシュは再利用します。起動時にはダウンロードせず、有効な addon のモデルがなければインストール方法を示して起動を停止します。評価済みの顔は `status`、`is_live`、`live_score` のみを返します。既定モードは `normal`、登録時は既定で省略します（`liveness_on_registration = false`）。[設定、Web 権限、更新手順](docs/user-guide.ja.md#任意の生体検知-addon)を参照してください。
+生体検知は既定で無効です。`server/config/server.toml` の `inference.addons = []` と `addons.auto_download = []` が初期値です。**システム → 生体検知** でモデルをダウンロード・検証すると次回起動の設定が保存され、手動再起動で有効になります。検証済みキャッシュは再利用します。起動時にはダウンロードせず、有効な addon のモデルがなければインストール方法を示して起動を停止します。評価済みの顔は基本の3項目 `status`、`is_live`、`live_score` を返し、`input_rejected` の場合だけユーザー向け説明 `reason` が追加されます。既定モードは `normal`、登録時は既定で省略します（`liveness_on_registration = false`）。[設定、Web 権限、更新手順](docs/user-guide.ja.md#任意の生体検知-addon)を参照してください。
 
 ### RTX 5090 GPU 検索性能
 
@@ -168,8 +168,12 @@ docker compose -f server/deploy/compose.cpu.yml up -d
 
 ## ソースからビルド
 
+完全なローカルソースディレクトリから直接ビルドできます。未コミットの変更が
+あっても、`.git` ディレクトリがなくても構いません。Git のコミットやプッシュは
+ビルドの前提条件ではありません。
+
 Dockerfile は `server/` と `python-package/insightface/` の選択された推論
-モジュールをコピーするため、リポジトリ全体が build context です。
+モジュールをコピーするため、完全なソースディレクトリが build context です。
 
 CPU:
 

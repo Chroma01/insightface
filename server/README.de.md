@@ -67,7 +67,7 @@ SDK-Ergebnisse enthalten kein `model_version` mehr. Siehe
 - JPEG-, PNG-, WebP- und BMP-Eingaben; Originaluploads werden standardmäßig nicht
   gespeichert.
 
-Liveness ist standardmäßig deaktiviert: `inference.addons = []` und `addons.auto_download = []` in `server/config/server.toml`. **System → Lebenderkennung** lädt das Modell herunter, prüft es und speichert die Aktivierung für den nächsten manuellen Neustart. Ein geprüfter Cache wird wiederverwendet. Beim Start wird nichts heruntergeladen; fehlt ein aktiviertes Modell, stoppt der Start mit Installationshinweis. Ausgewertete Gesichter liefern nur `status`, `is_live` und `live_score`. Der Standardmodus ist `normal`; bei der Registrierung wird Liveness standardmäßig übersprungen (`liveness_on_registration = false`). Siehe [Konfiguration, Web-Berechtigungen und Upgrade](docs/user-guide.de.md#optionales-liveness-addon).
+Liveness ist standardmäßig deaktiviert: `inference.addons = []` und `addons.auto_download = []` in `server/config/server.toml`. **System → Lebenderkennung** lädt das Modell herunter, prüft es und speichert die Aktivierung für den nächsten manuellen Neustart. Ein geprüfter Cache wird wiederverwendet. Beim Start wird nichts heruntergeladen; fehlt ein aktiviertes Modell, stoppt der Start mit Installationshinweis. Ausgewertete Gesichter liefern die Kernfelder `status`, `is_live` und `live_score`; nur `input_rejected` ergänzt eine verständliche Erklärung in `reason`. Der Standardmodus ist `normal`; bei der Registrierung wird Liveness standardmäßig übersprungen (`liveness_on_registration = false`). Siehe [Konfiguration, Web-Berechtigungen und Upgrade](docs/user-guide.de.md#optionales-liveness-addon).
 
 ### GPU-Suchleistung auf der RTX 5090
 
@@ -184,8 +184,12 @@ Den vollständigen ersten Ablauf erklärt das
 
 ## Aus Quellcode bauen
 
+Sie können direkt aus einem vollständigen lokalen Quellcodeverzeichnis bauen,
+auch mit nicht committeten Änderungen oder ohne `.git`-Verzeichnis. Git-Commits
+und Pushes sind keine Voraussetzung für den Build.
+
 Die Dockerfiles kopieren `server/` und ausgewählte Inferenzmodule aus
-`python-package/insightface/`; daher ist das vollständige Repository der
+`python-package/insightface/`; daher ist das vollständige Quellcodeverzeichnis der
 Build-Kontext.
 
 CPU:

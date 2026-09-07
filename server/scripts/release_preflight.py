@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Validate that every public InsightFace Server release surface agrees.
 
-The normal mode is intentionally strict and is intended for the owner-operated
-manual release process. ``--relaxed`` keeps all structural checks enabled while
-turning the dirty-worktree condition expected during local development into a
-warning.
+Both normal mode and the legacy ``--relaxed`` option validate the same release
+metadata. Git state is optional diagnostic information, never a release gate.
+The report describes the inspected source directory, not an existing image.
 """
 
 from __future__ import annotations
@@ -42,12 +41,14 @@ class Check:
 
 
 class Preflight:
-    def __init__(self, root: Path, version: str, *, relaxed: bool) -> None:
+    def __init__(self, root: Path, version: str, *, relaxed: bool = False) -> None:
         self.root = root.resolve()
         self.server = self.root / "server"
         self.version = version
         self.relaxed = relaxed
         self.checks: list[Check] = []
+        self.git_revision: str | None = None
+        self.git_dirty: bool | None = None
 
     def pass_(self, name: str, detail: str) -> None:
         self.checks.append(Check(name, "pass", detail))
@@ -71,14 +72,18 @@ class Preflight:
         with (self.root / relative).open("rb") as handle:
             return tomllib.load(handle)
 
-    def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ("git", *args),
-            cwd=self.root,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+    def _git(self, *args: str) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                ("git", *args),
+                cwd=self.root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
 
     def _check_exact_version(self, name: str, actual: object) -> None:
         self.require(
@@ -97,7 +102,7 @@ class Preflight:
         self._check_container_versions()
         self._check_document_versions()
         self._check_license_metadata()
-        self._check_git_state()
+        self._collect_git_metadata()
         return self.checks
 
     def _check_package_versions(self) -> None:
@@ -225,58 +230,39 @@ class Preflight:
                 f"{relative} has no MIT classifier",
             )
 
-    def _check_git_state(self) -> None:
+    def _collect_git_metadata(self) -> None:
+        self.git_revision = None
+        self.git_dirty = None
+        # A source archive may live inside an unrelated checkout. Do not
+        # attribute its files to that parent repository's HEAD.
+        top_level = self._git("rev-parse", "--show-toplevel")
+        if (
+            top_level is None
+            or top_level.returncode != 0
+            or not top_level.stdout.strip()
+            or Path(top_level.stdout.strip()).resolve() != self.root
+        ):
+            return
+
         revision = self._git("rev-parse", "--verify", "HEAD")
-        sha = revision.stdout.strip()
-        self.require(
-            "git-revision",
-            revision.returncode == 0 and bool(re.fullmatch(r"[0-9a-f]{40}", sha)),
-            f"source revision is {sha or 'unavailable'}",
-        )
+        if revision is not None and revision.returncode == 0:
+            sha = revision.stdout.strip()
+            if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha):
+                self.git_revision = sha
 
-        status = self._git("status", "--porcelain=v1", "--untracked-files=all")
-        dirty_lines = [line for line in status.stdout.splitlines() if line.strip()]
-        if dirty_lines and self.relaxed:
-            self.warn(
-                "git-clean",
-                f"relaxed precheck accepts {len(dirty_lines)} dirty paths; "
-                "release rejects them",
-            )
-        else:
-            self.require(
-                "git-clean",
-                status.returncode == 0 and not dirty_lines,
-                f"worktree has {len(dirty_lines)} dirty paths",
-            )
-
-        tag = f"server-v{self.version}"
-        existing_tag = self._git("show-ref", "--verify", "--quiet", f"refs/tags/{tag}")
-        if existing_tag.returncode != 0:
-            self.pass_("git-tag-idempotent", f"release tag {tag} is absent")
-            self.pass_("git-tag-annotated", f"release tag {tag} is not created yet")
-        else:
-            tag_revision = self._git("rev-list", "-n", "1", tag).stdout.strip()
-            tag_type = self._git("cat-file", "-t", tag).stdout.strip()
-            self.require(
-                "git-tag-idempotent",
-                tag_revision == sha,
-                f"existing release tag points to {tag_revision or 'unavailable'}",
-            )
-            self.require(
-                "git-tag-annotated",
-                tag_type == "tag",
-                f"existing release tag object type is {tag_type or 'unavailable'}",
-            )
+        status = self._git("status", "--porcelain=v1", "--untracked-files=normal")
+        if status is not None and status.returncode == 0:
+            self.git_dirty = bool(status.stdout.strip())
 
     def report(self) -> dict[str, Any]:
         failures = sum(check.status == "fail" for check in self.checks)
         warnings = sum(check.status == "warning" for check in self.checks)
-        revision = self._git("rev-parse", "--verify", "HEAD").stdout.strip()
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "version": self.version,
             "mode": "precheck" if self.relaxed else "release",
-            "source_revision": revision,
+            "source_revision": self.git_revision if self.git_dirty is False else None,
+            "git": {"head_revision": self.git_revision, "dirty": self.git_dirty},
             "generated_at": datetime.now(UTC)
             .replace(microsecond=0)
             .isoformat()
@@ -302,7 +288,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--relaxed",
         action="store_true",
-        help="warn instead of failing for a dirty tree",
+        help="compatibility option: precheck uses the same validation rules as release",
     )
     parser.add_argument("--output", type=Path)
     return parser.parse_args()

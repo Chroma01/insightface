@@ -66,7 +66,7 @@ qu’elle n’est pas activée. Les résultats API et SDK ne contiennent plus
   validation CUDA stricte sans fallback CPU silencieux.
 - Entrées JPEG, PNG, WebP et BMP ; les originaux ne sont pas conservés par défaut.
 
-La détection du vivant est désactivée par défaut : `inference.addons = []` et `addons.auto_download = []` dans `server/config/server.toml`. **Système → Détection du vivant** télécharge et vérifie le modèle, puis enregistre l’activation pour le prochain redémarrage manuel ; un fichier vérifié est réutilisé. Aucun téléchargement au démarrage. Un modèle activé manquant arrête le démarrage avec des instructions d’installation. Chaque visage évalué renvoie uniquement `status`, `is_live` et `live_score`. Le mode par défaut est `normal` ; l’inscription ignore la détection par défaut (`liveness_on_registration = false`). Voir [configuration, permissions Web et mise à niveau](docs/user-guide.fr.md#addon-optionnel-de-détection-du-vivant).
+La détection du vivant est désactivée par défaut : `inference.addons = []` et `addons.auto_download = []` dans `server/config/server.toml`. **Système → Détection du vivant** télécharge et vérifie le modèle, puis enregistre l’activation pour le prochain redémarrage manuel ; un fichier vérifié est réutilisé. Aucun téléchargement au démarrage. Un modèle activé manquant arrête le démarrage avec des instructions d’installation. Chaque visage évalué renvoie les champs principaux `status`, `is_live` et `live_score` ; seul `input_rejected` ajoute une explication pour l’utilisateur dans `reason`. Le mode par défaut est `normal` ; l’inscription ignore la détection par défaut (`liveness_on_registration = false`). Voir [configuration, permissions Web et mise à niveau](docs/user-guide.fr.md#addon-optionnel-de-détection-du-vivant).
 
 ### Performances de recherche GPU sur RTX 5090
 
@@ -180,8 +180,12 @@ Le [guide utilisateur](docs/user-guide.fr.md) décrit tout le premier parcours.
 
 ## Construire depuis les sources
 
+Vous pouvez construire directement depuis un répertoire local contenant toutes
+les sources, même avec des modifications non committées ou sans répertoire
+`.git`. Les commits et les push Git ne sont pas des prérequis à la construction.
+
 Les Dockerfiles copient `server/` et certains modules d’inférence de
-`python-package/insightface/` ; le dépôt complet est donc le contexte de build.
+`python-package/insightface/` ; le répertoire complet des sources est donc le contexte de build.
 
 CPU :
 

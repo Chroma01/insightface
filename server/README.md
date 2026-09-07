@@ -64,7 +64,7 @@ include `model_version`. See [upgrade steps](docs/user-guide.md#upgrade-to-030).
   strict CUDA startup validation without silent CPU fallback.
 - JPEG, PNG, WebP, and BMP input; original uploads are not retained by default.
 
-Liveness is disabled by default: `inference.addons = []` and `addons.auto_download = []` in `server/config/server.toml`. **System → Liveness** downloads and verifies the model, then saves activation for the next manual restart; a verified cached model is reused. Startup never downloads models. An enabled addon missing its model stops startup with an installation hint. When evaluated, each face returns only `status`, `is_live`, and `live_score`. The default mode is `normal`; registration skips liveness by default (`liveness_on_registration = false`). See [configuration, Web permissions and upgrade instructions](docs/user-guide.md#optional-liveness-addon).
+Liveness is disabled by default: `inference.addons = []` and `addons.auto_download = []` in `server/config/server.toml`. **System → Liveness** downloads and verifies the model, then saves activation for the next manual restart; a verified cached model is reused. Startup never downloads models. An enabled addon missing its model stops startup with an installation hint. Each evaluated face returns the core fields `status`, `is_live`, and `live_score`; only `input_rejected` adds a human-readable `reason`. The default mode is `normal`; registration skips liveness by default (`liveness_on_registration = false`). See [configuration, Web permissions and upgrade instructions](docs/user-guide.md#optional-liveness-addon).
 
 ### RTX 5090 GPU search performance
 
@@ -181,8 +181,12 @@ workflow.
 
 ## Build from source
 
+You can build directly from a complete local source directory, including
+uncommitted changes or a directory without `.git`. Git commits and pushes
+are not prerequisites for building.
+
 The Dockerfiles copy `server/` and selected inference modules from
-`python-package/insightface/`, so the complete repository is the build context.
+`python-package/insightface/`, so the complete source directory is the build context.
 
 CPU:
 

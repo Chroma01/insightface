@@ -4,6 +4,19 @@ export function livenessRuntimeLabel(enabled) {
   return "Liveness status unknown";
 }
 
+export function livenessResultText(result, { translate, formatScore, compact = false, side } = {}) {
+  if (!result) return "";
+  let message;
+  if (result.status === "input_rejected") {
+    const reason = typeof result.reason === "string" && result.reason.trim() ? result.reason : "Liveness input rejected";
+    message = translate(compact ? "Liveness: input rejected" : reason);
+  } else {
+    message = `${translate(result.is_live === true ? "Liveness passed" : "Liveness failed")} · ${formatScore(result.live_score)}`;
+  }
+  const label = side === "source" ? "Source face" : side === "target" ? "Target face" : "";
+  return label ? `${translate(label)} · ${message}` : message;
+}
+
 // Localize stable codes, never a backend sentence containing paths or details.
 export const LIVENESS_MESSAGES = Object.freeze({
   config_file_missing: "Set INSIGHTFACE_CONFIG_FILE to an editable server.toml.",
@@ -29,6 +42,13 @@ export const LIVENESS_MESSAGES = Object.freeze({
 
 export function livenessMessage(code, fallback, translate) {
   return translate(LIVENESS_MESSAGES[code] ?? fallback ?? "");
+}
+
+export function livenessErrorText(error, { translate, formatScore }) {
+  const detail = livenessResultText(error.details?.liveness, { translate, formatScore, side: error.details?.side });
+  if (detail && ["liveness_input_rejected", "liveness_fake"].includes(error.code)) return detail;
+  const message = `${error.code}: ${livenessMessage(error.code, error.message, translate)}`;
+  return [message, detail].filter(Boolean).join(" · ");
 }
 
 export function livenessManagementView({ status, error, submitting, loading } = {}) {

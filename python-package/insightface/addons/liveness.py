@@ -21,6 +21,11 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_THRESHOLD = 0.8
 MAX_OOB_RATIO = 0.30
 INPUT_SIZE = 80
+OUT_OF_BOUNDS_REASON = (
+    "Insufficient image area around the face for liveness detection. "
+    "Move the face toward the center, step back from the camera, "
+    "or use a less tightly cropped image."
+)
 DESTINATION_LANDMARKS = np.array(
     [[32.03, 38.06], [47.89, 37.98], [40.01, 47.08], [33.50, 56.36], [46.63, 56.29]],
     dtype=np.float32,
@@ -42,17 +47,25 @@ def validate_threshold(value):
     return threshold
 
 
-def _input_rejected(reason, **details):
-    LOGGER.debug("Liveness input rejected: %s %s", reason, details)
-    return {"status": "input_rejected", "is_live": None, "live_score": None}
+def _input_rejected(oob_ratio):
+    LOGGER.debug(
+        "Liveness input rejected: aligned_crop_out_of_bounds oob_ratio=%s", oob_ratio
+    )
+    return {
+        "status": "input_rejected",
+        "is_live": None,
+        "live_score": None,
+        "reason": OUT_OF_BOUNDS_REASON,
+    }
 
 
 class Liveness:
     """Evaluate one detected face without running detection or recognition.
 
     A supplied session is reused, allowing applications to own its lifecycle.
-    Invalid face landmarks or excessive crop missing area return input_rejected;
-    invalid images, incompatible models and inference failures raise exceptions.
+    Excessive crop missing area returns input_rejected with an English reason.
+    Invalid images or landmarks, failed alignment, incompatible models and
+    inference failures raise exceptions.
     """
 
     taskname = "liveness"
@@ -106,7 +119,10 @@ class Liveness:
             self.session.set_providers(["CPUExecutionProvider"])
 
     def predict(self, image, landmarks):
-        """Return exactly status, is_live and live_score for a BGR frame."""
+        """Return status, is_live and live_score, plus reason for rejected crops.
+
+        The reason is English display text; use status/is_live for decisions.
+        """
 
         if (
             not isinstance(image, np.ndarray)
@@ -118,21 +134,26 @@ class Liveness:
             raise ValueError("Liveness image must be a non-empty uint8 HxWx3 BGR array")
         try:
             source = np.asarray(landmarks, dtype=np.float32)
-        except (TypeError, ValueError):
-            return _input_rejected("invalid_landmarks")
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                "Liveness landmarks must contain five finite 2D points"
+            ) from error
         if source.shape != (5, 2) or not np.all(np.isfinite(source)):
-            return _input_rejected("invalid_landmarks")
-        if hasattr(SimilarityTransform, "from_estimate"):
-            transform = SimilarityTransform.from_estimate(source, DESTINATION_LANDMARKS)
-            if not transform:
-                return _input_rejected("alignment_failed")
-        else:
-            transform = SimilarityTransform()
-            if not transform.estimate(source, DESTINATION_LANDMARKS):
-                return _input_rejected("alignment_failed")
-        matrix = np.asarray(transform.params[:2, :], dtype=np.float64)
+            raise ValueError("Liveness landmarks must contain five finite 2D points")
+        try:
+            if hasattr(SimilarityTransform, "from_estimate"):
+                transform = SimilarityTransform.from_estimate(source, DESTINATION_LANDMARKS)
+                if not transform:
+                    raise RuntimeError("Liveness face alignment failed")
+            else:
+                transform = SimilarityTransform()
+                if not transform.estimate(source, DESTINATION_LANDMARKS):
+                    raise RuntimeError("Liveness face alignment failed")
+            matrix = np.asarray(transform.params[:2, :], dtype=np.float64)
+        except (ValueError, np.linalg.LinAlgError) as error:
+            raise RuntimeError("Liveness face alignment failed") from error
         if not np.all(np.isfinite(matrix)) or np.linalg.det(matrix[:, :2]) <= 0:
-            return _input_rejected("alignment_failed")
+            raise RuntimeError("Liveness face alignment failed")
 
         valid_output = cv2.warpAffine(
             np.ones(image.shape[:2], dtype=np.float32),
@@ -144,7 +165,7 @@ class Liveness:
         )
         oob_ratio = float(np.clip(1.0 - np.mean(valid_output), 0.0, 1.0))
         if oob_ratio > MAX_OOB_RATIO:
-            return _input_rejected("aligned_crop_out_of_bounds", oob_ratio=oob_ratio)
+            return _input_rejected(oob_ratio)
 
         crop = cv2.warpAffine(
             image,

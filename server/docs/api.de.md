@@ -64,9 +64,20 @@ Ein aktiviertes, fehlendes Modell stoppt den Start mit `addon_model_missing`; ei
 | Täuschungsversuch | `ok` | `false` | `[0, 1]` |
 | Ungeeignete Eingabe | `input_rejected` | `null` | `null` |
 
-`normal` erkennt nur Gesichter mit bestandener Liveness-Prüfung. `observe` liefert das Ergebnis und setzt die Erkennung fort. Ohne Prüfung fehlt `liveness`. Das Objekt enthält nur `status`, `is_live` und `live_score`: Bei bestandener Prüfung oder erkanntem Täuschungsversuch gilt `status: ok` mit Wahrheitswert und Score; bei abgelehnter Eingabe gilt `status: input_rejected`, die anderen Werte sind `null`.
+Nur eine unzureichende Fläche des Originalbilds um das ausgerichtete Gesicht führt zu `input_rejected`. Dieses Ergebnis enthält zusätzlich `liveness.reason` als verständliche Erklärung; bei echten Gesichtern und Fälschungen fehlt `reason`. FaceAnalysis und die API liefern diesen Text immer auf Englisch; nur die Web-Oberfläche übersetzt die Anzeige. Verwenden Sie für Programmentscheidungen `status` und `is_live`, nicht den Wortlaut von `reason`. Ältere gespeicherte Ergebnisse können ohne `reason` vorliegen; Clients können dann einen allgemeinen Hinweis zur abgelehnten Eingabe anzeigen.
 
-`/v1/detect` liefert auch negative Ergebnisse mit HTTP 200. In `normal` liefern Embeddings, Vergleich und Suche HTTP 422 `liveness_fake` oder `liveness_input_rejected` mit `error.details.liveness`; Vergleiche ergänzen `details.side`. Laufzeitfehler liefern HTTP 503 `liveness_unavailable`.
+```json
+{
+  "status": "input_rejected",
+  "is_live": null,
+  "live_score": null,
+  "reason": "Insufficient image area around the face for liveness detection. Move the face toward the center, step back from the camera, or use a less tightly cropped image."
+}
+```
+
+`normal` erkennt nur Gesichter mit bestandener Liveness-Prüfung. `observe` liefert das Ergebnis und setzt die Erkennung fort. Ohne Prüfung fehlt `liveness`. Die drei Kernfelder sind `status`, `is_live` und `live_score`: Bei bestandener Prüfung oder erkanntem Täuschungsversuch gilt `status: ok` mit Wahrheitswert und Score; bei abgelehnter Eingabe gilt `status: input_rejected`, die anderen Werte sind `null`.
+
+`/v1/detect` liefert auch negative Ergebnisse mit HTTP 200. In `normal` liefern Embeddings, Vergleich und Suche HTTP 422 `liveness_fake` oder `liveness_input_rejected` mit `error.details.liveness`; Vergleiche ergänzen `details.side`. Laufzeitfehler liefern HTTP 503 `liveness_unavailable`. Laufzeitfehler brechen den Vorgang sowohl in `normal` als auch in `observe` ab; sie werden nicht als `input_rejected` zurückgegeben.
 
 Für neue Personen und zusätzliche FaceSamples wird Liveness standardmäßig übersprungen: `[inference].liveness_on_registration=false` führt das Modell nicht aus und lässt `liveness` in neuen Samples weg. Mit `true` gilt bei aktiviertem Addon die Richtlinie `normal`/`observe`; Ablehnungen enthalten `reason` und `liveness`. Die Qualitätsprüfung über `review_mode` und die Validierung externer Embeddings bleiben aktiv. `review_mode=off` und `external_trusted` umgehen eine aktivierte Registrierungsprüfung nicht. Requests können diese Startkonfiguration nicht überschreiben. Bereits gespeicherte Ergebnisse bleiben sichtbar.
 
@@ -147,7 +158,7 @@ Ein angenommener Auftrag kann später fehlschlagen: GET liefert weiterhin HTTP 2
 
 ### `POST /v1/detect`
 
-Bei aktivierter Prüfung enthält jedes bewertete Gesicht `liveness.status`, `liveness.is_live` und `liveness.live_score`. Auch erkannte Täuschungsversuche und `input_rejected` liefern HTTP 200, ohne Erkennungsmerkmale zu extrahieren. `input_rejected` bedeutet ungeeignete Eingabe, etwa ein Gesicht zu nahe am Bildrand. Fehlt `liveness`, wurde es nicht bewertet.
+Bei aktivierter Prüfung enthält jedes bewertete Gesicht `liveness.status`, `liveness.is_live` und `liveness.live_score`. Auch erkannte Täuschungsversuche und `input_rejected` liefern HTTP 200, ohne Erkennungsmerkmale zu extrahieren. `input_rejected` bedeutet, dass um das Gesicht zu wenig Bildfläche vorhanden ist; `liveness.reason` erklärt, wie sich die Aufnahme verbessern lässt. Fehlt `liveness`, wurde es nicht bewertet.
 
 **Eingabe:** multipart `image` erforderlich, `max_faces` 1–100, optional `collection_id`. **Verhalten/Ergebnis:** Mehrfachauflösung, gemeinsame NMS, Flächensortierung; 200 `faces` mit Boxen/5 Punkten/Score/Qualität und `processing_ms`. Kein Gesicht ist eine leere Erfolgsliste. **Fehler:** 400 alter min_score, 404 Collection, 413, 422 invalid_image, 503.
 

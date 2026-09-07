@@ -1580,7 +1580,7 @@
       },
       "LivenessResult": {
         "additionalProperties": false,
-        "description": "Exactly three fields describe the evaluation.\n\nLive: {\"status\":\"ok\",\"is_live\":true,\"live_score\":0.98}.\nFake: {\"status\":\"ok\",\"is_live\":false,\"live_score\":0.12}.\nUnsuitable input: {\"status\":\"input_rejected\",\"is_live\":null,\"live_score\":null}.",
+        "description": "Three core fields describe the evaluation; rejected input may also include reason.\n\nLive: {\"status\":\"ok\",\"is_live\":true,\"live_score\":0.98}.\nFake: {\"status\":\"ok\",\"is_live\":false,\"live_score\":0.12}.\nUnsuitable input: {\"status\":\"input_rejected\",\"is_live\":null,\"live_score\":null}.\nFor input_rejected, optional reason is an English explanation with guidance for retrying.\nOlder results may omit reason. Successful and fake evaluations have only the three core fields.",
         "properties": {
           "is_live": {
             "anyOf": [
@@ -1605,6 +1605,18 @@
             ],
             "description": "Live probability from 0 to 1 for status=ok; null for input_rejected.",
             "title": "Live Score"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional English explanation and retry guidance, present only for input_rejected. Older results may omit it. Omitted for status=ok.",
+            "title": "Reason"
           },
           "status": {
             "description": "ok means the model evaluated the face, including fake verdicts. input_rejected means the input does not meet liveness requirements (for example, insufficient image coverage near an edge).",
@@ -3379,7 +3391,7 @@
     }
   },
   "info": {
-    "description": "Simple self-hosted face detection, optional liveness checks, comparison, registration, and search. Image upload endpoints accept JPEG, PNG, WebP, and BMP. Liveness is disabled by default in server.toml, including in legacy configurations that omit inference.addons. Use the Web UI to download and enable liveness for the next startup, or set inference.addons = [\"liveness\"] and install the addon manually. Set inference.addons = [] to disable it. Setting addons.auto_download = [\"liveness\"] includes it when running models install <package>, even when the base package is cached. Mode, threshold, compare scope, and registration policy are server configuration, not request parameters. When evaluated, liveness has exactly status, is_live, and live_score. An input_rejected status means the input could not be evaluated, with both values null; a missing liveness field means no evaluation was performed. In normal mode, failed or rejected liveness blocks recognition; observe mode continues recognition. Registration skips liveness by default. Install the selected addon before starting the Server; startup does not download models.",
+    "description": "Simple self-hosted face detection, optional liveness checks, comparison, registration, and search. Image upload endpoints accept JPEG, PNG, WebP, and BMP. Liveness is disabled by default in server.toml, including in legacy configurations that omit inference.addons. Use the Web UI to download and enable liveness for the next startup, or set inference.addons = [\"liveness\"] and install the addon manually. Set inference.addons = [] to disable it. Setting addons.auto_download = [\"liveness\"] includes it when running models install <package>, even when the base package is cached. Mode, threshold, compare scope, and registration policy are server configuration, not request parameters. When evaluated, liveness has status, is_live, and live_score. An input_rejected status means the input could not be evaluated, with both values null and an optional reason containing English retry guidance. Older results may omit reason; successful and fake evaluations have only the three core fields. A missing liveness field means no evaluation was performed. In normal mode, failed or rejected liveness blocks recognition; observe mode continues recognition. Registration skips liveness by default. Install the selected addon before starting the Server; startup does not download models.",
     "title": "InsightFace Server",
     "version": "0.3.0"
   },
@@ -4382,7 +4394,7 @@
         ]
       },
       "post": {
-        "description": "Register a person from one or more images, allowing partial success.\n\nLiveness is skipped by default (liveness_on_registration=false), and new\nsamples omit liveness. When enabled in server.toml, normal mode rejects\nfake or unsuitable images with reason liveness_fake or\nliveness_input_rejected and a separate liveness result in rejected_images.\nObserve mode continues normal registration checks and stores the result\nwith accepted samples. review_mode=off and external_trusted embeddings do\nnot bypass enabled liveness. HTTP 201 may contain accepted faces and\nrejected_images; if all images are rejected, HTTP 422 registration_failed\ncontains error.details.rejected_images. Model faults return HTTP 503\nliveness_unavailable, not a fake verdict.",
+        "description": "Register a person from one or more images, allowing partial success.\n\nLiveness is skipped by default (liveness_on_registration=false), and new\nsamples omit liveness. When enabled in server.toml, normal mode rejects\nfake or unsuitable images with reason liveness_fake or\nliveness_input_rejected and a separate liveness result in rejected_images.\nRejected input may include liveness.reason with English retry guidance;\nolder results may omit it. This is separate from the rejection category reason.\nObserve mode continues normal registration checks and stores the result\nwith accepted samples. review_mode=off and external_trusted embeddings do\nnot bypass enabled liveness. HTTP 201 may contain accepted faces and\nrejected_images; if all images are rejected, HTTP 422 registration_failed\ncontains error.details.rejected_images. Model faults return HTTP 503\nliveness_unavailable, not a fake verdict.",
         "operationId": "create_person_v1_collections__collection_id__persons_post",
         "parameters": [
           {
@@ -5039,7 +5051,7 @@
         ]
       },
       "post": {
-        "description": "Add images to an existing person, allowing partial success.\n\nLiveness is skipped by default (liveness_on_registration=false). When\nenabled, normal mode rejects fake or unsuitable images with reason\nliveness_fake or liveness_input_rejected and a separate liveness result\nin rejected_images. Observe mode continues other registration checks.\nreview_mode=off and external_trusted embeddings do not bypass enabled\nliveness. HTTP 201 can contain an empty faces list and only rejected_images.\nAccepted samples retain their evaluated liveness result; unevaluated\nsamples omit it. Model faults return HTTP 503 liveness_unavailable.",
+        "description": "Add images to an existing person, allowing partial success.\n\nLiveness is skipped by default (liveness_on_registration=false). When\nenabled, normal mode rejects fake or unsuitable images with reason\nliveness_fake or liveness_input_rejected and a separate liveness result\nin rejected_images. Observe mode continues other registration checks.\nFor input_rejected, optional liveness.reason contains English retry guidance,\nseparate from the rejection category reason; older results may omit it.\nreview_mode=off and external_trusted embeddings do not bypass enabled\nliveness. HTTP 201 can contain an empty faces list and only rejected_images.\nAccepted samples retain their evaluated liveness result; unevaluated\nsamples omit it. Model faults return HTTP 503 liveness_unavailable.",
         "operationId": "add_faces_v1_collections__collection_id__persons__person_id__faces_post",
         "parameters": [
           {
@@ -5440,7 +5452,7 @@
     },
     "/v1/collections/{collection_id}/search": {
       "post": {
-        "description": "Search the Collection using the selected face.\n\nWith liveness enabled in normal mode, HTTP 422 liveness_fake or\nliveness_input_rejected stops recognition and index search; the result is\nin error.details.liveness. This is distinct from a valid query with no\nidentity matches. Observe mode continues search and includes liveness in\nsearched_face. Without evaluation, liveness is omitted. Model faults\nreturn HTTP 503 liveness_unavailable in either mode.",
+        "description": "Search the Collection using the selected face.\n\nWith liveness enabled in normal mode, HTTP 422 liveness_fake or\nliveness_input_rejected stops recognition and index search; the result is\nin error.details.liveness. This is distinct from a valid query with no\nidentity matches. For input_rejected, optional liveness.reason provides\nEnglish retry guidance and is used as error.message. Observe mode continues\nsearch and includes liveness in searched_face. Without evaluation, liveness is omitted. Model faults\nreturn HTTP 503 liveness_unavailable in either mode.",
         "operationId": "search_v1_collections__collection_id__search_post",
         "parameters": [
           {
@@ -5568,7 +5580,7 @@
     },
     "/v1/compare": {
       "post": {
-        "description": "Compare the selected face in each image.\n\nConfigured liveness_compare_scope selects both, source, or target for\nliveness evaluation. In normal mode, a fake or input rejection stops\nrecognition and returns HTTP 422 liveness_fake or liveness_input_rejected;\nerror.details includes liveness and side (source or target). In observe\nmode, comparison continues and each evaluated face includes liveness.\nUnevaluated sides omit liveness. Runtime faults return HTTP 503\nliveness_unavailable. These policies cannot be overridden per request.",
+        "description": "Compare the selected face in each image.\n\nConfigured liveness_compare_scope selects both, source, or target for\nliveness evaluation. In normal mode, a fake or input rejection stops\nrecognition and returns HTTP 422 liveness_fake or liveness_input_rejected;\nerror.details includes liveness and side (source or target). In observe\nmode, comparison continues and each evaluated face includes liveness.\nFor input_rejected, optional liveness.reason provides English retry guidance;\nwhen present, it is also used as error.message.\nUnevaluated sides omit liveness. Runtime faults return HTTP 503\nliveness_unavailable. These policies cannot be overridden per request.",
         "operationId": "compare_v1_compare_post",
         "requestBody": {
           "content": {
@@ -5685,7 +5697,7 @@
     },
     "/v1/detect": {
       "post": {
-        "description": "Detect faces without generating recognition embeddings.\n\nWhen the liveness addon is enabled, faces[].liveness contains status,\nis_live, and live_score. HTTP 200 also includes fake faces (status=ok,\nis_live=false) and unsuitable input (status=input_rejected, is_live=null,\nlive_score=null); neither is a detection error. An omitted liveness field\nmeans no evaluation. Model execution failure returns HTTP 503\nliveness_unavailable. There is no separate liveness endpoint.",
+        "description": "Detect faces without generating recognition embeddings.\n\nWhen the liveness addon is enabled, faces[].liveness contains status,\nis_live, and live_score. HTTP 200 also includes fake faces (status=ok,\nis_live=false) and unsuitable input (status=input_rejected, is_live=null,\nlive_score=null); neither is a detection error. An omitted liveness field\nmeans no evaluation. Rejected input may include liveness.reason with English\nretry guidance; older results may omit it. Successful and fake evaluations\nhave only the three core fields. Model execution failure returns HTTP 503\nliveness_unavailable. There is no separate liveness endpoint.",
         "operationId": "detect_v1_detect_post",
         "requestBody": {
           "content": {
@@ -5802,7 +5814,7 @@
     },
     "/v1/embeddings": {
       "post": {
-        "description": "Generate the selected face's recognition embedding.\n\nWith liveness enabled in normal mode, fake faces and unsuitable input\nstop before recognition: HTTP 422 liveness_fake or liveness_input_rejected,\nwith the three-field result in error.details.liveness. Observe mode\ncontinues recognition and returns faces[].liveness beside the embedding.\nWithout evaluation, liveness is omitted. Runtime faults return HTTP 503\nliveness_unavailable in either mode.",
+        "description": "Generate the selected face's recognition embedding.\n\nWith liveness enabled in normal mode, fake faces and unsuitable input\nstop before recognition: HTTP 422 liveness_fake or liveness_input_rejected,\nwith the result in error.details.liveness. For input_rejected, optional\nliveness.reason provides English retry guidance and is used as error.message.\nObserve mode continues recognition and returns faces[].liveness beside the embedding.\nWithout evaluation, liveness is omitted. Runtime faults return HTTP 503\nliveness_unavailable in either mode.",
         "operationId": "embeddings_v1_embeddings_post",
         "requestBody": {
           "content": {
@@ -7009,7 +7021,7 @@
     },
     "/v1/monitors/{monitor_id}/state": {
       "get": {
-        "description": "Read the current RTSP detection and recognition state.\n\nEvaluated faces include the same three-field liveness result as image\nendpoints. In normal mode, blocked faces have status=liveness_blocked and\ncontribute to liveness_blocked_faces, not unknown_faces. They do not run\nidentity search or emit person_enter events. Observe mode continues\nrecognition and identity events. Runtime liveness failures are inference\nerrors and must not be interpreted as fake faces.",
+        "description": "Read the current RTSP detection and recognition state.\n\nEvaluated faces include the same liveness result as image endpoints:\nstatus, is_live, and live_score, plus optional English reason for input_rejected.\nOlder results may omit reason. In normal mode, blocked faces have status=liveness_blocked and\ncontribute to liveness_blocked_faces, not unknown_faces. They do not run\nidentity search or emit person_enter events. Observe mode continues\nrecognition and identity events. Runtime liveness failures are inference\nerrors and must not be interpreted as fake faces.",
         "operationId": "monitor_state_v1_monitors__monitor_id__state_get",
         "parameters": [
           {
