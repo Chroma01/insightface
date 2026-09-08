@@ -39,7 +39,7 @@ VERSION = find_version('insightface', '__init__.py')
 
 requirements = [
     'numpy',
-    'onnx',
+    'onnx>=1.13',
     'onnxruntime',
     'opencv-python',
     'tqdm',
@@ -56,7 +56,7 @@ privateframe_requirements = [
 
 gui_only_requirements = [
     'PySide6-Essentials>=6.5',
-    'Pillow',
+    'Pillow>=9.1',
     'reportlab',
     'scikit-learn',
     'cryptography>=42.0.0',

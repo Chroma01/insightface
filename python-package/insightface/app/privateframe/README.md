@@ -14,6 +14,8 @@ a separate video and a reusable analysis JSON.
 - Integrate with scripts using command discovery, dry runs, structured status,
   and progress events.
 
+> **Commercial use:** Using PrivateFrame with InsightFace pretrained models for commercial purposes requires a commercial model license. For licensing, visit [www.insightface.ai](https://www.insightface.ai).
+
 ## Video demo
 
 https://github.com/user-attachments/assets/555043fc-e7a2-420c-9c98-ae64324b9867
