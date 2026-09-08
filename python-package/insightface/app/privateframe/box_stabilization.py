@@ -1,4 +1,4 @@
-"""Robust, track-local output box smoothing for the streaming experiment."""
+"""Robust, track-local output box smoothing for video face redaction."""
 
 from __future__ import annotations
 

@@ -9,6 +9,17 @@ The code of InsightFace Python Library is released under the MIT License. There 
 InsightFace 2.0 uses ONNX Runtime for FaceAnalysis, ModelZoo, PrivateFrame, and
 the desktop Evaluation Studio.
 
+## What's new in 2.0
+
+- **[Liveness update](#optional-liveness-addon):** optional RGB liveness before
+  recognition, configurable recognition gating, and per-face scores with
+  input-rejection guidance.
+- **[PrivateFrame update](#privateframe):** local video face blur/mosaic,
+  reference-photo selection, editable analysis JSON, and desktop, CLI, and
+  Python API workflows. See the [full guide](insightface/app/privateframe/README.md).
+- **Runtime and models:** `raccoon_s` / `raccoon_l` model packages, automatic
+  CoreML/CUDA/CPU selection, and reusable CoreML compilation caches.
+
 ## Installation
 
 ### Choose an installation
@@ -18,6 +29,15 @@ the desktop Evaluation Studio.
 | FaceAnalysis and ModelZoo | `pip install insightface` |
 | Video face blur/mosaic with the PrivateFrame API and CLI | `pip install "insightface[privateframe]"` |
 | Evaluation Studio GUI, including PrivateFrame | `pip install "insightface[gui]"` |
+
+To use the changes in this development branch, install from the repository
+root instead:
+
+```bash
+python -m pip install -e "./python-package[privateframe]"
+# Or install the desktop application, which includes PrivateFrame:
+python -m pip install -e "./python-package[gui]"
+```
 
 The base package installs `onnxruntime`. The `privateframe` extra additionally
 installs PyAV and PyYAML; the `gui` extra includes those dependencies plus the
@@ -97,292 +117,57 @@ insightface-privateframe --help
 
 ## PrivateFrame
 
-PrivateFrame detects and tracks faces in local videos and renders those face
-regions with Gaussian blur or mosaic for privacy. It never modifies or uploads
-the source video. PrivateFrame also treats the analysis JSON as a first-class
-result, so an analysis can be inspected or edited and rendered again without
-rerunning model inference. Stable default
-names pair it with the rendered video in one output directory:
+PrivateFrame detects and tracks faces in local videos and applies Gaussian
+blur or mosaic. Use the desktop Evaluation Studio, CLI, or Python API to blur
+all detected faces or select people with reference photos. Processing runs
+locally and keeps the source video unchanged.
 
-```text
-video_privateframe.json
-video_privateframe.mp4
-```
+See the [full guide](insightface/app/privateframe/README.md) for installation,
+GUI/Python examples, configuration, and JSON editing, or watch the
+[video demo](https://example.com/privateframe-demo).
 
-The result JSON is a compact, portable rendering document. It stores the source
-file name and video geometry, final per-frame face boxes, optional identity
-decisions, and effective rendering defaults. It does not store absolute source
-paths, source-video content hashes, model fingerprints, Git state, or internal tracking
-evidence. When rendering it again, PrivateFrame checks the input dimensions,
-frame rate, and decoded frame count rather than hashing the video contents.
-
-With `--output-dir`, PrivateFrame derives a private
-`.<input_stem>_privateframe_work` directory there; its temporary SQLite packet
-cache is removed after analysis. An explicit `--workdir` overrides that runtime
-location. For compatibility, using `--workdir` without `--output-dir` or
-`--result` stores the JSON as `<workdir>/result.privateframe.json`; an explicit
-`--result` always takes precedence.
-
-Use `analyze` for JSON only, `process` for JSON plus the redacted video, and
-`render` to render an existing or edited JSON without running the models again:
+### Quick start
 
 ```bash
-# Analysis only: writes /data/output/video_privateframe.json
-insightface-privateframe analyze \
-  --input /data/video.mp4 \
-  --output-dir /data/output
-
-# Analyze and render: also writes /data/output/video_privateframe.mp4
 insightface-privateframe process \
-  --input /data/video.mp4 \
-  --output-dir /data/output
-
-# Render after inspecting or editing the JSON
-insightface-privateframe render \
-  --input /data/video.mp4 \
-  --output-dir /data/output
+  --input /data/video.mp4 --output-dir /data/output
 ```
 
-`analyze` and `process` use the packaged `configs/base.yaml` by default. Pass
-`--config /path/to/custom.yaml` only when a custom configuration is needed.
-A custom YAML automatically inherits the packaged Base, so it normally contains
-only the changed fields:
-
-```yaml
-schema_version: 1
-scan:
-  max_analysis_fps: 15  # Lower the default 30 for faster processing.
-```
-
-An explicit `base_config` field remains available when the custom YAML must
-inherit a different complete parent configuration. CLI dotted options are
-applied last, after the Base and custom YAML layers.
+`process` writes `video_privateframe.json` and `video_privateframe.mp4`.
+Use `analyze` for JSON only, or `render` to render existing or edited JSON with
+the original video without rerunning inference. Replacing existing outputs
+requires `--overwrite`. See the [CLI workflows](insightface/app/privateframe/README.md#command-line-quick-start).
 
 ### Choosing who to blur with reference photos
 
-The default `recognition.mode: all` blurs every detected face and needs no
-reference photos. To select particular people, put their photos together in
-one folder and supply `recognition.reference_dir`. No person names or per-person
-subfolders are needed; different people and multiple photos of the same person
-can share the folder. Reference-photo selection is available in the GUI, CLI,
-and Python API.
+| Mode | Behavior with the default `unknown_action: auto` |
+|---|---|
+| `all` (default) | Blur every detected face. |
+| `blur_only` | Blur people matched to reference photos; keep others visible. |
+| `exempt` | Keep matched people visible; blur everyone else. |
 
-| Mode | People matched to the reference photos | Unmatched or uncertain people with the default `unknown_action: auto` |
-|---|---|---|
-| `all` | Blurred; photos are not read | Blurred |
-| `blur_only` | Blurred | Kept visible |
-| `exempt` | Kept visible | Blurred |
-
-```bash
-# Blur only the people shown in reference photos.
-insightface-privateframe process \
-  --input /data/video.mp4 --output-dir /data/output \
-  --recognition.mode blur_only \
-  --recognition.reference_dir /data/reference_photos
-
-# Keep people shown in reference photos visible; blur everyone else.
-insightface-privateframe process \
-  --input /data/video.mp4 --output-dir /data/output \
-  --recognition.mode exempt \
-  --recognition.reference_dir /data/reference_photos
-```
-
-JPG, JPEG, PNG, and WebP files directly inside the reference folder are imported;
-hidden files and symlinks are skipped, and identical copies are deduplicated.
-Different photos of the same person remain valid references. Each photo
-contributes **only its largest detected face**, so clear single-person photos
-are recommended. For group photos, a log message states how many faces were
-found and that only the largest was selected. If that face is unsuitable for
-recognition, the photo is skipped with a reason; the importer does not switch to
-a smaller face. An import summary reports used and skipped photo counts, not
-the number of different people. These messages go to standard error; with
-`--progress jsonl`, application progress and reference-photo diagnostics are
-JSONL records. Third-party runtime diagnostics may still be plain text on
-standard error; standard output remains one final status JSON object.
-
-Both photo modes fail before video analysis if no reference photo supplies a
-usable face. Valid references with no matching person in the video are a normal
-completed result. Model loading and inference errors stop processing instead of
-being treated as unmatched people. `--dry-run` checks configuration and file
-readiness without running face detection; photo suitability is checked during
-execution.
-
-Keep `recognition.unknown_action: auto` to follow the table. Set it explicitly
-to `blur` or `keep` only when a different treatment of unmatched or uncertain
-people is intended; `all` always blurs every detected face. **With `keep`,
-including the default `blur_only` behavior, a target person who is not recognized
-can remain visible.** The effective policy and matching decisions are stored in
-the result JSON, so a later `render` uses the same treatment without rereading
-the reference photos or rerunning recognition.
+Photo modes use `recognition.reference_dir`, a folder of photos with no
+per-person subfolders; only the largest face in each photo is used. A missed
+match in `blur_only` can leave a target person visible, so review the output.
+See [reference-photo setup and examples](insightface/app/privateframe/README.md#choosing-who-to-blur-with-reference-photos).
 
 ### Analysis sampling rate
 
-`scan.max_analysis_fps` defaults to **30** in the packaged configuration and
-the GUI. It sets an approximate ceiling on how many input frames receive
-regular full-frame face detection per second **of video time**. Actual
-processing speed depends on the hardware, scene, and rendering cost. The
-result video retains every source frame and its original frame rate.
-
-The runtime samples at a uniform integer interval with a 5% rate tolerance:
-
-| Source video FPS | Default 30: regular scans per video second | Lowered to 15: regular scans per video second |
-|---|---|---|
-| 25 | 25 (every frame) | 12.5 (every 2 frames) |
-| 30 | 30 (every frame) | 15 (every 2 frames) |
-| 60 | 30 (every 2 frames) | 15 (every 4 frames) |
-| 15 or below | Same as source FPS (every frame) | Same as source FPS (every frame) |
-
-This is a soft ceiling: scene changes, video endpoints, and newly discovered
-tracks can trigger additional scans. Frames between regular scans are still
-decoded and rendered. By default, existing face tracks use interpolated
-regions between detection frames; a face visible only in that gap may be
-missed.
-
-- **Lower to 15** when faster processing and less detector work take priority,
-  especially in scenes with limited motion. A lower value such as 10 can reduce
-  sampling further. Wider gaps increase the risk of missing briefly visible faces;
-  review representative output before using a lower rate broadly.
-- **Keep 30** for fast motion, brief face appearances, frequent occlusion, or
-  a need for greater detection coverage.
-- **Raise toward the source video's FPS** on higher-FPS input when more temporal
-  detail matters. Setting it to the source FPS scans every frame. More sampling
-  costs more compute and still cannot guarantee every face is found.
-
-Use `--scan.max_analysis_fps 15` to lower the default, or set the same field
-in custom YAML. Positive fractional values are also accepted. Nearby values
-may produce the same sampling interval, so performance does not change
-continuously with this number. The GUI initially selects **Normal (target 30
-analysis FPS)** and also offers **Fast (target 15 analysis FPS)**.
+`scan.max_analysis_fps` defaults to **30**, an approximate ceiling on regular
+detection scans per second of source video. Lower it to 15 for less detector
+work; wider gaps can miss
+briefly visible faces. See [sampling and quality tradeoffs](insightface/app/privateframe/README.md#analysis-sampling-rate)
+and the [configuration guide](insightface/app/privateframe/README.md#configuration-and-rendering).
 
 ### CLI automation contract
 
-The CLI is safe to invoke from shell scripts and vendor-neutral AI coding tools
-without parsing human-oriented log text. An unfamiliar automation client should
-run `insightface-privateframe describe` and read these high-level fields first:
+Use `insightface-privateframe describe` to discover commands and options, and
+`process --dry-run` with your input/output arguments to check readiness.
+Commands return a final JSON status on stdout and progress on stderr. See the
+[automation guide](insightface/app/privateframe/README.md#cli-discovery-dry-runs-and-automation)
+for readiness checks, structured progress, and error handling.
 
-- `tool.summary`, `tool.purpose_id`, and `tool.capabilities` explain that the
-  tool detects and tracks face regions and renders Gaussian blur or mosaic.
-- `discovery` maps common user intentions to the correct command and gives a
-  safe dry-run/execution policy.
-- `config.groups` organizes 30 common and intermediate controls for models,
-  analysis, privacy policy, redaction, video, and audio. Their
-  `config.dotted_options` entries contain types, defaults, constraints,
-  `description`, `when_to_use`, and `tradeoff` guidance.
-- `config.full_reference.path` locates the complete Markdown configuration
-  reference installed with the package. Read it for advanced settings; options
-  omitted from self-description still work in YAML and CLI overrides.
-- `config.dotted_options["scan.max_analysis_fps"]` provides the sampling
-  default, units, behavior, and `tuning_guidance` for choosing a higher or lower
-  rate. Automation should read this before changing the analysis rate.
-- `primary_io` distinguishes file artifacts from the final status JSON on
-  stdout.
-- `recommended_workflows` supplies executable argument templates for immediate
-  redaction and for the `analyze → edit JSON → render` workflow.
-- `commands.*.reads`, `commands.*.outputs`, and `commands.*.when_to_use` make
-  each command's data flow explicit; `outputs` means file artifacts, while
-  every command still returns its status on stdout. In particular, `render`
-  reads both the original source video and the result JSON.
-
-For a normal request to blur or anonymize faces, automation should select
-`process`, run the supplied command template once with `--dry-run`, inspect
-both `stdout.ok` and `stdout.ready`, and then repeat it without `--dry-run`.
-Mosaic/pixelation is selected with `--render.redaction.method mosaic`. Existing
-files are never replaced unless `--overwrite` is deliberately added. On
-success, read final resolved file paths from `stdout.artifacts`; a dry-run puts
-the planned paths in `stdout.plan.artifacts`.
-
-`analyze`, `render`, `process`, `describe`, and
-`doctor` write exactly one compact status JSON object to standard output. A
-successful execution has this stable envelope:
-
-```json
-{"status_schema_version":1,"ok":true,"command":"analyze","artifacts":{"result_json":"/output/input_privateframe.json","result_video":null},"runtime":{"provider":"CPUExecutionProvider"},"timings":{"total_seconds":8.2},"summary":{"frame_count":300,"face_tracks":3,"face_regions":615}}
-```
-
-The success summary contains only stable user-facing counts. Detailed tracking,
-recognition, sampling, cache, model, and backend diagnostics are not written to
-standard output; development runs can retain them in the separate developer
-report.
-
-`timings.total_seconds` measures the reported analysis/render stages. It excludes
-process startup, argument handling, and shutdown; measure the subprocess wall
-time separately when comparing end-to-end processing speed.
-
-Failures use the same standard-output channel and include a structured `error`
-with `code`, `stage`, `type`, `message`, `retryable`, and `hints`. Standard error
-is reserved for diagnostics and progress, so redirecting it never corrupts the
-final status object. Ctrl-C returns a `cancelled` status and exit code 130. The
-old `--json` switch is no longer needed; `analyze`
-remains the subcommand that selects JSON-only analysis.
-
-Discover the installed CLI instead of hard-coding its options:
-
-```bash
-insightface-privateframe --version
-insightface-privateframe describe
-insightface-privateframe doctor
-```
-
-`describe` returns commands and workflows, common/intermediate configuration,
-artifact contracts, status-output rules, exit codes, and examples. Full
-configuration is documented in the bundled
-[configuration reference](insightface/app/privateframe/docs/configuration.md),
-including advanced tracking and detector tuning. `doctor` reports readiness
-checks for the runtime, models, media support, output location, and safety settings.
-
-Self-description uses **`contract_schema_version: 2`**.
-`config.dotted_options` contains the selected 30 fields, their defaults appear
-in each field specification, and `config.groups` organizes them by purpose.
-Full configuration is available at `config.full_reference.path`; read it when
-an unlisted option is needed. The execution status uses
-**`status_schema_version: 1`**. The default analysis FPS is **30**.
-Video output defaults to **libx264, CRF 23, and the medium preset**, balancing
-quality and file size for sharing. Use CRF 18 to retain more detail or CRF 28
-for smaller files. Encoding quality does not change face detection or matching.
-
-The reference is generated from the complete configuration catalog and checked
-for drift in tests. After changing configuration defaults or documentation,
-maintainers regenerate and verify it with:
-
-```bash
-python -m insightface.app.privateframe.config_reference
-python -m insightface.app.privateframe.config_reference --check
-```
-
-Every execution command accepts `--progress auto|text|jsonl|none`. `auto` uses
-human-readable progress on an interactive terminal and JSONL otherwise.
-`jsonl` writes each application progress event or reference-photo diagnostic as
-one compact JSONL record to standard error. Reference-photo diagnostics have
-`log_schema_version: 1`, `event: "log"`,
-`level`, `stage: "recognition"`, and `message`; callers should distinguish them
-from progress records. Third-party runtime diagnostics may still be plain text
-on standard error, so the entire stream is not guaranteed to be JSONL.
-`none` suppresses progress but retains reference-photo
-diagnostics as text on standard error. In every mode, standard output remains
-the single final JSON object.
-
-Use `--dry-run` to resolve and validate the configuration, input, work
-directory, output artifacts, and dotted overrides without model inference or
-artifact rendering. It may open an in-memory codec context (or encode one
-synthetic frame to a null sink) to validate the final encoder options. It does
-not download models, create ONNX Runtime sessions, compile CoreML models, warm
-up inference, or create output files/directories:
-
-```bash
-insightface-privateframe process \
-  --input /data/video.mp4 \
-  --output-dir /data/output \
-  --scan.max_analysis_fps 15 \
-  --progress jsonl \
-  --dry-run
-```
-
-PrivateFrame protects existing public artifacts by default. Review the dry-run
-plan first, then pass `--overwrite` explicitly when replacing the reported
-JSON or video is intentional. Concurrent CLI writers targeting the same output
-or work directory are serialized with adjacent lock files; locks owned by dead
-processes are reclaimed, while `output_busy` is safe to retry after the active
-invocation finishes.
+## Evaluation Studio GUI
 
 Development install:
 
@@ -419,41 +204,12 @@ small delete button and can be replaced by dragging in another file.
 The desktop app uses mode-based navigation. **PrivateFrame** is the first
 workflow, followed by **Face Recognition**, **Album Management**, **Face Swap**,
 and **Enterprise Evaluation** in the persistent **Workflows** rail.
-PrivateFrame accepts a local video and output directory, initially selects the
-system Videos directory (Movies on macOS), runs the Python pipeline on a
-background worker, and always creates a reusable `_privateframe.json`.
-It uses the GUI's global model, model root, and provider rather than a separate
-PrivateFrame model selector. Processing is enabled for `raccoon_s` and
-`raccoon_l`; a missing package may download into the configured root on first
-use, while an invalid installed V2 package is rejected before the job starts.
-Its output mode can stop after analysis or immediately render the paired
-`_privateframe.mp4`, without blocking the GUI. The main page exposes
-analysis frequency, which people to blur,
-the redaction style, and whether to preserve supported audio. Video preview
-and metadata share the input card, followed by a full-width output directory.
-Start/cancel actions and progress remain below the settings area. **Processing
-details** opens the live run log and output filenames in a separate, non-modal
-window, so an empty log does not take space from the settings. Output paths
-are also available in the output directory's tooltip. The two photo
-modes show a reference-photo folder directly below the policy: no person names
-or per-person folders are needed, and only the largest face in each photo is
-used. The folder's tooltip explains supported photos. Reference selection and
-skipped-photo reasons appear in the run log. **More Options** shows the global
-model/provider information and groups controls into redaction appearance (coverage and
-between-scan tracking), video output (quality, encoding speed, and whether to
-render a video), and person matching (sampling profile and base similarity
-threshold). Model problems that prevent processing still appear on the main
-page. Person matching is shown only for photo modes, with a default
-threshold of 0.40. Unconfirmed faces follow the configured `unknown_action`;
-its default `auto` follows the selected photo policy. There is no separate GUI
-override for it. Initial processing values and each group's
-reset values are read from the packaged `configs/base.yaml` when the page is
-created, without loading models. GUI presets are shortcuts; a configured value
-outside those shortcuts is shown as the configured value instead of being
-replaced. Non-CRF rate
-control is inherited unless the user explicitly chooses a CRF quality setting.
-Global model/root/provider selections remain the GUI's explicit overrides.
-The More Options button indicates modified settings. Face Recognition
+PrivateFrame uses the global model, model root, and provider under **Models**,
+and supports `raccoon_s` and `raccoon_l`. Processing runs in the background,
+producing analysis JSON and an optional redacted MP4. See the
+[PrivateFrame GUI guide](insightface/app/privateframe/README.md#desktop-gui).
+
+Face Recognition
 is a single **Query & Gallery** workspace: upload
 one query image and one gallery image for 1:1 compare, or upload multiple
 gallery images / a folder for 1:N gallery search. Album Management uses a
@@ -525,21 +281,38 @@ More details:
 
 ## Change Log
 
-### [2.0] - 2026-08-31
+### [2.0] - Unreleased
 
-#### Added
+#### Liveness update
 
-- Add manifest-backed ModelZoo packages, PrivateFrame video privacy analysis,
-  reusable analysis JSON, and the integrated PrivateFrame GUI workflow.
-- Add automatic CoreML/CUDA/CPU Provider selection and persistent,
-  signature-scoped CoreML compilation caches for managed Sessions.
+- Add opt-in RGB liveness through `FaceAnalysis(addons=["liveness"])`, with
+  `normal` / `observe` modes and a configurable live-score threshold (default
+  `0.8`).
+- Return per-face scores and input-rejection guidance. Normal mode retains
+  detections while skipping recognition for faces that do not pass.
+- Download and verify the separate addon model under
+  `<root>/addons/liveness.onnx`. See [usage and result fields](#optional-liveness-addon).
 
-#### Changed
+#### PrivateFrame update
 
-- Default sampled PrivateFrame modes to detector-anchor interpolation.
-- Use reusable fixed-shape SCRFD Sessions per input resolution by default.
-- Reorganize installation guidance around ONNX Runtime, CoreML, CUDA,
-  PrivateFrame, and the GUI.
+- Add local video face detection/tracking with Gaussian blur or mosaic through
+  the Python API, `insightface-privateframe` CLI, and Evaluation Studio GUI.
+- Add `all`, `blur_only`, and `exempt` policies, with a folder of reference
+  photos for selecting people.
+- Export editable analysis JSON and render it again without another inference
+  pass; provide `analyze`, `process`, and `render` workflows.
+- Add configurable analysis sampling (30 FPS by default), interpolation between
+  scans, encoding/audio controls, and structured CLI status and progress.
+- Add the [PrivateFrame feature and usage guide](insightface/app/privateframe/README.md).
+
+#### Runtime and model updates
+
+- Add manifest-backed `raccoon_s` / `raccoon_l` model packages and make
+  `raccoon_s` the default for new GUI configurations.
+- Add automatic CoreML/CUDA/CPU provider selection and persistent CoreML
+  compilation caches; use reusable fixed-shape SCRFD sessions per resolution.
+- Set `ORT_DISABLE_TELEMETRY=1` before importing ONNX Runtime, where supported.
+- Add the `privateframe` installation extra and include it in the `gui` extra.
 
 ### [1.0.1] - 2026-05-23
 
@@ -627,7 +400,12 @@ FaceAnalysis can run RGB liveness detection before recognition. Enable it
 explicitly; installing an addon file alone does not change existing behavior:
 
 ```python
+import cv2
 from insightface.app import FaceAnalysis
+
+image_bgr = cv2.imread("input.jpg")
+if image_bgr is None:
+    raise FileNotFoundError("Could not read input.jpg")
 
 app = FaceAnalysis(
     name="buffalo_l",
@@ -713,6 +491,22 @@ release repository for provenance and applicable notices. The initial threshold
 and crop gate are integration defaults, not a production accuracy guarantee.
 
 ## Model Zoo
+
+### Raccoon model packages
+
+InsightFace 2.0 supports `raccoon_s` and `raccoon_l` through task-aware V2
+manifests that declare the model files and preprocessing. Use them with
+`FaceAnalysis(name="raccoon_s")` or `FaceAnalysis(name="raccoon_l")`.
+PrivateFrame requires one of these packages; its default and the default for
+new GUI configurations is `raccoon_s`. Ordinary `FaceAnalysis()` continues to
+use `buffalo_l` by default.
+
+Model packages are stored under `<root>/models/<name>/` (default root:
+`~/.insightface`). PrivateFrame can download a missing selected package on
+first use; see its [model setup guide](insightface/app/privateframe/README.md).
+Liveness is a separate optional addon and must be enabled explicitly.
+
+### Legacy model packs
 
 In the latest version of insightface library, we provide following model packs:
 

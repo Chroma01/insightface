@@ -172,14 +172,18 @@ def _development_report_path(result_path: Path) -> Path:
     return result_path.with_name(f"{result_path.stem}.dev.json")
 
 
-def _owned_development_report_exists(path: Path, result_path: Path) -> bool:
-    """Validate a colliding report and return whether this pipeline owns it."""
+def _owned_development_report_exists(
+    path: Path, result_path: Path, *, reject_unowned: bool
+) -> bool:
+    """Recognize an old report, rejecting other files only when replacing it."""
 
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        if not reject_unowned:
+            return False
         raise FileExistsError(
             f"refusing to replace unrecognized development report: {path}"
         ) from error
@@ -188,18 +192,12 @@ def _owned_development_report_exists(path: Path, result_path: Path) -> bool:
         or value.get("format") != "privateframe-development-report"
         or value.get("result_file") != result_path.name
     ):
+        if not reject_unowned:
+            return False
         raise FileExistsError(
             f"refusing to replace unrecognized development report: {path}"
         )
     return True
-
-
-def _remove_owned_development_report(path: Path, result_path: Path) -> None:
-    """Remove only a report previously generated for this exact result name."""
-
-    if not _owned_development_report_exists(path, result_path):
-        return
-    path.unlink()
 
 
 def _public_observation_source(item: Mapping[str, Any]) -> str:
@@ -844,10 +842,14 @@ def _analyze_streaming_pipeline_impl(
             ),
         }
     )
-    retained = {destination.name} if destination.parent == work else set()
+    # The paired report has its own ownership-aware cleanup below. Keep it out
+    # of generic workdir cleanup, including an unrelated file in final mode.
+    retained = (
+        {destination.name, development_destination.name}
+        if destination.parent == work
+        else set()
+    )
     if development_enabled:
-        if development_destination.parent == work:
-            retained.add(development_destination.name)
         write_json(work / "tracks.streaming-onnx.json", result["tracks"])
         write_json(work / "effective-config.streaming-onnx.json", config)
         retained.update(
@@ -889,11 +891,13 @@ def _analyze_streaming_pipeline_impl(
             }
         )
 
-    # Validate a colliding developer filename before committing a new result,
-    # but keep the old pair intact if the atomic result write itself fails.
+    # Only diagnostic runs need to claim the developer filename. Final runs
+    # leave unrelated or unreadable files alone. Keep an owned report intact
+    # until the atomic result write succeeds.
     had_development_report = _owned_development_report_exists(
         development_destination,
         destination,
+        reject_unowned=development_enabled,
     )
 
     # The production document is intentionally compact and contains only what

@@ -112,4 +112,10 @@ server/.models/*
 server/test-results/
 *.onnx
 
+# Local development artifacts and internal notes
+/tmp/
+/.agent_tmp/
+:memory:.ses
+**/README_INTERNAL*.md
+
 .DS_Store

@@ -37,6 +37,7 @@ server/test-results/
 **/._*
 **/.DS_Store
 server/**/dist/
+**/README_INTERNAL*.md
 **/*.onnx
 **/.env
 **/.env.*

@@ -1,9 +1,11 @@
 # InsightFace Evaluation Studio GUI
 
 InsightFace Evaluation Studio is a local desktop GUI for InsightFace 2.0. It is
-designed for no-code face recognition testing, local People Library management,
-album organization, enterprise model evaluation, report export, and basic face
-swap trials.
+designed for local video face privacy with PrivateFrame, no-code face recognition
+testing, local People Library management, album organization, enterprise model
+evaluation, report export, and basic face swap trials. See the
+[PrivateFrame guide](../insightface/app/privateframe/README.md) for its full
+workflow and video demo.
 
 ## Install
 
@@ -98,9 +100,11 @@ automatically.**
    **JSON only** to stop after analysis for later editing, or **JSON + redacted
    video** to also write the paired `<video>_privateframe.mp4`. **More Options**
    contains between-scan control, face coverage, encoding preset (Medium by
-   default), CRF quality, AAC audio, and selective-recognition Gallery settings.
-   Gallery people are selected from first-level person folders; uncertain
-   identities remain blurred.
+   default), CRF quality, supported audio, and person-matching settings. Photo
+   modes use one reference-photo folder with no per-person subfolders; only
+   the largest face in each photo is used. **Blur only** blurs matched people
+   and leaves unmatched or uncertain people visible; **Exempt** keeps matched
+   people visible and blurs everyone else. Review the output before sharing it.
 2. **Face Recognition**: one Query & Gallery workspace. One gallery image runs
    1:1 compare; multiple gallery images or a folder run 1:N gallery search.
 3. **Album Management**: one **Album** workspace for local folder import,
