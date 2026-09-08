@@ -128,7 +128,7 @@ _DOTTED_METADATA: dict[str, dict[str, Any]] = {
         "unit": "frames_per_second_of_input_video",
         "description": (
             "Approximate ceiling on regular full-frame face detection sampling, "
-            "default 30. This controls sampling along the input video timeline; "
+            "default 15 (Fast mode). This controls sampling along the input video timeline; "
             "it is not a wall-clock processing speed target and does not change "
             "the output video's frame count or frame rate. A uniform integer "
             "stride with 5% rate tolerance is derived per video: at 30, 25/30 FPS "
@@ -141,16 +141,16 @@ _DOTTED_METADATA: dict[str, dict[str, Any]] = {
         ),
         "tuning_guidance": {
             "keep_default": (
-                "Keep 30 for greater temporal coverage, fast motion, or frequent occlusion."
+                "Keep the default Fast mode (15) to reduce detector work for faster processing."
             ),
             "increase": (
-                "For source video above 30 FPS, raise toward the source FPS for "
+                "Use 30 or raise toward the source FPS for "
                 "fast motion, briefly visible faces, or greater detection coverage. "
                 "Setting the source FPS scans every frame. "
                 "Higher sampling costs more compute and cannot guarantee detection."
             ),
             "decrease": (
-                "Lower to 15 (or e.g. 10) when faster processing and less detector "
+                "Lower below 15 (e.g. to 10) when faster processing and less detector "
                 "work take priority, especially in limited-motion scenes. "
                 "Wider gaps increase the risk of missing faces "
                 "that appear only between samples; review representative output."
@@ -1236,8 +1236,8 @@ def _examples(commands: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "name": "fast_analysis_cap",
                 "description": (
-                    "Lower the default 30 to 15 for faster processing on a "
-                    "constrained device; wider sampling gaps can miss brief faces."
+                    "Explicitly select the default Fast mode (15 analysis FPS); "
+                    "wider sampling gaps can miss brief faces."
                 ),
                 "argv": [*process, "--scan.max_analysis_fps", "15"],
             }

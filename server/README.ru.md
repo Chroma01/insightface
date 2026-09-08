@@ -128,8 +128,15 @@ production-конфигурацию.
 
 В полном checkout InsightFace установите модель в `server/.models`:
 
+Перед первой установкой модели или запуском контейнеров подготовьте каталоги хоста из корня репозитория. Каталог addons необходим даже при отключённой проверке живого лица; если его нет, Compose сообщает об ошибке. Общий GID 10001 и setgid позволяют установщику моделей и Server записывать в него. Повторяйте экспорт UID/GID в каждой новой оболочке, чтобы установщик работал от имени вашего пользователя хоста. Базовые модели остаются доступны Server только для чтения.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license

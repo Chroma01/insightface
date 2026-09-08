@@ -48,6 +48,8 @@ auto_download = ["liveness"]
 
 `inference.addons` は実行時の使用、`addons.auto_download` は基本モデルのインストール時の追加ダウンロードを制御します。後者を `["liveness"]` にすると、基本モデルがキャッシュ済みでも addon を追加します。起動時のダウンロードはありません。インストーラーと Server は同じ設定ファイルを読みます。
 
+以下のインストールコマンドの前に、[ユーザーガイドの初期設定](user-guide.ja.md)に従ってホスト側のディレクトリ権限と UID/GID の export を設定してください。
+
 ```bash
 docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
 docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness

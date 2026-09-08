@@ -122,6 +122,11 @@ def test_compose_mounts_models_read_only_and_persists_data() -> None:
         assert "source: ../config\n        target: /etc/insightface" in server_service
         assert "target: /models\n        read_only: true" in server_service
         assert "source: *addons-path\n        target: /models/addons" in server_service
+        assert (
+            "target: /models/addons\n        bind:\n          create_host_path: false"
+            in server_service
+        )
+        assert "create_host_path: true" not in compose
         assert "HTTPS_PROXY:" in server_service
         models_service = compose.split("\n  models:\n", 1)[1]
         assert "target: /models" in models_service

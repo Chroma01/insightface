@@ -94,6 +94,7 @@ def test_privateframe_extra_config_and_offline_reference_are_packaged(
 
     runpy.run_path(str(package_root / "setup.py"), run_name="packaging_test")
 
+    assert captured["python_requires"] == ">=3.10"
     assert captured["package_data"]["insightface.app.privateframe"] == [
         "configs/*.yaml", "docs/*.md"
     ]

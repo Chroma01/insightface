@@ -223,7 +223,16 @@ Use the stable `unavailable_code` and error codes for UI localization;
 keys. Render authored Markdown without running interface translation over it.
 Web-enabled deployments mount only the addon subdirectory writable under the
 read-only model root, and mount the whole configuration directory writable so
-atomic replacement is possible. Host permissions and proxy setup are in the
+atomic replacement is possible. The addon bind mount has `create_host_path: false`:
+operators must create it and grant shared GID 10001 write/setgid permissions
+before the first model install or Server startup, even with liveness disabled.
+The model tool uses the exported host UID/GID plus supplementary GID 10001;
+the Server runs as UID/GID 10001. This prevents Docker from silently creating a
+root-owned addon directory. The initial README/user-guide setup covers these
+permissions; Web configuration writes need the additional configuration-directory
+permissions. Compose forwards download proxies to both services, while the
+Docker health probe uses an explicit proxy-free opener for localhost regardless
+of `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY`. Web permissions and proxy setup are in the
 [user guide](user-guide.md#web-download-permissions).
 
 Every evaluated face has the core fields `status`, `is_live`, and `live_score`.

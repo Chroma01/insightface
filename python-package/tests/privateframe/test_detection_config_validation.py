@@ -72,12 +72,12 @@ def test_scan_max_analysis_fps_must_be_finite_and_positive(value):
         validate_scan_passes(config)
 
 
-def test_scan_max_analysis_fps_defaults_to_thirty():
+def test_scan_max_analysis_fps_defaults_to_fifteen():
     config = _valid_config()
 
     validate_scan_passes(config)
 
-    assert config["scan"]["max_analysis_fps"] == 30.0
+    assert config["scan"]["max_analysis_fps"] == 15.0
 
 
 def test_derived_config_schema_accepts_max_analysis_fps_override():

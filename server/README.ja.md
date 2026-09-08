@@ -122,8 +122,15 @@ challenge と同じ小数第2位までの表示では FP32 と INT8 の MR-ALL �
 InsightFace リポジトリ全体の checkout で、`server/.models` にモデルを
 インストールします。
 
+初回のモデルインストールやコンテナ起動の前に、リポジトリのルートでホスト側のディレクトリを準備してください。生体検知が無効でも addon ディレクトリは必須で、存在しない場合は Compose がエラーを返します。共有 GID 10001 と setgid により、モデルインストーラーと Server の両方が書き込めます。新しいシェルでは UID/GID の export を再実行し、インストーラーをホストのユーザーで動かしてください。実行中の Server では基本モデルは読み取り専用です。
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license

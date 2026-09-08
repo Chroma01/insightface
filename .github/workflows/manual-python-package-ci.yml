@@ -46,56 +46,22 @@ jobs:
 
       - name: Check package metadata
         run: |
-          python -m twine check dist/*
+          python -m twine check --strict dist/*
 
       - name: Inspect built package contents
         run: |
           python - <<'PY'
           from pathlib import Path
-          import tarfile
-          from zipfile import ZipFile
+          import subprocess
+          import sys
 
-          wheels = sorted(Path("dist").glob("insightface-2.0-*.whl"))
-          sdists = sorted(Path("dist").glob("insightface-2.0.tar.gz"))
-          assert wheels, "No wheel was built."
-          assert sdists, "No source distribution was built."
-          wheel_path = wheels[-1]
-          sdist_path = sdists[-1]
-
-          with ZipFile(wheel_path) as archive:
-              names = archive.namelist()
-              wheel_metadata = archive.read("insightface-2.0.dist-info/WHEEL").decode()
-              package_metadata = archive.read("insightface-2.0.dist-info/METADATA").decode()
-          with tarfile.open(sdist_path, "r:gz") as archive:
-              sdist_names = archive.getnames()
-
-          assert "Root-Is-Purelib: true" in wheel_metadata
-          assert "Tag: py3-none-any" in wheel_metadata
-          assert "Requires-Dist: onnxruntime" in package_metadata
-          assert "Requires-Dist: opencv-python" in package_metadata
-          assert "Provides-Extra: gui" in package_metadata
-          assert "Requires-Dist: PySide6-Essentials" in package_metadata
-          assert "Requires-Dist: reportlab" in package_metadata
-          assert "Requires-Dist: scikit-learn" in package_metadata
-          assert "Provides-Extra: face3d" in package_metadata
-          assert "Requires-Dist: matplotlib" in package_metadata
-          assert "Requires-Dist: pandas" not in package_metadata
-          assert "Requires-Dist: easydict" not in package_metadata
-          assert "Requires-Dist: prettytable" not in package_metadata
-          assert "License: MIT" not in package_metadata
-          assert "Requires-Dist: PySide6 " not in package_metadata
-          assert "insightface/data/images/t1.jpg" in names
-          assert "insightface/data/objects/meanshape_68.pkl" in names
-          assert "insightface/gui/assets/app_icon.png" in names
-          assert "insightface/gui/assets/app_icon.ico" in names
-          assert "insightface/gui/assets/app_icon.icns" in names
-          assert any(name.endswith("insightface/gui/assets/app_icon.png") for name in sdist_names)
-          assert any(name.endswith("insightface/gui/assets/app_icon.ico") for name in sdist_names)
-          assert any(name.endswith("insightface/gui/assets/app_icon.icns") for name in sdist_names)
-          assert not any(".data/data/insightface/data/" in name for name in names)
-          assert not any(name.endswith((".so", ".pyd", ".dll", ".dylib")) for name in names)
-
-          print(f"Package inspection passed: {wheel_path}, {sdist_path}")
+          wheels = sorted(Path("dist").glob("insightface-*.whl"))
+          sdists = sorted(Path("dist").glob("insightface-*.tar.gz"))
+          assert len(wheels) == len(sdists) == 1, (wheels, sdists)
+          subprocess.check_call([
+              sys.executable, "packaging/pypi/artifact_smoke.py", "inspect",
+              "--wheel", str(wheels[0]), "--sdist", str(sdists[0]),
+          ])
           PY
 
       - name: Upload package artifacts
@@ -118,7 +84,6 @@ jobs:
           - macos-latest
           - windows-latest
         python-version:
-          - "3.9"
           - "3.10"
           - "3.11"
           - "3.12"
@@ -171,6 +136,34 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel pytest
 
+      - name: Install and smoke-test base wheel
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("insightface-*.whl"))
+          assert len(wheels) == 1, wheels
+          subprocess.check_call([sys.executable, "-m", "pip", "install", str(wheels[0])])
+          PY
+          python -m pip check
+          python packaging/pypi/artifact_smoke.py installed --profile base
+
+      - name: Install and smoke-test PrivateFrame extra
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("insightface-*.whl"))
+          assert len(wheels) == 1, wheels
+          subprocess.check_call([sys.executable, "-m", "pip", "install", f"{wheels[0]}[privateframe]"])
+          PY
+          python -m pip check
+          python packaging/pypi/artifact_smoke.py installed --profile privateframe
+
       - name: Install built wheel with GUI extra
         run: |
           python - <<'PY'
@@ -178,14 +171,15 @@ jobs:
           import sys
           from pathlib import Path
 
-          wheels = sorted(Path("dist").glob("insightface-2.0-*.whl"))
-          assert wheels, "No wheel artifact was downloaded."
-          wheel = wheels[-1]
+          wheels = sorted(Path("dist").glob("insightface-*.whl"))
+          assert len(wheels) == 1, wheels
+          wheel = wheels[0]
           subprocess.check_call([sys.executable, "-m", "pip", "install", f"{wheel}[gui]"])
           print(f"Installed package artifact: {wheel}")
           PY
 
       - name: Check PySide6 Essentials platform plugins
+        working-directory: ${{ runner.temp }}
         run: |
           python - <<'PY'
           import os
@@ -239,28 +233,9 @@ jobs:
         run: |
           python -m pip check
 
-      - name: Verify installed package and entry points
+      - name: Smoke-test installed GUI extra and entry points
         run: |
-          python - <<'PY'
-          import subprocess
-          import sys
-          import tempfile
-
-          checks = [
-              [sys.executable, "-c", "import insightface, insightface.gui; assert insightface.__version__ == '2.0'; assert insightface.gui.__version__ == '2.0'"],
-              [sys.executable, "-m", "insightface.gui", "--version"],
-              ["insightface-gui", "--version"],
-              ["insightface-eval-studio", "--version"],
-              ["insightface-desktop", "--version"],
-          ]
-          with tempfile.TemporaryDirectory() as tmp:
-              for command in checks:
-                  output = subprocess.check_output(command, text=True, cwd=tmp)
-                  if command[-1] == "--version":
-                      assert "InsightFace Evaluation Studio 2.0" in output
-                      assert "insightface 2.0" in output
-          print("Installed package and console entry points verified.")
-          PY
+          python packaging/pypi/artifact_smoke.py installed --profile gui
 
       - name: Copy GUI tests outside source tree
         run: |
@@ -277,7 +252,7 @@ jobs:
           print(f"Copied GUI tests to {target}")
           PY
 
-      - name: Run GUI and packaging tests against installed wheel
+      - name: Run GUI tests against installed wheel
         run: |
           python - <<'PY'
           import os
@@ -286,17 +261,13 @@ jobs:
           from pathlib import Path
 
           test_dir = Path(os.environ["RUNNER_TEMP"]) / "insightface-gui-tests"
-          subprocess.check_call([sys.executable, "-m", "pytest", str(test_dir), "-q"], cwd=str(test_dir.parent))
+          subprocess.check_call([
+              sys.executable, "-m", "pytest", str(test_dir), "-q", "--import-mode=importlib",
+          ], cwd=str(test_dir.parent))
           PY
 
-      - name: Run multilingual GUI tests against installed wheel
+      # Packaging contracts and server fixtures require the checkout. This also
+      # covers addons, model_zoo, PrivateFrame, GUI, telemetry, and release tests.
+      - name: Run complete source release test suite
         run: |
-          python - <<'PY'
-          import os
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          test_file = Path(os.environ["RUNNER_TEMP"]) / "insightface-gui-tests" / "test_i18n.py"
-          subprocess.check_call([sys.executable, "-m", "pytest", str(test_file), "-q"], cwd=str(test_file.parent.parent))
-          PY
+          python -m pytest -q tests

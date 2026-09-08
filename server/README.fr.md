@@ -132,8 +132,15 @@ configuration de production.
 Depuis un checkout complet d’InsightFace, installez un modèle dans
 `server/.models` :
 
+Avant la première installation de modèle ou le démarrage des conteneurs, préparez les répertoires hôtes depuis la racine du dépôt. Le répertoire des addons est requis même lorsque la détection du vivant est désactivée ; Compose signale une erreur s’il manque. Le GID partagé 10001 et setgid permettent à l’installateur et au Server d’y écrire. Répétez les exports UID/GID dans chaque nouveau shell pour utiliser votre utilisateur hôte. Les modèles de base restent en lecture seule dans le Server.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license

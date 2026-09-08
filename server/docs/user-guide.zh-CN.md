@@ -17,8 +17,15 @@ ONNX Runtime、Python或OpenCV。
 
 CPU启动示例：
 
+首次安装模型或启动容器前，请在仓库根目录准备宿主机目录。即使活体检测关闭，也必须创建 addon 目录；缺少目录时 Compose 会报错。共享 GID 10001 和 setgid 权限使模型安装器与 Server 都可写入该目录。每次打开新终端都要重新导出 UID/GID，让安装器使用当前宿主机用户。Server 运行时基础模型仍为只读。
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l
 docker compose -f server/deploy/compose.cpu.yml up -d
@@ -91,15 +98,11 @@ embedding；活体功能不改变识别模型摘要或 `embedding_contract_id`�
 
 ### 网页下载所需的挂载与权限
 
-Compose 保持 `/models` 只读，只把宿主机 `server/.models/addons` 单独可写挂载到
-`/models/addons`；整个 `server/config` 目录可写挂载到 `/etc/insightface`，使 Server
-能够原子保存 `server.toml`。Linux 部署在仓库根目录执行以下一次性准备，为 Server
-用户（UID/GID 10001）开放这几个路径的权限：
+Compose 保持 `/models` 只读，只把 `server/.models/addons` 单独可写挂载到 `/models/addons`。使用当前 Compose 文件安装模型或启动容器前，请先完成上面的初始目录准备；升级已有部署时也需执行。若要使用网页操作，还需给 Server 用户（UID/GID 10001）开放整个配置目录的写权限：`server/config` 挂载到 `/etc/insightface`，用于原子保存 `server.toml`。在 Linux 宿主机的仓库根目录执行：
 
 ```bash
-mkdir -p server/.models/addons
-sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
-sudo chmod g+rws server/.models/addons server/config
+sudo chgrp 10001 server/config server/config/server.toml
+sudo chmod g+rwxs server/config
 sudo chmod g+rw server/config/server.toml
 docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 ```

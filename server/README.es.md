@@ -132,8 +132,15 @@ configuración de producción.
 Desde un checkout completo de InsightFace, instale un modelo en
 `server/.models`:
 
+Antes de instalar el primer modelo o iniciar los contenedores, prepare los directorios del host desde la raíz del repositorio. El directorio de addons es obligatorio incluso con liveness desactivado; Compose devuelve un error si falta. El GID compartido 10001 y setgid permiten escribir tanto al instalador como al Server. Repita las exportaciones de UID/GID en cada nueva terminal para que el instalador use su usuario del host. Los modelos base siguen siendo de solo lectura en el Server.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license

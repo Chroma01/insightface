@@ -900,8 +900,12 @@ class PrivateFramePage(BasePage):
         self.analysis_mode = QComboBox()
         self.analysis_mode.setObjectName("privateFrameAnalysisMode")
         self.analysis_mode.setProperty("i18nItems", True)
-        self.analysis_mode.addItem("Normal (target 30 analysis FPS)", 30)
-        self.analysis_mode.addItem("Fast (target 15 analysis FPS)", 15)
+        for value, label, default_label in (
+            (15, "Fast (target 15 analysis FPS)", "Fast (default, target 15 analysis FPS)"),
+            (30, "Normal (target 30 analysis FPS)", "Normal (default, target 30 analysis FPS)"),
+        ):
+            source = default_label if value == self._base_value("scan.max_analysis_fps") else label
+            self.analysis_mode.addItem(source, value)
         analysis_fps_tooltip = "Regular face detections per second of input video. Higher values check faces more often; lower values reduce work for faster processing but may miss brief appearances. Extra scans may occur. Output video FPS is unchanged. Current default: {default}."
         self.analysis_mode.setToolTip(analysis_fps_tooltip)
         self.redaction_method = QComboBox()

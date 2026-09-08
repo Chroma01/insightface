@@ -127,8 +127,8 @@ def test_reference_explains_flat_photo_selection_and_unknown_policy(contract):
 
 def test_changed_default_changes_reference_and_fingerprint(contract):
     changed = deepcopy(contract)
-    changed["defaults"]["scan"]["max_analysis_fps"] = 15
-    changed["dotted_options"]["scan.max_analysis_fps"]["default"] = 15
+    changed["defaults"]["scan"]["max_analysis_fps"] = 30
+    changed["dotted_options"]["scan.max_analysis_fps"]["default"] = 30
     assert contract_fingerprint(changed) != contract_fingerprint(contract)
     assert generate_reference(changed) != generate_reference(contract)
 

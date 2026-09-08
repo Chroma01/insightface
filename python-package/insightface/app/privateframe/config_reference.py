@@ -43,7 +43,7 @@ recognition.unknown_action|Action for unmatched or uncertain people: auto resolv
 recognition.profile|Set the default cap of 1, 3, or 5 eligible temporal identity samples per track for fast, balanced, or accurate; max_frames_per_track can override this cap.
 recognition.similarity_threshold|Base cosine similarity gate for identity confirmation; temporal-evidence offsets and other recognition gates still apply.
 recognition.max_frames_per_track|Optional explicit limit of 1–32 identity samples per track; absent or null uses the recognition profile.
-scan.max_analysis_fps|Soft ceiling on regular detector samples per second of input video; integer stride uses 5% tolerance and forced scans may exceed it. Lower sampling can reduce processing work; this is not a wall-clock throughput target, and output FPS is unchanged.
+scan.max_analysis_fps|Default Fast mode targets 15 regular detector samples per second of input video; this is a soft ceiling, integer stride uses 5% tolerance, and forced scans may exceed it. Use 30 for greater temporal coverage. This is not a wall-clock throughput target, and output FPS is unchanged.
 scan.session_sharing|Permit concurrent or serialized calls to the shared full-frame detector session.
 scan.workers|Number of concurrent full-frame scanning workers.
 scan.pipeline_depth|Number of video frames allowed in the scan pipeline queue.

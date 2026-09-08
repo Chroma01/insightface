@@ -1,7 +1,7 @@
 # GUI Packaging and Distribution
 
-InsightFace Evaluation Studio supports development installs, PyPI package
-installs, and desktop application builds.
+InsightFace Evaluation Studio requires Python 3.10 or newer and supports
+development installs, PyPI package installs, and desktop application builds.
 
 ## Development Install
 
@@ -61,16 +61,21 @@ The chosen parameter name is `--with-face3d`.
 
 ## Upload PyPI
 
-The repository includes a guarded release helper for official PyPI. It builds
-the source distribution and wheel, runs the GUI release smoke tests, checks that
-the version is not already published, runs `twine check`, and asks for explicit
-confirmation before upload.
+The repository includes a guarded release helper for official PyPI. It runs
+the complete Python test suite (GUI, PrivateFrame, models, liveness, telemetry,
+and packaging), checks that the version is not already published, builds the
+source distribution and wheel, validates their metadata and packaged assets,
+runs `twine check --strict`, and asks for explicit confirmation before upload.
+
+Install the GUI extra to provide the dependencies for the complete test suite.
+Tests use Qt's offscreen platform by default and do not require model downloads.
 
 Dry run:
 
 ```bash
 cd python-package
 python -m pip install build twine pytest
+python -m pip install -e ".[gui]"
 bash packaging/pypi/build_upload_pypi.sh --dry-run
 ```
 
@@ -90,15 +95,28 @@ optional extension enabled, run:
 bash packaging/pypi/build_upload_pypi.sh --with-face3d
 ```
 
-Manual equivalent:
+Each invocation builds into a fresh temporary output directory. Only that
+build's validated wheel and source distribution can be uploaded; their package
+name, version, and Python requirement must match the release policy. Copies are
+saved in `dist/` for inspection. `--no-clean` retains existing caches and files,
+but older or unrelated distributions are excluded from validation and upload.
+
+To run the complete test suite independently, from `python-package`:
 
 ```bash
-cd python-package
-python -m pip install build twine
-python -m build
-python -m twine check dist/*
-python -m twine upload dist/*
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests
 ```
+
+`pytest.ini` uses importlib collection so tests with the same filename in
+different modules can run together. `--dry-run` runs tests and builds without
+uploading; `--skip-tests` explicitly skips the test suite. Calling
+`python -m build` or `twine upload` directly does not run these release tests.
+
+On GitHub, **Actions > Manual Python Package CI > Run workflow** starts the
+manual workflow. It checks the artifacts, base/PrivateFrame/GUI installations,
+installed-wheel GUI tests, and the complete source suite across the configured
+operating systems and Python versions. It does not upload to PyPI or run on
+ordinary pushes.
 
 Only project maintainers or CI configured with PyPI Trusted Publisher should
 upload official PyPI releases. Codex should not attempt to upload PyPI.

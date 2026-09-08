@@ -54,12 +54,13 @@ services:
         bind:
           create_host_path: false
       # Only addons and the configuration directory are writable by the Web UI.
-      # See the user guide for host permissions required by UID/GID 10001.
+      # Prepare this host directory with shared GID 10001 before install/startup.
+      # See the initial setup in the README or user guide.
       - type: bind
         source: *addons-path
         target: /models/addons
         bind:
-          create_host_path: true
+          create_host_path: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=128m
     cap_drop: [ALL]
@@ -73,6 +74,7 @@ services:
     platform: linux/amd64
     init: true
     read_only: true
+    # Export INSIGHTFACE_MODELS_UID=$(id -u) and INSIGHTFACE_MODELS_GID=$(id -g).
     user: "${INSIGHTFACE_MODELS_UID:-1000}:${INSIGHTFACE_MODELS_GID:-1000}"
     group_add: ["10001"]
     entrypoint: ["python", "-m", "insightface_server.models_cli"]

@@ -124,8 +124,15 @@ INT8은 FP32 대비 실측 용량 3.73배, 10M Top-5 처리량 3.35배를 기록
 
 전체 InsightFace 저장소 checkout에서 모델을 `server/.models`에 설치합니다.
 
+첫 모델 설치나 컨테이너 시작 전에 저장소 루트에서 호스트 디렉터리를 준비하세요. 생체 감지가 꺼져 있어도 addon 디렉터리는 필수이며, 없으면 Compose가 오류를 반환합니다. 공유 GID 10001과 setgid 권한으로 모델 설치 도구와 Server 모두 이 디렉터리에 쓸 수 있습니다. 새 셸을 열 때마다 UID/GID를 다시 내보내 설치 도구가 현재 호스트 사용자로 실행되도록 하세요. 실행 중인 Server에서 기본 모델은 계속 읽기 전용입니다.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license

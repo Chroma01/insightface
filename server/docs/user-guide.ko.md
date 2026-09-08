@@ -14,8 +14,15 @@
 
 CPU 버전에는 Linux x86_64, Docker Engine, Docker Compose가 필요합니다. CUDA 버전에는 호환 NVIDIA Driver와 NVIDIA Container Toolkit도 필요하지만 호스트 CUDA, cuDNN, ORT, Python, OpenCV는 설치하지 않아도 됩니다.
 
+첫 모델 설치나 컨테이너 시작 전에 저장소 루트에서 호스트 디렉터리를 준비하세요. 생체 감지가 꺼져 있어도 addon 디렉터리는 필수이며, 없으면 Compose가 오류를 반환합니다. 공유 GID 10001과 setgid 권한으로 모델 설치 도구와 Server 모두 이 디렉터리에 쓸 수 있습니다. 새 셸을 열 때마다 UID/GID를 다시 내보내 설치 도구가 현재 호스트 사용자로 실행되도록 하세요. 실행 중인 Server에서 기본 모델은 계속 읽기 전용입니다.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l
 docker compose -f server/deploy/compose.cpu.yml up -d
@@ -60,12 +67,11 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 
 ### Web 다운로드를 위한 마운트와 권한
 
-Compose는 `/models`를 읽기 전용으로 유지하고 `server/.models/addons`만 `/models/addons`에 쓰기 가능하게 별도 마운트합니다. `server.toml`을 원자적으로 저장할 수 있도록 `server/config` 디렉터리 전체를 `/etc/insightface`에 쓰기 가능하게 마운트합니다. Linux에서는 제공 이미지의 Server 사용자(UID/GID 10001)를 위해 저장소 루트에서 다음 준비를 한 번 수행하세요.
+Compose는 `/models`를 읽기 전용으로 유지하고 `server/.models/addons`만 `/models/addons`에 쓰기 가능하게 마운트합니다. 기존 배포를 업그레이드할 때도 현재 Compose 파일로 모델을 설치하거나 시작하기 전에 위의 초기 디렉터리 준비를 완료하세요. Web 작업에는 Server 사용자(UID/GID 10001)가 `/etc/insightface`에 마운트된 `server/config` 전체에 쓸 수 있는 권한도 필요합니다. 이 권한으로 `server.toml`을 원자적으로 저장합니다. Linux의 저장소 루트에서 실행하세요.
 
 ```bash
-mkdir -p server/.models/addons
-sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
-sudo chmod g+rws server/.models/addons server/config
+sudo chgrp 10001 server/config server/config/server.toml
+sudo chmod g+rwxs server/config
 sudo chmod g+rw server/config/server.toml
 docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 ```

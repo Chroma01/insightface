@@ -90,10 +90,12 @@ automatically.**
    and provider selected under **Models**. PrivateFrame enables processing only
    for `raccoon_s` or `raccoon_l`; a missing Raccoon package can be downloaded
    to the displayed global model root on first use, while an invalid installed
-   V2 package is reported before processing starts. Choose **Normal (up to 30
-   FPS)** or **Fast (up to 15 FPS)**, a privacy policy, and Gaussian / Mosaic,
-   then process it directly through the PrivateFrame Python API on a background
-   worker. The output directory initially uses the
+   V2 package is reported before processing starts. Keep **Fast (default, target
+   15 analysis FPS)** or choose **Normal (target 30 analysis FPS)** for denser
+   sampling, then select a privacy policy and Gaussian / Mosaic. These are
+   regular detection sampling targets, not output FPS or processing speed.
+   Processing runs through the PrivateFrame Python API on a background worker.
+   The output directory initially uses the
    operating system's Videos directory (Movies on macOS), and remains editable.
    The page always writes
    `<video>_privateframe.json` to the selected output directory. Choose

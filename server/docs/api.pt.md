@@ -48,6 +48,8 @@ auto_download = ["liveness"]
 
 `inference.addons` controla a execução e `addons.auto_download` a descarga adicional na instalação do pacote base. Com `["liveness"]`, o addon é instalado mesmo com o pacote base em cache. Não há descarga no arranque. Instalador e Server leem o mesmo ficheiro.
 
+Antes destes comandos de instalação, prepare os diretórios do host e exporte UID/GID conforme a [configuração inicial do guia do utilizador](user-guide.pt.md).
+
 ```bash
 docker compose -f server/deploy/compose.cpu.yml run --rm models addons install liveness
 docker compose -f server/deploy/compose.cpu.yml run --rm models addons verify liveness

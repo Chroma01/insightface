@@ -85,7 +85,7 @@ DESCRIBE_OPTION_METADATA = {
     ),
     "scan.max_analysis_fps": {
         # The full sampling explanation and tuning guidance live in the shared metadata.
-        "when_to_use": "Keep 30 for coverage; lower to 15 for faster processing, especially with limited motion.",
+        "when_to_use": "Keep the default Fast mode (15) for faster processing; use 30 for greater temporal coverage, fast motion, or frequent occlusion.",
         "tradeoff": "Wider sampling gaps can miss briefly visible faces. Higher sampling costs more compute and is not a detection guarantee.",
     },
     "tracking.between_scan_frames": _option(

@@ -21,11 +21,11 @@ Usage:
   bash packaging/pypi/build_upload_pypi.sh [options]
 
 Options:
-  --dry-run              Build and run twine check only. Do not upload.
-  --skip-tests           Skip the local pytest release smoke suite.
+  --dry-run              Run tests, build and validate packages. Do not upload.
+  --skip-tests           Skip the local pytest release suite.
   --allow-dirty          Allow publishing from a dirty git working tree.
   --with-face3d          Include the optional face3d Cython/C++ extension.
-  --no-clean             Keep existing build/, dist/, and *.egg-info files.
+  --no-clean             Keep existing build caches and dist files; upload only this build.
   --skip-existing-check  Skip the PyPI "version already exists" check.
   --repository NAME      Twine repository name. Defaults to "pypi".
   --python PATH          Python executable to use. Defaults to $PYTHON_BIN or python.
@@ -100,7 +100,7 @@ fi
 cd "${PACKAGE_ROOT}"
 
 echo "==> Package root: ${PACKAGE_ROOT}"
-echo "==> Python: $(${PYTHON_BIN} -c 'import sys; print(sys.executable)')"
+echo "==> Python: $("${PYTHON_BIN}" -c 'import sys; print(sys.executable)')"
 
 read -r PACKAGE_NAME PACKAGE_VERSION < <("${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
@@ -159,8 +159,8 @@ if missing:
 PY
 
 if [[ "${SKIP_TESTS}" -ne 1 ]]; then
-  echo "==> Running release smoke tests"
-  "${PYTHON_BIN}" -m pytest -q tests/gui
+  echo "==> Running the complete release test suite"
+  QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}" "${PYTHON_BIN}" -m pytest -q tests
 else
   echo "==> Skipping tests"
 fi
@@ -201,14 +201,57 @@ else
   echo "==> face3d build: disabled"
 fi
 
+RELEASE_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/insightface-release.XXXXXXXX")"
+trap 'rm -rf -- "${RELEASE_WORK_DIR}"' EXIT
+RELEASE_DIST_DIR="${RELEASE_WORK_DIR}/dist"
+
 echo "==> Building source distribution and wheel"
-"${PYTHON_BIN}" -m build
+"${PYTHON_BIN}" -m build --outdir "${RELEASE_DIST_DIR}"
+
+echo "==> Validating this build's package name, version and Python requirement"
+"${PYTHON_BIN}" packaging/pypi/release_artifacts.py \
+  --dist-dir "${RELEASE_DIST_DIR}" --name "${PACKAGE_NAME}" --version "${PACKAGE_VERSION}" \
+  > "${RELEASE_WORK_DIR}/artifacts.list"
+RELEASE_ARTIFACTS=()
+while IFS= read -r -d '' artifact; do
+  RELEASE_ARTIFACTS+=("${artifact}")
+done < "${RELEASE_WORK_DIR}/artifacts.list"
+
+INSPECT_OPTIONS=(inspect)
+if [[ "${WITH_FACE3D}" -eq 1 ]]; then
+  INSPECT_OPTIONS+=(--allow-native)
+fi
+"${PYTHON_BIN}" packaging/pypi/artifact_smoke.py "${INSPECT_OPTIONS[@]}" \
+  --wheel "${RELEASE_ARTIFACTS[0]}" --sdist "${RELEASE_ARTIFACTS[1]}"
 
 echo "==> Checking distributions"
-"${PYTHON_BIN}" -m twine check dist/*
+"${PYTHON_BIN}" -m twine check --strict "${RELEASE_ARTIFACTS[@]}"
 
-echo "==> Built artifacts"
-ls -lh dist
+echo "==> Saving validated artifacts in dist/"
+"${PYTHON_BIN}" - "${RELEASE_ARTIFACTS[@]}" <<'PY'
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+destination = Path("dist")
+destination.mkdir(exist_ok=True)
+for source_name in sys.argv[1:]:
+    source = Path(source_name)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=destination, delete=False) as output:
+            temporary = Path(output.name)
+            with source.open("rb") as stream:
+                shutil.copyfileobj(stream, output)
+        target = destination / source.name
+        os.replace(temporary, target)
+        print(f"{target}: {source.stat().st_size:,} bytes")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+PY
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "Dry run complete. No upload was performed."
@@ -227,8 +270,8 @@ if [[ "${CONFIRMATION}" != "${EXPECTED}" ]]; then
   exit 1
 fi
 
-echo "==> Uploading to official PyPI"
-"${PYTHON_BIN}" -m twine upload --repository "${REPOSITORY}" dist/*
+echo "==> Uploading this build's validated artifacts to official PyPI"
+"${PYTHON_BIN}" -m twine upload --repository "${REPOSITORY}" "${RELEASE_ARTIFACTS[@]}"
 
 cat <<RELEASE_DONE
 

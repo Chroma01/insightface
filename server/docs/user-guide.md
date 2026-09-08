@@ -18,8 +18,15 @@ Toolkit. Do not install host CUDA, cuDNN, ONNX Runtime, Python, or OpenCV.
 
 CPU example:
 
+Before the first model install or container startup, prepare the host directories from the repository root. The addon directory is required even with liveness disabled; Compose reports an error if it is missing. Shared GID 10001 and setgid allow both the model installer and Server to write there. Repeat the UID/GID exports in each new shell so the installer uses your host user. Base models remain read-only in the running Server.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l
 docker compose -f server/deploy/compose.cpu.yml up -d
@@ -99,16 +106,11 @@ does not change the recognition model digest or `embedding_contract_id`.
 
 ### Web download permissions
 
-Compose keeps `/models` read-only and mounts only `server/.models/addons` at
-`/models/addons` writable. It mounts the whole `server/config` directory at
-`/etc/insightface` writable so the Server can atomically save `server.toml`.
-On Linux, prepare these host paths for the Server user (UID/GID 10001), from the
-repository root, before using the Web action:
+Compose keeps `/models` read-only and mounts only `server/.models/addons` at `/models/addons` writable. Complete the initial directory preparation above before installing models or starting the current Compose files, including when upgrading an existing deployment. For the Web action, also grant the Server user (UID/GID 10001) write access to the whole `server/config` directory mounted at `/etc/insightface`, so it can atomically save `server.toml`. Run from the repository root on Linux:
 
 ```bash
-mkdir -p server/.models/addons
-sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
-sudo chmod g+rws server/.models/addons server/config
+sudo chgrp 10001 server/config server/config/server.toml
+sudo chmod g+rwxs server/config
 sudo chmod g+rw server/config/server.toml
 docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 ```

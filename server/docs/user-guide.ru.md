@@ -14,8 +14,15 @@
 
 Для CPU нужны Linux x86_64, Docker Engine и Docker Compose. Для CUDA также нужны совместимый драйвер NVIDIA и NVIDIA Container Toolkit; устанавливать CUDA, cuDNN, ORT, Python или OpenCV на хост не требуется.
 
+Перед первой установкой модели или запуском контейнеров подготовьте каталоги хоста из корня репозитория. Каталог addons необходим даже при отключённой проверке живого лица; если его нет, Compose сообщает об ошибке. Общий GID 10001 и setgid позволяют установщику моделей и Server записывать в него. Повторяйте экспорт UID/GID в каждой новой оболочке, чтобы установщик работал от имени вашего пользователя хоста. Базовые модели остаются доступны Server только для чтения.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l
 docker compose -f server/deploy/compose.cpu.yml up -d
@@ -65,12 +72,11 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 
 ### Монтирование и права для загрузки через Web
 
-Compose сохраняет `/models` только для чтения и отдельно монтирует `server/.models/addons` с записью в `/models/addons`. Весь каталог `server/config` доступен для записи в `/etc/insightface`, чтобы атомарно сохранять `server.toml`. В Linux один раз подготовьте эти пути из корня репозитория для пользователя Server поставляемого образа (UID/GID 10001):
+Compose сохраняет `/models` только для чтения и отдельно монтирует `server/.models/addons` с записью в `/models/addons`. Выполните начальную подготовку каталогов выше перед установкой моделей или запуском с текущими файлами Compose, в том числе при обновлении существующего развёртывания. Для Web-действия также дайте пользователю Server (UID/GID 10001) запись во весь каталог `server/config`, смонтированный в `/etc/insightface`, чтобы атомарно сохранять `server.toml`. В Linux из корня репозитория:
 
 ```bash
-mkdir -p server/.models/addons
-sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
-sudo chmod g+rws server/.models/addons server/config
+sudo chgrp 10001 server/config server/config/server.toml
+sudo chmod g+rwxs server/config
 sudo chmod g+rw server/config/server.toml
 docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 ```

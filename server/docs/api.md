@@ -141,6 +141,8 @@ auto_download = ["liveness"]
 
 `inference.addons` controls runtime use; `addons.auto_download` independently controls installation. Setting the latter to `["liveness"]` installs the addon alongside any supported base package, including a cached base package. Server startup never downloads models. Installer and Server read the same configuration file.
 
+Before running these installer commands, complete the host-directory preparation and UID/GID exports in the [initial user-guide setup](user-guide.md).
+
 ```bash
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l --accept-license
 # Or install only the addon:

@@ -396,7 +396,7 @@ def test_privateframe_primary_options_reflow_without_losing_values(tmp_path):
     context = Context()
     context.config = config
     page = PrivateFramePage(context)
-    page.analysis_mode.setCurrentIndex(page.analysis_mode.findData(15))
+    page.analysis_mode.setCurrentIndex(page.analysis_mode.findData(30))
     page.redaction_method.setCurrentIndex(page.redaction_method.findData("mosaic"))
     fields = [
         page.redaction_method,
@@ -425,7 +425,7 @@ def test_privateframe_primary_options_reflow_without_losing_values(tmp_path):
     assert {column for _row, column in narrow_positions} == {1}
     assert page.options_grid.count() == 4
     assert narrow_height > wide_height
-    assert page.analysis_mode.currentData() == 15
+    assert page.analysis_mode.currentData() == 30
     assert page.redaction_method.currentData() == "mosaic"
 
     page.resizeEvent(QResizeEvent(QSize(1100, 900), QSize(540, 900)))
@@ -439,7 +439,7 @@ def test_privateframe_primary_options_reflow_without_losing_values(tmp_path):
     assert [
         _grid_position_for_widget(page.options_grid, field)[0] for field in fields
     ] == list(range(2))
-    assert page.analysis_mode.currentData() == 15
+    assert page.analysis_mode.currentData() == 30
     assert page.redaction_method.currentData() == "mosaic"
     page.close()
 
@@ -862,13 +862,14 @@ def test_privateframe_page_has_non_blocking_controls(tmp_path):
     )
     assert not hasattr(page, "model_package")
     assert page.analysis_mode.count() == 2
-    assert page.analysis_mode.currentData() == 30
+    assert page.analysis_mode.currentData() == 15
     assert page.analysis_fps_label.text() == "Target analysis FPS"
-    assert page.analysis_mode.itemText(0) == "Normal (target 30 analysis FPS)"
-    assert page.analysis_mode.itemText(1) == "Fast (target 15 analysis FPS)"
-    assert page.analysis_mode.itemData(1) == 15
+    assert page.analysis_mode.itemText(0) == "Fast (default, target 15 analysis FPS)"
+    assert page.analysis_mode.itemText(1) == "Normal (target 30 analysis FPS)"
+    assert page.analysis_mode.itemData(0) == 15
+    assert page.analysis_mode.itemData(1) == 30
     assert "per second of input video" in page.analysis_mode.toolTip()
-    assert "Current default: 30" in page.analysis_mode.toolTip()
+    assert "Current default: 15" in page.analysis_mode.toolTip()
     assert "lower values reduce work for faster processing" in page.analysis_mode.toolTip()
     assert "may miss brief appearances" in page.analysis_mode.toolTip()
     assert "Output video FPS is unchanged" in page.analysis_mode.toolTip()
@@ -1087,15 +1088,17 @@ def test_privateframe_core_controls_are_localized_in_every_gui_language(
 
     assert page.analysis_fps_label.text() == tr("Target analysis FPS", language)
     assert page.analysis_mode.itemText(0) == tr(
-        "Normal (target 30 analysis FPS)", language
+        "Fast (default, target 15 analysis FPS)", language
     )
     assert page.analysis_mode.itemText(1) == tr(
-        "Fast (target 15 analysis FPS)", language
+        "Normal (target 30 analysis FPS)", language
     )
-    assert page.analysis_mode.currentData() == 30
-    assert page.analysis_mode.itemData(1) == 15
+    assert page.analysis_mode.currentText() != "Fast (default, target 15 analysis FPS)"
+    assert page.analysis_mode.currentData() == 15
+    assert page.analysis_mode.itemData(0) == 15
+    assert page.analysis_mode.itemData(1) == 30
     tooltip_source = "Regular face detections per second of input video. Higher values check faces more often; lower values reduce work for faster processing but may miss brief appearances. Extra scans may occur. Output video FPS is unchanged. Current default: {default}."
-    assert page.analysis_mode.toolTip() == tr(tooltip_source, language).format(default="30")
+    assert page.analysis_mode.toolTip() == tr(tooltip_source, language).format(default="15")
     assert page.analysis_mode.toolTip() != tooltip_source
     assert page.analysis_fps_label.toolTip() == page.analysis_mode.toolTip()
     assert page.video_input.dialog_filter == (
@@ -1134,6 +1137,7 @@ def test_privateframe_dynamic_content_retranslates_without_losing_values(tmp_pat
         ui_language="en",
     )
     page = PrivateFramePage(SimpleNamespace(config=config))
+    page.analysis_mode.setCurrentIndex(page.analysis_mode.findData(30))
     source = tmp_path / "holiday.mp4"
     source.write_bytes(b"video")
     output_dir = tmp_path / "output"
@@ -1174,6 +1178,9 @@ def test_privateframe_dynamic_content_retranslates_without_losing_values(tmp_pat
 
     apply_translations(page, "zh")
 
+    assert page.analysis_mode.currentData() == 30
+    assert page.analysis_mode.currentText() == "普通（目标分析 30 FPS）"
+    assert page.analysis_mode.itemText(0) == "快速（默认，目标分析 15 FPS）"
     assert page.stage_label.text() == "正在分析视频帧：3/10"
     assert page.progress_bar.format() == "已完成"
     assert "分析结果 JSON" in page.output_preview.text()
@@ -1184,6 +1191,9 @@ def test_privateframe_dynamic_content_retranslates_without_losing_values(tmp_pat
 
     apply_translations(page, "en")
 
+    assert page.analysis_mode.currentData() == 30
+    assert page.analysis_mode.currentText() == "Normal (target 30 analysis FPS)"
+    assert page.analysis_mode.itemText(0) == "Fast (default, target 15 analysis FPS)"
     assert page.stage_label.text() == "Analyzing video frames: 3/10"
     assert page.progress_bar.format() == "Completed"
     assert "Analysis JSON" in page.output_preview.text()
@@ -1295,7 +1305,7 @@ def test_privateframe_json_only_controls_preview_and_progress(tmp_path):
     assert "holiday_privateframe.json" in page.output_preview.text()
     assert "holiday_privateframe.mp4" not in page.output_preview.text()
     job = page._selected_job()
-    assert job.config_overrides["scan.max_analysis_fps"] == 30
+    assert job.config_overrides["scan.max_analysis_fps"] == 15
     page._last_job = job
     page._processing_progress(3, 10, "analysis")
     assert page.progress_bar.maximum() == 10
@@ -1763,13 +1773,13 @@ def test_privateframe_scrolls_in_short_window_without_forcing_it_taller(referenc
     assert page.operation_scroll.widget() is page.operation_panel
 
 
-def _configured_gui_base(tmp_path, monkeypatch, *, rate_control=None):
+def _configured_gui_base(tmp_path, monkeypatch, *, rate_control=None, analysis_fps=24):
     import yaml
     from insightface.gui.pages import privateframe_page
     from insightface.app.privateframe.base_config import read_default_config
 
     defaults = read_default_config(privateframe_page.DEFAULT_CONFIG_PATH)
-    defaults["scan"]["max_analysis_fps"] = 24
+    defaults["scan"]["max_analysis_fps"] = analysis_fps
     defaults["tracking"]["between_scan_frames"] = "visual"
     defaults["render"]["redaction"].update(method="mosaic", box_scale=1.1)
     defaults["render"]["video_output"]["preset"] = "fast"
@@ -1785,18 +1795,24 @@ def _configured_gui_base(tmp_path, monkeypatch, *, rate_control=None):
     return defaults, config_path
 
 
-def test_gui_initial_values_and_restore_read_one_packaged_base_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("analysis_fps", [24, 30])
+def test_gui_initial_values_and_restore_read_one_packaged_base_snapshot(tmp_path, monkeypatch, analysis_fps):
     from PySide6.QtWidgets import QApplication
     from insightface.gui.app import configure_qt_plugin_paths
     from insightface.gui.core.config import AppConfig
     from insightface.gui.core.i18n import apply_translations
     from insightface.gui.pages import privateframe_page
 
-    defaults, config_path = _configured_gui_base(tmp_path, monkeypatch)
+    defaults, config_path = _configured_gui_base(tmp_path, monkeypatch, analysis_fps=analysis_fps)
     configure_qt_plugin_paths()
     QApplication.instance() or QApplication([])
     page = privateframe_page.PrivateFramePage(SimpleNamespace(config=AppConfig(workspace_path=str(tmp_path), auto_load_model=False, ui_language="en")))
-    assert page.analysis_mode.currentData() == 24
+    assert page.analysis_mode.currentData() == analysis_fps
+    assert page.analysis_mode.itemText(0) == "Fast (target 15 analysis FPS)"
+    assert page.analysis_mode.itemText(1) == (
+        "Normal (default, target 30 analysis FPS)"
+        if analysis_fps == 30 else "Normal (target 30 analysis FPS)"
+    )
     assert page.redaction_method.currentData() == "mosaic"
     assert page.between_scan_frames.currentData() == "visual"
     assert page.box_scale.currentData() == 1.1
@@ -1807,7 +1823,7 @@ def test_gui_initial_values_and_restore_read_one_packaged_base_snapshot(tmp_path
     assert page.recognition_threshold.value() == 0.555
     assert not page.preserve_audio.isChecked()
     assert page.more_options_button.text() == "More Options…"
-    assert "Current default: 24" in page.analysis_mode.toolTip()
+    assert f"Current default: {analysis_fps}" in page.analysis_mode.toolTip()
     assert "default (0.555)" in page.recognition_threshold.toolTip()
     assert "will stay clear, as set in the configuration" in page.selective_privacy_note.text()
     assert "is blurred" not in page.selective_privacy_note.text()
@@ -1832,7 +1848,7 @@ def test_gui_initial_values_and_restore_read_one_packaged_base_snapshot(tmp_path
     monkeypatch.setattr(privateframe_page, "read_default_config", lambda *_args: pytest.fail("job re-read a different defaults snapshot"))
     job = page._selected_job()
     assert job.config_path == config_path
-    assert job.config_overrides["scan.max_analysis_fps"] == 24
+    assert job.config_overrides["scan.max_analysis_fps"] == analysis_fps
     assert job.config_overrides["render.redaction.box_scale"] == 1.1
     assert job.config_overrides["render.video_output.preset"] == "fast"
     assert job.config_overrides["render.video_output.rate_control"] == {"mode": "crf", "quality": 21}
@@ -1841,9 +1857,15 @@ def test_gui_initial_values_and_restore_read_one_packaged_base_snapshot(tmp_path
     assert job.config_overrides["render.video_output.audio.redacted"] == "none"
     assert page._base_defaults == defaults
     apply_translations(page, "zh")
-    assert "24" in page.analysis_mode.currentText()
+    assert str(analysis_fps) in page.analysis_mode.currentText()
     assert "{value}" not in page.analysis_mode.currentText()
-    assert "24" in page.analysis_mode.toolTip() and "{default}" not in page.analysis_mode.toolTip()
+    assert str(analysis_fps) in page.analysis_mode.toolTip() and "{default}" not in page.analysis_mode.toolTip()
+    page.analysis_mode.setCurrentIndex(page.analysis_mode.findData(15))
+    apply_translations(page, "en")
+    assert page.analysis_mode.currentData() == 15
+    assert page.analysis_mode.currentText() == "Fast (target 15 analysis FPS)"
+    page._initialize_default_controls()
+    assert page.analysis_mode.currentData() == analysis_fps
     page.close()
 
 

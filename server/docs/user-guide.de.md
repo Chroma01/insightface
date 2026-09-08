@@ -14,8 +14,15 @@ Für Liveness siehe [Konfiguration, Modellinstallation und Ergebnisse](#optional
 
 CPU benötigt Linux x86_64, Docker Engine und Docker Compose. CUDA benötigt zusätzlich einen kompatiblen NVIDIA-Treiber und NVIDIA Container Toolkit; CUDA, cuDNN, ORT, Python und OpenCV müssen nicht auf dem Host installiert sein.
 
+Bereiten Sie vor der ersten Modellinstallation oder dem Containerstart die Hostverzeichnisse vom Repository-Stamm aus vor. Das Addon-Verzeichnis ist auch bei deaktivierter Liveness erforderlich; fehlt es, meldet Compose einen Fehler. Die gemeinsame GID 10001 und setgid erlauben Installer und Server den Schreibzugriff. Wiederholen Sie die UID/GID-Exporte in jeder neuen Shell, damit der Installer Ihren Hostbenutzer verwendet. Basismodelle bleiben im laufenden Server schreibgeschützt.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l
 docker compose -f server/deploy/compose.cpu.yml up -d
@@ -60,12 +67,11 @@ Ein aktiviertes, fehlendes Modell stoppt den Start mit `addon_model_missing`; ei
 
 ### Mounts und Berechtigungen für Web-Downloads
 
-Compose hält `/models` schreibgeschützt und bindet nur `server/.models/addons` zusätzlich schreibbar unter `/models/addons` ein. Das gesamte Verzeichnis `server/config` wird schreibbar unter `/etc/insightface` eingebunden, damit `server.toml` atomar gespeichert werden kann. Bereiten Sie unter Linux diese Hostpfade einmal vom Repository-Stamm aus für den Server-Benutzer des mitgelieferten Images (UID/GID 10001) vor:
+Compose hält `/models` schreibgeschützt und bindet nur `server/.models/addons` schreibbar unter `/models/addons` ein. Führen Sie vor Modellinstallation oder Start mit den aktuellen Compose-Dateien die anfängliche Verzeichnisvorbereitung oben durch, auch bei Upgrades bestehender Installationen. Für die Web-Aktion benötigt der Server-Benutzer (UID/GID 10001) zusätzlich Schreibzugriff auf das gesamte unter `/etc/insightface` eingebundene Verzeichnis `server/config`, um `server.toml` atomar zu speichern. Unter Linux vom Repository-Stamm aus:
 
 ```bash
-mkdir -p server/.models/addons
-sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
-sudo chmod g+rws server/.models/addons server/config
+sudo chgrp 10001 server/config server/config/server.toml
+sudo chmod g+rwxs server/config
 sudo chmod g+rw server/config/server.toml
 docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 ```

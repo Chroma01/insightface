@@ -94,6 +94,8 @@ auto_download = ["liveness"]
 
 `inference.addons` 控制运行时启用；`addons.auto_download` 独立控制模型安装时的附带下载。将后者设为 `["liveness"]` 后，安装任意受支持的基础包时都会补齐 addon，基础包已缓存也一样。**启动 Server 时不下载模型。** 安装工具和 Server 读取同一份配置文件。
 
+运行以下安装命令前，请先完成[用户指南的初始准备](user-guide.zh-CN.md)，设置宿主机目录权限并导出 UID/GID。
+
 ```bash
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l --accept-license
 # 或者只安装 addon：

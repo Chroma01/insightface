@@ -34,18 +34,7 @@ def find_version(*file_paths):
         return version_match.group(1)
     raise RuntimeError("Unable to find version string.")
 
-pypandoc_enabled = True
-try:
-    import pypandoc
-    print('pandoc enabled')
-    long_description = pypandoc.convert_file('README.md', 'rst')
-except (IOError, ImportError, ModuleNotFoundError):
-    print('WARNING: pandoc not enabled')
-    long_description = read('README.md')
-    pypandoc_enabled = False
-
-#import pypandoc
-#long_description = pypandoc.convert('README.md', 'rst')
+long_description = read('README.md')
 VERSION = find_version('insightface', '__init__.py')
 
 requirements = [
@@ -176,6 +165,7 @@ setup(
     long_description=long_description,
     long_description_content_type='text/markdown',
     # Package info
+    python_requires='>=3.10',
     packages=packages,
     package_data=package_data,
     zip_safe=True,
@@ -200,5 +190,4 @@ setup(
     include_dirs=include_dirs,
 )
 
-print('pypandoc enabled:', pypandoc_enabled)
 print('face3d build enabled:', build_face3d)

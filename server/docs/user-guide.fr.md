@@ -14,8 +14,15 @@ Pour utiliser la détection du vivant, consultez [configuration, installation et
 
 La version CPU nécessite Linux x86_64, Docker Engine et Docker Compose. CUDA exige en plus un pilote NVIDIA compatible et NVIDIA Container Toolkit ; il n’est pas nécessaire d’installer CUDA, cuDNN, ORT, Python ou OpenCV sur l’hôte.
 
+Avant la première installation de modèle ou le démarrage des conteneurs, préparez les répertoires hôtes depuis la racine du dépôt. Le répertoire des addons est requis même lorsque la détection du vivant est désactivée ; Compose signale une erreur s’il manque. Le GID partagé 10001 et setgid permettent à l’installateur et au Server d’y écrire. Répétez les exports UID/GID dans chaque nouveau shell pour utiliser votre utilisateur hôte. Les modèles de base restent en lecture seule dans le Server.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l
 docker compose -f server/deploy/compose.cpu.yml up -d
@@ -60,12 +67,11 @@ Un modèle activé absent arrête le démarrage avec `addon_model_missing` ; un 
 
 ### Montages et permissions pour les téléchargements Web
 
-Compose garde `/models` en lecture seule et monte uniquement `server/.models/addons` en écriture dans `/models/addons`. Le répertoire entier `server/config` est monté en écriture dans `/etc/insightface` pour enregistrer `server.toml` de façon atomique. Sous Linux, préparez une fois ces chemins depuis la racine du dépôt pour l’utilisateur Server de l’image fournie (UID/GID 10001) :
+Compose garde `/models` en lecture seule et monte uniquement `server/.models/addons` en écriture dans `/models/addons`. Effectuez la préparation initiale des répertoires ci-dessus avant toute installation de modèle ou tout démarrage avec les fichiers Compose actuels, y compris lors d’une mise à niveau. Pour l’action Web, accordez aussi à l’utilisateur Server (UID/GID 10001) l’écriture sur tout `server/config`, monté dans `/etc/insightface`, afin d’enregistrer `server.toml` de façon atomique. Sous Linux, depuis la racine du dépôt :
 
 ```bash
-mkdir -p server/.models/addons
-sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
-sudo chmod g+rws server/.models/addons server/config
+sudo chgrp 10001 server/config server/config/server.toml
+sudo chmod g+rwxs server/config
 sudo chmod g+rw server/config/server.toml
 docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 ```

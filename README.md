@@ -17,7 +17,8 @@ analysis JSON through desktop, CLI, and Python workflows, plus optional
 [RGB liveness detection](python-package/README.md#optional-liveness-addon) for
 FaceAnalysis and InsightFace Server. The [Python package](python-package/README.md)
 also supports `raccoon_s` / `raccoon_l` model packages, automatic CoreML/CUDA/CPU
-provider selection, and reusable CoreML compilation caches.
+provider selection, and reusable CoreML compilation caches. PrivateFrame defaults
+to **Fast mode (target 15 analysis FPS)**.
 
 ## InsightFace Server
 
@@ -44,9 +45,9 @@ Both manual-downloading models from our github repo and auto-downloading models 
 
 ## ChangeLogs
 
-**`2026-09-10`** **Liveness update:** Add the optional RGB liveness addon, `normal`/`observe` modes, per-face scores and input-rejection reasons, plus Server Web model installation and activation. See [Python usage](python-package/README.md#optional-liveness-addon) and [Server usage](server/docs/user-guide.md#optional-liveness-addon).
+**`2026-09-09`** `InsightFace 2.0` **Liveness update:** Add the optional RGB liveness addon, `normal`/`observe` modes, per-face scores and input-rejection reasons, plus Server Web model installation and activation. See [Python usage](python-package/README.md#optional-liveness-addon) and [Server usage](server/docs/user-guide.md#optional-liveness-addon).
 
-**`2026-09-10`** **PrivateFrame update:** Add local video detection and tracking, Gaussian blur/mosaic, selective redaction from reference photos, reusable JSON with rendering without another inference pass, and integrated desktop, CLI, and Python API workflows. See the [feature and usage guide](python-package/insightface/app/privateframe/README.md).
+**`2026-09-09`** `InsightFace 2.0` **PrivateFrame update:** Add local video detection and tracking, Gaussian blur/mosaic, selective redaction from reference photos, reusable JSON with rendering without another inference pass, and integrated desktop, CLI, and Python API workflows. See the [feature and usage guide](python-package/insightface/app/privateframe/README.md).
 
 **`2026-07-27`** [InsightFace Server](server/) Added a simple AWS Rekognition alternative with accuracy-preserving INT8 embedding quantization and 50M+ image search on one RTX 5090 GPU.
 

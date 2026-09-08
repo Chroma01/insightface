@@ -71,22 +71,22 @@ recognition:
 
 scan:
   # Approximate ceiling on regular full-frame face detection samples per second
-  # of INPUT VIDEO. Default 30 favors temporal coverage.
+  # of INPUT VIDEO. Fast mode (15) is the default and reduces detector work.
   # This is a sampling control, not a wall-clock processing speed target; the
   # output video keeps every source frame and its original frame rate.
-  # Sampling uses a uniform integer stride with a 5% rate tolerance. At 30,
-  # 25/30 FPS input is scanned every frame and 60 FPS every 2 frames (30/s).
-  # Lowering to 15 scans 30 FPS input every 2 frames (15/s), 60 FPS every 4
-  # (15/s), and 25 FPS every 2 (12.5/s).
+  # Sampling uses a uniform integer stride with a 5% rate tolerance. At 15,
+  # 30 FPS input is scanned every 2 frames (15/s), 60 FPS every 4 (15/s),
+  # and 25 FPS every 2 (12.5/s). At 30, 25/30 FPS input is scanned every
+  # frame and 60 FPS every 2 frames (30/s).
   # Scene boundaries, endpoints, and new-track bursts may add scans, so the
   # total detector rate can exceed this soft ceiling.
-  # Lower to 15 (or e.g. 10) to reduce detector work when faster processing
-  # matters more, especially with limited motion. Wider gaps can miss briefly
-  # visible faces. Keep 30 for fast motion, frequent occlusion, or greater
+  # Keep 15 for faster processing, especially with limited motion. Lowering
+  # further (e.g. to 10) reduces work but wider gaps can miss briefly
+  # visible faces. Use 30 for fast motion, frequent occlusion, or greater
   # detection coverage; on higher-FPS input, raise to the source FPS to scan
   # every frame. More sampling costs more work and cannot guarantee detection.
   # Review representative output when changing the sampling rate.
-  max_analysis_fps: 30
+  max_analysis_fps: 15
   # Skipped frames always run decode and scene-cut detection. When the resulting
   # stride is greater than 1, the default interpolate policy reviews real
   # detector anchors and publishes reduced-assurance geometry between them

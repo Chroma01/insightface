@@ -14,8 +14,15 @@
 
 CPU 版には Linux x86_64、Docker Engine、Docker Compose が必要です。CUDA 版には対応 NVIDIA Driver と NVIDIA Container Toolkit も必要ですが、ホスト側 CUDA、cuDNN、ORT、Python、OpenCV は不要です。
 
+初回のモデルインストールやコンテナ起動の前に、リポジトリのルートでホスト側のディレクトリを準備してください。生体検知が無効でも addon ディレクトリは必須で、存在しない場合は Compose がエラーを返します。共有 GID 10001 と setgid により、モデルインストーラーと Server の両方が書き込めます。新しいシェルでは UID/GID の export を再実行し、インストーラーをホストのユーザーで動かしてください。実行中の Server では基本モデルは読み取り専用です。
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml run --rm models install buffalo_l
 docker compose -f server/deploy/compose.cpu.yml up -d
@@ -60,12 +67,11 @@ docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 
 ### Web ダウンロードのマウントと権限
 
-Compose は `/models` を読み取り専用に保ち、`server/.models/addons` だけを `/models/addons` に書き込み可能で重ねてマウントします。設定を原子的に保存するため、`server/config` ディレクトリ全体を `/etc/insightface` に書き込み可能でマウントします。Linux では、同梱イメージの Server ユーザー（UID/GID 10001）が利用できるよう、リポジトリのルートで一度だけ次を実行してください。
+Compose は `/models` を読み取り専用に保ち、`server/.models/addons` だけを `/models/addons` に書き込み可能でマウントします。既存環境のアップグレードも含め、現在の Compose ファイルでモデルをインストールしたり起動したりする前に、上記の初期ディレクトリ準備を行ってください。Web 操作にはさらに、Server ユーザー（UID/GID 10001）が `/etc/insightface` にマウントされた `server/config` 全体に書き込める必要があります。これは `server.toml` の原子的な保存に必要です。Linux のリポジトリルートで実行します：
 
 ```bash
-mkdir -p server/.models/addons
-sudo chgrp 10001 server/.models/addons server/config server/config/server.toml
-sudo chmod g+rws server/.models/addons server/config
+sudo chgrp 10001 server/config server/config/server.toml
+sudo chmod g+rwxs server/config
 sudo chmod g+rw server/config/server.toml
 docker compose -f server/deploy/compose.cpu.yml up -d --force-recreate
 ```

@@ -16,7 +16,9 @@ a separate video and a reusable analysis JSON.
 
 ## Video demo
 
-[video demo](https://example.com/privateframe-demo)
+https://github.com/user-attachments/assets/555043fc-e7a2-420c-9c98-ae64324b9867
+
+Music: [Tears in Rain](https://www.scottbuckley.com.au/library/tears-in-rain/) by Scott Buckley · [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Excerpted and mixed.
 
 ## Installation
 
@@ -62,9 +64,10 @@ insightface-gui
    the global model root and execution provider.
 2. Select a local video and an output directory. The input card shows a preview
    and video metadata.
-3. Choose **Normal (target 30 analysis FPS)** or **Fast (target 15 analysis
-   FPS)**, who to blur, and **Gaussian blur** or **Mosaic**. For either photo
-   mode, select a folder containing reference photos.
+3. Keep **Fast (default, target 15 analysis FPS)** or choose **Normal (target 30
+   analysis FPS)** for denser detection sampling. Select who to blur and
+   **Gaussian blur** or **Mosaic**. For either photo mode, select a folder
+   containing reference photos.
 4. Choose video output or **Analysis only (render video later)**. Every run
    writes an analysis JSON; video output also writes the paired MP4.
 5. Start processing. Progress and cancellation are available while the job runs
@@ -156,16 +159,18 @@ with a photo mode when you need selective matching.
 
 ## Analysis sampling rate
 
-`scan.max_analysis_fps` defaults to **30**. It controls the approximate maximum
-rate of regular full-frame detection along the video's timeline, measured in
-frames per second **of input video**. It is not a processing-speed target.
-All source frames are still decoded and rendered.
+`scan.max_analysis_fps` defaults to **15**, the **Fast** mode also selected by
+default in the GUI. **Normal (30)** provides denser sampling. The setting is a
+soft ceiling on regular full-frame detection along the video's timeline,
+measured in frames per second **of input video**. It is not output FPS or a
+processing-speed target; all source frames are still decoded and rendered at
+the source frame rate.
 
-| Source FPS | Default target 30 | Target 15 |
+| Source FPS | Fast: default target 15 | Normal: target 30 |
 |---|---|---|
-| 25 | Every frame: 25 scans/s | Every 2 frames: 12.5 scans/s |
-| 30 | Every frame: 30 scans/s | Every 2 frames: 15 scans/s |
-| 60 | Every 2 frames: 30 scans/s | Every 4 frames: 15 scans/s |
+| 25 | Every 2 frames: 12.5 scans/s | Every frame: 25 scans/s |
+| 30 | Every 2 frames: 15 scans/s | Every frame: 30 scans/s |
+| 60 | Every 4 frames: 15 scans/s | Every 2 frames: 30 scans/s |
 | 15 or below | Every frame | Every frame |
 
 Sampling uses a uniform integer interval with a 5% rate tolerance, so nearby
@@ -174,16 +179,18 @@ new tracks can add scans above this soft ceiling. By default, existing face
 regions between regular detections are interpolated; a face visible only
 between sampled frames may be missed.
 
-Keep 30 for fast motion, brief appearances, or frequent occlusion. Lower to 15
-(or 10) to reduce detector work when speed matters more, especially in scenes
-with limited motion. For higher-FPS input, raise toward the source FPS to scan
-every frame. Higher sampling costs more compute and still cannot guarantee
+The default Fast (15) reduces detector work, especially for scenes with limited
+motion. Choose Normal (30) for denser sampling with fast motion, brief
+appearances, or frequent occlusion. Lowering to 10 reduces detector work further
+but widens sampling gaps. For higher-FPS input, raise toward the source FPS to
+scan every frame. Higher sampling costs more compute and still cannot guarantee
 that every face is detected.
 
 ```bash
+# Choose denser sampling instead of the default Fast mode.
 insightface-privateframe process \
-  --input /data/video.mp4 --output-dir /data/fast \
-  --scan.max_analysis_fps 15
+  --input /data/video.mp4 --output-dir /data/normal \
+  --scan.max_analysis_fps 30
 ```
 
 ## Configuration and rendering
@@ -195,7 +202,7 @@ fields you want to change:
 ```yaml
 schema_version: 1
 scan:
-  max_analysis_fps: 15
+  max_analysis_fps: 30  # Denser sampling than the default Fast mode (15).
 render:
   redaction:
     method: mosaic
@@ -219,7 +226,7 @@ recognition changes require a new analysis.
 | `models.name` | `raccoon_s` | Select `raccoon_s` or `raccoon_l`. |
 | `models.root` | `~/.insightface` | Set the InsightFace root containing `models/`. |
 | `runtime.provider` | `auto` | Select an available ONNX Runtime execution provider. |
-| `scan.max_analysis_fps` | `30` | Control regular detection sampling. |
+| `scan.max_analysis_fps` | `15` | Fast mode by default; use 30 for denser sampling. |
 | `recognition.mode` | `all` | Choose the reference-photo policy. |
 | `recognition.profile` | `balanced` | Choose `fast`, `balanced`, or `accurate` matching, using up to 1, 3, or 5 eligible frames per track. |
 | `recognition.unknown_action` | `auto` | Set how unmatched or uncertain faces are treated. |
@@ -338,7 +345,6 @@ analysis = analyze_streaming_pipeline(
     input_path=paths.source,
     workdir=paths.workdir,
     result_path=paths.result_json,
-    config_overrides={"scan.max_analysis_fps": 30},
 )
 
 # Inspect or edit paths.result_json here before rendering.

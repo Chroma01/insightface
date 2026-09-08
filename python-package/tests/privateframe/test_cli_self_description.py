@@ -92,7 +92,8 @@ def test_describe_is_a_machine_readable_public_contract(capsys):
     assert "--no-verify-source" not in public_options
     dotted_options = payload["config"]["dotted_options"]
     sampling = dotted_options["scan.max_analysis_fps"]
-    assert sampling["default"] == 30
+    assert sampling["default"] == 15
+    assert "Fast mode" in sampling["description"]
     assert sampling["type"] == "number"
     assert sampling["unit"] == "frames_per_second_of_input_video"
     assert "wall-clock processing speed" in sampling["description"]
@@ -745,7 +746,7 @@ def test_jsonl_progress_uses_stderr_without_polluting_stdout(
 
 @pytest.mark.parametrize(
     ("override", "value"),
-    [("scan.max_analysis_fps", 15), ("tracking.kalman_optical_flow.roi_size", 256)],
+    [("scan.max_analysis_fps", 30), ("tracking.kalman_optical_flow.roi_size", 256)],
 )
 def test_dry_run_returns_a_resolved_plan_without_calling_the_pipeline(
     monkeypatch,

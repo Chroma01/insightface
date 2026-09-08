@@ -129,8 +129,15 @@ configuration.
 From a complete InsightFace repository checkout, install a model into
 `server/.models`:
 
+Before the first model install or container startup, prepare the host directories from the repository root. The addon directory is required even with liveness disabled; Compose reports an error if it is missing. Shared GID 10001 and setgid allow both the model installer and Server to write there. Repeat the UID/GID exports in each new shell so the installer uses your host user. Base models remain read-only in the running Server.
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license

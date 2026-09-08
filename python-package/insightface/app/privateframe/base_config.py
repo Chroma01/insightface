@@ -413,7 +413,7 @@ def validate_scan_passes(config: dict[str, Any]) -> None:
 
     scan = config["scan"]
     scan["max_analysis_fps"] = _validate_positive_finite(
-        scan.get("max_analysis_fps", 30),
+        scan.get("max_analysis_fps", 15),
         field="scan.max_analysis_fps",
     )
     tracking = config.get("tracking")

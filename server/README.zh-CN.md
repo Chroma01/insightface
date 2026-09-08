@@ -114,8 +114,15 @@ FP32 和 INT8 的 MR-ALL 均为 **91.25%**，未四舍五入的差异也只有 0
 
 在完整 InsightFace 仓库中，将模型安装到 `server/.models`：
 
+首次安装模型或启动容器前，请在仓库根目录准备宿主机目录。即使活体检测关闭，也必须创建 addon 目录；缺少目录时 Compose 会报错。共享 GID 10001 和 setgid 权限使模型安装器与 Server 都可写入该目录。每次打开新终端都要重新导出 UID/GID，让安装器使用当前宿主机用户。Server 运行时基础模型仍为只读。
+
 ```bash
-mkdir -p server/.models
+mkdir -p server/.models/addons
+chmod a+rx server/.models
+sudo chgrp 10001 server/.models/addons
+sudo chmod g+rwxs server/.models/addons
+export INSIGHTFACE_MODELS_UID="$(id -u)"
+export INSIGHTFACE_MODELS_GID="$(id -g)"
 docker compose -f server/deploy/compose.cpu.yml pull
 docker compose -f server/deploy/compose.cpu.yml \
   run --rm models install buffalo_l --accept-license
