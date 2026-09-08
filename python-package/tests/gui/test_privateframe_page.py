@@ -46,7 +46,7 @@ def test_privateframe_default_output_uses_platform_movies_location(
         staticmethod(lambda _location: movies_location),
     )
 
-    assert str(privateframe_page._default_privateframe_output_directory()) == (
+    assert privateframe_page._default_privateframe_output_directory() == Path(
         movies_location
     )
 
@@ -409,6 +409,10 @@ def test_privateframe_primary_options_reflow_without_losing_values(tmp_path):
         _grid_position_for_widget(page.options_grid, field) for field in fields
     ]
     wide_height = page.options_grid.sizeHint().height()
+    # Native fonts and styles determine the breakpoint, so allow ample room
+    # for the measured two-column grid instead of assuming 1100 pixels fits.
+    wide_width = 2 * page.options_grid.minimumSize().width()
+    narrow_width = min(label.minimumSizeHint().width() for label, _ in page._primary_option_rows)
 
     assert [row for row, _column in wide_positions] == [0, 0]
     assert [column for _row, column in wide_positions] == [1, 3]
@@ -428,13 +432,13 @@ def test_privateframe_primary_options_reflow_without_losing_values(tmp_path):
     assert page.analysis_mode.currentData() == 30
     assert page.redaction_method.currentData() == "mosaic"
 
-    page.resizeEvent(QResizeEvent(QSize(1100, 900), QSize(540, 900)))
+    page.resizeEvent(QResizeEvent(QSize(wide_width, 900), QSize(narrow_width, 900)))
     assert page._primary_options_two_columns is True
     assert [
         _grid_position_for_widget(page.options_grid, field)[0] for field in fields
     ] == [0, 0]
 
-    page.resizeEvent(QResizeEvent(QSize(540, 900), QSize(1100, 900)))
+    page.resizeEvent(QResizeEvent(QSize(narrow_width, 900), QSize(wide_width, 900)))
     assert page._primary_options_two_columns is False
     assert [
         _grid_position_for_widget(page.options_grid, field)[0] for field in fields
@@ -1998,6 +2002,52 @@ def test_narrow_translated_settings_fit_without_horizontal_clipping(reference_pa
         app.processEvents()
         assert page.operation_panel.width() <= page.operation_scroll.viewport().width()
     finally:
+        app.setStyleSheet(old_style)
+
+
+def test_primary_options_reflow_when_style_metrics_change(tmp_path):
+    """Late native style metrics must not leave the scroll panel too wide."""
+    from PySide6.QtWidgets import QApplication
+    from insightface.gui.app import configure_qt_plugin_paths
+    from insightface.gui.core.config import AppConfig
+    from insightface.gui.pages.privateframe_page import PrivateFramePage
+
+    configure_qt_plugin_paths()
+    app = QApplication.instance() or QApplication([])
+    old_style = app.styleSheet()
+    page = None
+    try:
+        app.setStyleSheet("* { font-family: Arial; font-size: 12px; }")
+        page = PrivateFramePage(SimpleNamespace(config=AppConfig(
+            workspace_path=str(tmp_path), auto_load_model=False, ui_language="en",
+        )))
+        page.resize(920, 640)
+        page.show()
+        app.processEvents()
+        assert page._primary_options_two_columns is True
+        initial_width = page.width()
+
+        # The width stays constant while a later style/font update makes the
+        # labels too wide to share a row, as native style polishing can do.
+        for label, _field in page._primary_option_rows:
+            label.setStyleSheet("font-size: 42px;")
+        for _ in range(3):
+            app.processEvents()
+        assert page.width() == initial_width
+        assert page._primary_options_two_columns is False
+        assert page.operation_panel.width() <= page.operation_scroll.viewport().width()
+
+        for label, _field in page._primary_option_rows:
+            label.setStyleSheet("")
+        for _ in range(3):
+            app.processEvents()
+        assert page._primary_options_two_columns is True
+        assert page.operation_panel.width() <= page.operation_scroll.viewport().width()
+    finally:
+        if page is not None:
+            page.more_options_dialog.close()
+            page.processing_details_dialog.close()
+            page.close()
         app.setStyleSheet(old_style)
 
 

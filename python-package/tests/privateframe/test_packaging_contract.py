@@ -104,7 +104,7 @@ def test_privateframe_extra_config_and_offline_reference_are_packaged(
     ]
     assert captured["extras_require"]["gui"] == [
         "PySide6-Essentials>=6.5",
-        "Pillow",
+        "Pillow>=9.1",
         "reportlab",
         "scikit-learn",
         "cryptography>=42.0.0",

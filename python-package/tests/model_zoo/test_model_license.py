@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -53,7 +53,7 @@ def _inspection(
     return inspect_model_package_license(
         package,
         expected_model_id=expected_model_id,
-        now=datetime(2026, 9, 4, tzinfo=UTC),
+        now=datetime(2026, 9, 4, tzinfo=timezone.utc),
         public_keys=(private_key.public_key(),),
     )
 
@@ -66,7 +66,7 @@ def test_strict_verifier_preserves_server_summary_contract(tmp_path: Path) -> No
     result = verify_model_license(
         license_path,
         expected_model_id="test_model",
-        now=datetime(2026, 9, 4, tzinfo=UTC),
+        now=datetime(2026, 9, 4, tzinfo=timezone.utc),
         public_keys=(private_key.public_key(),),
     )
 
@@ -396,7 +396,7 @@ def test_unreadable_or_missing_trusted_key_resource_returns_invalid_inspection(
 
     result = inspect_model_package_license(
         package,
-        now=datetime(2026, 9, 4, tzinfo=UTC),
+        now=datetime(2026, 9, 4, tzinfo=timezone.utc),
     )
 
     assert result.status == STATUS_INVALID
@@ -521,6 +521,6 @@ def test_strict_verifier_rejects_tampering(tmp_path: Path) -> None:
         verify_model_license(
             license_path,
             expected_model_id="test_model",
-            now=datetime(2026, 9, 4, tzinfo=UTC),
+            now=datetime(2026, 9, 4, tzinfo=timezone.utc),
             public_keys=(private_key.public_key(),),
         )

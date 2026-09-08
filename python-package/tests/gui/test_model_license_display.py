@@ -182,6 +182,8 @@ def test_main_window_and_license_center_refresh_without_loading_face_analysis(
 
     configure_qt_plugin_paths()
     QApplication.instance() or QApplication([])
+    # Test license refresh independently of platform font-dependent elision.
+    monkeypatch.setattr(MainWindow, "_elide", lambda self, text, width: text)
     package = tmp_path / "model-root" / "models" / "raccoon_s"
     package.mkdir(parents=True)
     config = AppConfig(

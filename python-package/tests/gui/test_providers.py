@@ -169,6 +169,8 @@ def test_main_window_and_dashboard_show_resolved_provider(
 
     configure_qt_plugin_paths()
     QApplication.instance() or QApplication([])
+    # Test provider selection independently of platform font-dependent elision.
+    monkeypatch.setattr(MainWindow, "_elide", lambda self, text, width: text)
     available = [
         "CoreMLExecutionProvider",
         "AzureExecutionProvider",

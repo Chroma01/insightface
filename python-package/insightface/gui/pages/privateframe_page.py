@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import av
 import numpy as np
-from PySide6.QtCore import QStandardPaths, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QStandardPaths, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -789,6 +789,7 @@ class PrivateFramePage(BasePage):
         self.operation_scroll.setWidgetResizable(True)
         self.operation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.operation_scroll.setWidget(self.operation_panel)
+        self.operation_panel.installEventFilter(self)
         self.content.addWidget(self.operation_scroll, 1)
 
         self.video_input = UploadPreview(
@@ -1325,6 +1326,17 @@ class PrivateFramePage(BasePage):
         super().resizeEvent(event)
         if hasattr(self, "options_grid"):
             self._fit_primary_options(event.size().width())
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            watched is getattr(self, "operation_panel", None)
+            and event.type() == QEvent.Type.LayoutRequest
+            and hasattr(self, "_primary_option_rows")
+        ):
+            # Native styles can update translated size hints after resizeEvent.
+            # Reflow when those hints settle even if the page width is unchanged.
+            self._fit_primary_options(self.width())
+        return super().eventFilter(watched, event)
 
     def _fit_primary_options(self, width: int) -> None:
         # Measure translated controls instead of reserving two rows at a fixed
