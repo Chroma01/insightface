@@ -18,7 +18,7 @@ a separate video and a reusable analysis JSON.
 
 ## Video demo
 
-https://github.com/user-attachments/assets/555043fc-e7a2-420c-9c98-ae64324b9867
+https://github.com/user-attachments/assets/2eaa0d92-7d77-4e08-9be5-cbdf1ba50f50
 
 Music: [Tears in Rain](https://www.scottbuckley.com.au/library/tears-in-rain/) by Scott Buckley · [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Excerpted and mixed.
 
